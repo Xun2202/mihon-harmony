@@ -40,9 +40,8 @@ Never commit the keystore or its passwords to this repository.
 - To publish another fork revision for the same Mihon version, manually run the workflow with the
   same upstream tag and the next patch number, for example `2`.
 - Existing GitHub releases are skipped.
-- A cherry-pick conflict, failed check, failed test, or failed build stops the workflow before a tag
+- A patch conflict, failed check, failed test, or failed build stops the workflow before a tag
   or release is created.
 
-Harmony-only changes must be committed on `main`, then their commit IDs added in order to
-`.github/harmony-patches.txt`. Keep those commits focused so they can be cherry-picked cleanly onto
-future Mihon stable tags.
+Harmony-only changes are maintained in `.github/patches/harmony.patch`. Keep the patch focused and
+small so it can be applied cleanly onto future Mihon stable tags.

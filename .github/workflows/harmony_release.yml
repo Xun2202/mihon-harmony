@@ -88,7 +88,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          cp .github/harmony-patches.txt "$RUNNER_TEMP/harmony-patches.txt"
+          cp .github/patches/harmony.patch "$RUNNER_TEMP/harmony.patch"
           git remote add upstream https://github.com/mihonapp/mihon.git
           git fetch --no-tags upstream "refs/tags/$UPSTREAM_TAG"
           git checkout --detach FETCH_HEAD
@@ -96,10 +96,13 @@ jobs:
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
 
-          while IFS= read -r commit; do
-            [[ -z "$commit" || "$commit" == \#* ]] && continue
-            git cherry-pick "$commit"
-          done < "$RUNNER_TEMP/harmony-patches.txt"
+          git apply --3way "$RUNNER_TEMP/harmony.patch"
+          git add \
+            README.md \
+            app/src/main/java/eu/kanade/tachiyomi/data/download/Downloader.kt \
+            core/common/src/main/kotlin/tachiyomi/core/common/storage/UniFileExtensions.kt \
+            core/common/src/test/java/tachiyomi/core/common/storage/UniFileExtensionsTest.kt
+          git commit -m "Apply Harmony compatibility patches"
 
           upstream_version="${UPSTREAM_TAG#v}"
           upstream_version_code="$(sed -nE 's/^[[:space:]]*versionCode = ([0-9]+)$/\1/p' app/build.gradle.kts | head -n 1)"
