@@ -97,6 +97,57 @@ jobs:
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
 
           git apply --3way "$RUNNER_TEMP/harmony.patch"
+          python3 <<'PY'
+          from pathlib import Path
+
+          path = Path("app/src/main/java/eu/kanade/tachiyomi/data/download/Downloader.kt")
+          text = path.read_text()
+
+          def replace_once(old: str, new: str) -> None:
+              global text
+              if old not in text:
+                  raise SystemExit(f"Missing Downloader.kt patch pattern: {old!r}")
+              text = text.replace(old, new, 1)
+
+          import_anchor = "import tachiyomi.core.common.i18n.stringResource\n"
+          imports = [
+              "import tachiyomi.core.common.storage.extension\n",
+              "import tachiyomi.core.common.storage.renameToOrCopy\n",
+          ]
+          missing_imports = "".join(import_line for import_line in imports if import_line not in text)
+          if missing_imports:
+              replace_once(import_anchor, import_anchor + missing_imports)
+
+          replace_once(
+              "                tmpDir.renameTo(chapterDirname)\n",
+              "                val chapterDir = tmpDir.renameToOrCopy(chapterDirname)\n"
+              "                DiskUtil.createNoMediaFile(chapterDir, context)\n",
+          )
+          replace_once("\n            DiskUtil.createNoMediaFile(tmpDir, context)\n", "\n")
+          replace_once(
+              "\n            try {\n                source.getImage",
+              "\n            val completedFile = try {\n                source.getImage",
+          )
+          replace_once(
+              '                    file.renameTo("$filename.$extension")\n',
+              '                    file.renameToOrCopy("$filename.$extension")\n',
+          )
+          replace_once("            emit(file)\n", "            emit(completedFile)\n")
+          replace_once(
+              '        tmpFile.renameTo("$filename.${extension.extension}")\n'
+              "        cacheFile.delete()\n"
+              "        return tmpFile\n",
+              '        val imageFile = tmpFile.renameToOrCopy("$filename.${extension.extension}")\n'
+              "        cacheFile.delete()\n"
+              "        return imageFile\n",
+          )
+          replace_once(
+              '        zip.renameTo("$dirname.cbz")\n',
+              '        zip.renameToOrCopy("$dirname.cbz")\n',
+          )
+
+          path.write_text(text)
+          PY
           git add \
             README.md \
             app/src/main/java/eu/kanade/tachiyomi/data/download/Downloader.kt \
