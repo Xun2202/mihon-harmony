@@ -123,7 +123,7 @@ jobs:
               "                val chapterDir = tmpDir.renameToOrCopy(chapterDirname)\n"
               "                DiskUtil.createNoMediaFile(chapterDir, context)\n",
           )
-          replace_once("\n            DiskUtil.createNoMediaFile(tmpDir, context)\n", "\n")
+          replace_once("\n\n            DiskUtil.createNoMediaFile(tmpDir, context)\n\n", "\n")
           replace_once(
               "\n            try {\n                source.getImage",
               "\n            val completedFile = try {\n                source.getImage",
