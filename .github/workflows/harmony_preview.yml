@@ -5,6 +5,10 @@ name: Harmony Preview
 # "Private" extension installer in Settings > Advanced.
 
 on:
+  # Daily check: build the newest official Mihon stable tag as
+  # `<tag>-harmony-preview.1` when that release does not exist yet.
+  schedule:
+    - cron: '17 4 * * *'
   workflow_dispatch:
     inputs:
       upstream_tag:
