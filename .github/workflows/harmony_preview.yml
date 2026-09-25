@@ -89,6 +89,7 @@ jobs:
           set -euo pipefail
 
           cp .github/patches/harmony.patch "$RUNNER_TEMP/harmony.patch"
+          cp -r .github/patches/harmony-preview "$RUNNER_TEMP/harmony-preview"
           git remote add upstream https://github.com/mihonapp/mihon.git
           git fetch --no-tags upstream "refs/tags/$UPSTREAM_TAG"
           git checkout --detach FETCH_HEAD
@@ -170,6 +171,11 @@ jobs:
           git add app/build.gradle.kts
           git commit -m "build: set $harmony_version_name version"
 
+          # Point the in-app updater at this fork's GitHub releases.
+          cp -r "$RUNNER_TEMP/harmony-preview/." .
+          git add -A
+          git commit -m "Point in-app updater at the fork releases"
+
       - name: Validate signing secrets
         if: steps.existing.outputs.skip != 'true'
         env:
@@ -202,7 +208,7 @@ jobs:
           storePassword: ${{ secrets.KEY_STORE_PASSWORD }}
           keyAlias: ${{ secrets.ALIAS }}
           keyPassword: ${{ secrets.KEY_PASSWORD }}
-        run: ./gradlew assemblePreview
+        run: ./gradlew assemblePreview -Penable-updater
 
       - name: Prepare release files
         if: steps.existing.outputs.skip != 'true'
@@ -238,6 +244,5 @@ jobs:
             release-files/*.apk \
             --repo "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" \
-            --prerelease \
             --title "Mihon Harmony Preview $RELEASE_TAG" \
-            --notes "Preview build (package app.mihon.debug) with the Private extension installer enabled. Unofficial HarmonyOS/ZhuoyiTong compatibility build based on Mihon $UPSTREAM_TAG."
+            --notes "Preview build (package app.mihon.debug) with the Private extension installer and in-app updates enabled. Unofficial HarmonyOS/ZhuoyiTong compatibility build based on Mihon $UPSTREAM_TAG."
