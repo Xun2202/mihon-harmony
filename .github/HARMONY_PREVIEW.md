@@ -173,8 +173,10 @@ git push "https://x-access-token:$env:GH_TOKEN@github.com/Xun2202/mihon-harmony.
 ## 9. 本地环境（维护者电脑）
 
 - 本地有一份克隆，remote `origin` 指向 fork，另有 `upstream` 指向官方仓库
-  （仅浅拉取了 `v0.20.4` tag，用于对照源码）。克隆目录、密钥备份目录等本机路径记录在维护者本机的
-  私有备忘文件 `mihon-harmony.local.md` 中（与克隆目录同级，不在仓库内）。
+  （仅浅拉取了 `v0.20.4` tag，用于对照源码）。
+- 克隆目录内有一个 `_private/` 子目录，存放签名密钥备份和私有备忘 `_private/LOCAL.md`（含本机路径、
+  操作命令）。该目录通过 `.git/info/exclude` 在本机被忽略，**不会**也不应出现在远端。
+  接手维护的人或 AI 应先读 `_private/LOCAL.md`。不要在该仓库运行 `git clean -x`。
 - 已安装工具：Git、GitHub CLI、OpenJDK 17（含 `keytool`）。
 - 未安装 Android SDK，本地不编译；全部编译在 GitHub Actions 完成。
 
