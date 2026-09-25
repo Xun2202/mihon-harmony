@@ -1,3 +1,12 @@
+> [!NOTE]
+> ## 这是 Xun2202 的 Preview 构建分支
+>
+> 本仓库 fork 自 [zsyou/mihon-harmony](https://github.com/zsyou/mihon-harmony)，在作者补丁的基础上编译 `preview`
+> 构建类型（可用 Private 扩展安装器，包名 `app.mihon.debug`），并启用了指向本仓库 Release 的应用内更新。
+> 安装包见 [Releases](https://github.com/Xun2202/mihon-harmony/releases)。
+>
+> **维护说明、构建机制、排错手册：[`.github/HARMONY_PREVIEW.md`](./.github/HARMONY_PREVIEW.md)**
+
 > [!IMPORTANT]
 > ## Mihon Harmony（非官方兼容分支）
 >
