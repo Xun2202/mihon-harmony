@@ -93,6 +93,18 @@ Mihon 原生更新逻辑：启动时请求 `https://api.github.com/repos/<repo>/
 
 APK 文件名必须保留 `-arm64-v8a` / `-universal` 片段，`ReleaseServiceImpl.getDownloadLink` 靠它匹配设备 ABI。
 
+## 4a. 卓易通 / 鸿蒙图库适配（`harmony-preview-scripts/downloader.py`）
+
+在作者补丁和更新器覆盖之后，workflow 还会运行 `.github/patches/harmony-preview-scripts/downloader.py`，
+用与作者相同的 `replace_once` 方式改 `Downloader.kt`（找不到锚点会直接失败，便于发现上游变动）：
+
+| 问题 | 处理 |
+| --- | --- |
+| 鸿蒙图库会索引卓易通共享存储（"兼容应用数据"）下的所有图片，且**不认 `.nomedia`**。下载中的 `章节名_tmp` 目录里有裸露的 jpg，会在图库里短暂出现 | CBZ 模式下把临时目录改到 App 私有缓存 `context.cacheDir/harmony_download_tmp/<mangaId>/<章节>_tmp`，只有最终的 `.cbz` 写入用户选择的下载目录。**目录模式（不打包 CBZ）无法规避**，只能在图库里隐藏相册 |
+| 某次失败留下 `章节.cbz` 残留后，作者的 `renameToOrCopy` 因"目标已存在"永远失败，下载卡死 | 新增 `finalizeArchive()`：先删残留目标；改名失败就复制；复制后删不掉 `.cbz_tmp` 只记 WARN 不报错 |
+
+用户实测：目录模式下作者补丁工作正常；CBZ 模式需要上述容错。
+
 ## 5. 日常操作
 
 ### 5.1 手动出新版
@@ -143,6 +155,8 @@ git push "https://x-access-token:$env:GH_TOKEN@github.com/Xun2202/mihon-harmony.
 | --- | --- |
 | "Prepare official source" 步骤失败：`git apply` 冲突或 Python 脚本报 `Missing Downloader.kt patch pattern` | 官方新版改动了被补丁触及的代码。先看作者仓库是否已更新 `harmony.patch`（可直接同步他的 `.github/patches/`），否则手动重做补丁 |
 | 编译报错，位置在 `AppUpdateChecker.kt` / `ReleaseServiceImpl.kt` / `GetApplicationRelease.kt` | 官方改了这些文件的接口。取官方新版文件，重新套用 §4 的改动 |
+| `downloader.py` 报 `Missing Downloader.kt pattern (harmony-preview)` | 官方改了 `Downloader.kt` 里被我们替换的代码段，按 §4a 的意图更新脚本里的锚点字符串 |
+| 图库里仍能看到漫画图片 | 确认 App 设置里"保存为 CBZ 格式"已开启；目录模式无法规避，去图库隐藏该相册。历史遗留的 `_tmp` 目录可手动删除 |
 | Release 步骤失败 `refusing to allow a GitHub App to create or update workflow` | 有人把推 tag 的逻辑加回来了。保持用 `gh release create --target $GITHUB_SHA`，不要 `git push` tag |
 | 定时任务不跑 | 仓库 60 天无提交被 GitHub 暂停，手动 Enable |
 | App 内检查不到更新 | 确认 Release 不是 draft、tag 含 `-harmony-preview.`、资产文件名含 `-arm64-v8a`；App 最多每 3 天自动查一次，可在"关于"页手动检查 |
@@ -169,3 +183,4 @@ git push "https://x-access-token:$env:GH_TOKEN@github.com/Xun2202/mihon-harmony.
 - 2026-09-26 fork 仓库；新增 `harmony_preview.yml`；生成签名密钥并写入 Secrets；发布 `v0.20.4-harmony-preview.1`。
 - 同日 新增 `.github/patches/harmony-preview/` 更新器补丁，开启 `-Penable-updater`；发布 `v0.20.4-harmony-preview.2`。
 - 同日 加入每日定时触发；禁用作者的其它 workflow。
+- 同日 新增 `downloader.py`：CBZ 临时目录移入私有缓存（规避鸿蒙图库索引）、CBZ 收尾容错；发布 `v0.20.4-harmony-preview.3`。

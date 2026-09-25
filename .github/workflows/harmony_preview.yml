@@ -94,6 +94,7 @@ jobs:
 
           cp .github/patches/harmony.patch "$RUNNER_TEMP/harmony.patch"
           cp -r .github/patches/harmony-preview "$RUNNER_TEMP/harmony-preview"
+          cp -r .github/patches/harmony-preview-scripts "$RUNNER_TEMP/harmony-preview-scripts"
           git remote add upstream https://github.com/mihonapp/mihon.git
           git fetch --no-tags upstream "refs/tags/$UPSTREAM_TAG"
           git checkout --detach FETCH_HEAD
@@ -179,6 +180,11 @@ jobs:
           cp -r "$RUNNER_TEMP/harmony-preview/." .
           git add -A
           git commit -m "Point in-app updater at the fork releases"
+
+          # HarmonyOS gallery / ZhuoyiTong storage adaptations in Downloader.kt.
+          python3 "$RUNNER_TEMP/harmony-preview-scripts/downloader.py"
+          git add -A
+          git commit -m "Keep CBZ download temp files out of shared storage"
 
       - name: Validate signing secrets
         if: steps.existing.outputs.skip != 'true'
