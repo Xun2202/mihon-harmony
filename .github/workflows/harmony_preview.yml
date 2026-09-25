@@ -1,0 +1,244 @@
+name: Harmony Preview
+
+# Builds the `preview` build type (package `app.mihon.debug`) of Mihon Harmony.
+# Unlike the stable `release` build type, the preview build exposes the
+# "Private" extension installer in Settings > Advanced.
+
+on:
+  workflow_dispatch:
+    inputs:
+      upstream_tag:
+        description: 'Official Mihon tag; leave empty to use the latest stable release'
+        required: false
+        type: string
+      patch_number:
+        description: 'Harmony patch number'
+        required: true
+        default: '1'
+        type: string
+
+concurrency:
+  group: harmony-preview
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+env:
+  MIHON_GITHUB_RELEASE: true
+  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+jobs:
+  preview:
+    name: Build and release preview
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout fork history
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+
+      - name: Resolve release version
+        id: version
+        env:
+          INPUT_UPSTREAM_TAG: ${{ inputs.upstream_tag }}
+          INPUT_PATCH_NUMBER: ${{ inputs.patch_number }}
+        run: |
+          set -euo pipefail
+
+          upstream_tag="${INPUT_UPSTREAM_TAG:-}"
+          patch_number="${INPUT_PATCH_NUMBER:-1}"
+
+          if [[ -z "$upstream_tag" ]]; then
+            upstream_tag="$(gh api repos/mihonapp/mihon/releases/latest --jq '.tag_name')"
+          fi
+
+          if [[ ! "$upstream_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Unsupported upstream tag: $upstream_tag" >&2
+            exit 1
+          fi
+          if [[ ! "$patch_number" =~ ^[1-9][0-9]?$ ]]; then
+            echo "Patch number must be between 1 and 99" >&2
+            exit 1
+          fi
+
+          release_tag="${upstream_tag}-harmony-preview.${patch_number}"
+          echo "upstream_tag=$upstream_tag" >> "$GITHUB_OUTPUT"
+          echo "patch_number=$patch_number" >> "$GITHUB_OUTPUT"
+          echo "release_tag=$release_tag" >> "$GITHUB_OUTPUT"
+
+      - name: Skip an existing release
+        id: existing
+        env:
+          RELEASE_TAG: ${{ steps.version.outputs.release_tag }}
+        run: |
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $RELEASE_TAG already exists; nothing to do."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Prepare official source with Harmony patches
+        if: steps.existing.outputs.skip != 'true'
+        env:
+          UPSTREAM_TAG: ${{ steps.version.outputs.upstream_tag }}
+          PATCH_NUMBER: ${{ steps.version.outputs.patch_number }}
+        run: |
+          set -euo pipefail
+
+          cp .github/patches/harmony.patch "$RUNNER_TEMP/harmony.patch"
+          git remote add upstream https://github.com/mihonapp/mihon.git
+          git fetch --no-tags upstream "refs/tags/$UPSTREAM_TAG"
+          git checkout --detach FETCH_HEAD
+
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+
+          git apply --3way "$RUNNER_TEMP/harmony.patch"
+          python3 <<'PY'
+          from pathlib import Path
+
+          path = Path("app/src/main/java/eu/kanade/tachiyomi/data/download/Downloader.kt")
+          text = path.read_text()
+
+          def replace_once(old: str, new: str) -> None:
+              global text
+              if old not in text:
+                  raise SystemExit(f"Missing Downloader.kt patch pattern: {old!r}")
+              text = text.replace(old, new, 1)
+
+          import_anchor = "import tachiyomi.core.common.i18n.stringResource\n"
+          imports = [
+              "import tachiyomi.core.common.storage.extension\n",
+              "import tachiyomi.core.common.storage.renameToOrCopy\n",
+          ]
+          missing_imports = "".join(import_line for import_line in imports if import_line not in text)
+          if missing_imports:
+              replace_once(import_anchor, import_anchor + missing_imports)
+
+          replace_once(
+              "                tmpDir.renameTo(chapterDirname)\n",
+              "                val chapterDir = tmpDir.renameToOrCopy(chapterDirname)\n"
+              "                DiskUtil.createNoMediaFile(chapterDir, context)\n",
+          )
+          replace_once("\n\n            DiskUtil.createNoMediaFile(tmpDir, context)\n\n", "\n")
+          replace_once(
+              "\n            try {\n                source.getImage",
+              "\n            val completedFile = try {\n                source.getImage",
+          )
+          replace_once(
+              '                    file.renameTo("$filename.$extension")\n',
+              '                    file.renameToOrCopy("$filename.$extension")\n',
+          )
+          replace_once("            emit(file)\n", "            emit(completedFile)\n")
+          replace_once(
+              '        tmpFile.renameTo("$filename.${extension.extension}")\n'
+              "        cacheFile.delete()\n"
+              "        return tmpFile\n",
+              '        val imageFile = tmpFile.renameToOrCopy("$filename.${extension.extension}")\n'
+              "        cacheFile.delete()\n"
+              "        return imageFile\n",
+          )
+          replace_once(
+              '        zip.renameTo("$dirname.cbz")\n',
+              '        zip.renameToOrCopy("$dirname.cbz")\n',
+          )
+
+          path.write_text(text)
+          PY
+          git add \
+            README.md \
+            app/src/main/java/eu/kanade/tachiyomi/data/download/Downloader.kt \
+            core/common/src/main/kotlin/tachiyomi/core/common/storage/UniFileExtensions.kt \
+            core/common/src/test/java/tachiyomi/core/common/storage/UniFileExtensionsTest.kt
+          git commit -m "Apply Harmony compatibility patches"
+
+          upstream_version="${UPSTREAM_TAG#v}"
+          upstream_version_code="$(sed -nE 's/^[[:space:]]*versionCode = ([0-9]+)$/\1/p' app/build.gradle.kts | head -n 1)"
+          if [[ -z "$upstream_version_code" ]]; then
+            echo "Unable to read upstream versionCode" >&2
+            exit 1
+          fi
+
+          harmony_version_code=$((upstream_version_code * 100 + 10#$PATCH_NUMBER))
+          harmony_version_name="${upstream_version}-harmony.${PATCH_NUMBER}"
+          sed -i -E "0,/versionCode = [0-9]+/s//versionCode = $harmony_version_code/" app/build.gradle.kts
+          sed -i -E "0,/versionName = \"[^\"]+\"/s//versionName = \"$harmony_version_name\"/" app/build.gradle.kts
+
+          git add app/build.gradle.kts
+          git commit -m "build: set $harmony_version_name version"
+
+      - name: Validate signing secrets
+        if: steps.existing.outputs.skip != 'true'
+        env:
+          SIGNING_KEY: ${{ secrets.SIGNING_KEY }}
+          KEY_STORE_PASSWORD: ${{ secrets.KEY_STORE_PASSWORD }}
+          ALIAS: ${{ secrets.ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          [[ -n "$SIGNING_KEY" ]] || { echo "Missing SIGNING_KEY secret" >&2; exit 1; }
+          [[ -n "$KEY_STORE_PASSWORD" ]] || { echo "Missing KEY_STORE_PASSWORD secret" >&2; exit 1; }
+          [[ -n "$ALIAS" ]] || { echo "Missing ALIAS secret" >&2; exit 1; }
+          [[ -n "$KEY_PASSWORD" ]] || { echo "Missing KEY_PASSWORD secret" >&2; exit 1; }
+
+      - name: Set up JDK
+        if: steps.existing.outputs.skip != 'true'
+        uses: actions/setup-java@ad2b38190b15e4d6bdf0c97fb4fca8412226d287 # v5.3.0
+        with:
+          java-version-file: .github/.java-version
+          distribution: temurin
+
+      - name: Set up Gradle
+        if: steps.existing.outputs.skip != 'true'
+        uses: gradle/actions/setup-gradle@3f131e8634966bd73d06cc69884922b02e6faf92 # v6.2.0
+
+      - name: Build signed preview APKs
+        if: steps.existing.outputs.skip != 'true'
+        env:
+          storeFileBase64: ${{ secrets.SIGNING_KEY }}
+          storePassword: ${{ secrets.KEY_STORE_PASSWORD }}
+          keyAlias: ${{ secrets.ALIAS }}
+          keyPassword: ${{ secrets.KEY_PASSWORD }}
+        run: ./gradlew assemblePreview
+
+      - name: Prepare release files
+        if: steps.existing.outputs.skip != 'true'
+        env:
+          RELEASE_TAG: ${{ steps.version.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+          mkdir release-files
+          preview_dir="app/build/outputs/apk/preview"
+          ls -la "$preview_dir"
+          cp "$preview_dir/app-arm64-v8a-preview.apk" "release-files/mihon-${RELEASE_TAG}-arm64-v8a.apk"
+          cp "$preview_dir/app-universal-preview.apk" "release-files/mihon-${RELEASE_TAG}-universal.apk"
+
+      - name: Upload APKs as workflow artifact
+        if: steps.existing.outputs.skip != 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: mihon-harmony-preview-${{ steps.version.outputs.release_tag }}
+          path: release-files/*.apk
+
+      - name: Push tag and create GitHub release
+        if: steps.existing.outputs.skip != 'true'
+        env:
+          UPSTREAM_TAG: ${{ steps.version.outputs.upstream_tag }}
+          RELEASE_TAG: ${{ steps.version.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+
+          if ! git ls-remote --exit-code --tags origin "refs/tags/$RELEASE_TAG" >/dev/null 2>&1; then
+            git tag -a "$RELEASE_TAG" -m "Mihon Harmony Preview $RELEASE_TAG"
+            git push origin "refs/tags/$RELEASE_TAG"
+          fi
+
+          gh release create "$RELEASE_TAG" \
+            release-files/*.apk \
+            --repo "$GITHUB_REPOSITORY" \
+            --prerelease \
+            --title "Mihon Harmony Preview $RELEASE_TAG" \
+            --notes "Preview build (package app.mihon.debug) with the Private extension installer enabled. Unofficial HarmonyOS/ZhuoyiTong compatibility build based on Mihon $UPSTREAM_TAG."
