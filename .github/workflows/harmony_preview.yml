@@ -223,7 +223,7 @@ jobs:
           name: mihon-harmony-preview-${{ steps.version.outputs.release_tag }}
           path: release-files/*.apk
 
-      - name: Push tag and create GitHub release
+      - name: Create GitHub release
         if: steps.existing.outputs.skip != 'true'
         env:
           UPSTREAM_TAG: ${{ steps.version.outputs.upstream_tag }}
@@ -231,14 +231,13 @@ jobs:
         run: |
           set -euo pipefail
 
-          if ! git ls-remote --exit-code --tags origin "refs/tags/$RELEASE_TAG" >/dev/null 2>&1; then
-            git tag -a "$RELEASE_TAG" -m "Mihon Harmony Preview $RELEASE_TAG"
-            git push origin "refs/tags/$RELEASE_TAG"
-          fi
-
+          # The patched source tree is never pushed (GITHUB_TOKEN cannot push
+          # commits that touch workflow files), so the release tag simply points
+          # at the fork commit that ran this workflow.
           gh release create "$RELEASE_TAG" \
             release-files/*.apk \
             --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
             --prerelease \
             --title "Mihon Harmony Preview $RELEASE_TAG" \
             --notes "Preview build (package app.mihon.debug) with the Private extension installer enabled. Unofficial HarmonyOS/ZhuoyiTong compatibility build based on Mihon $UPSTREAM_TAG."
