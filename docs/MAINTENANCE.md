@@ -38,6 +38,8 @@
 - `v0.20.4-harmony-preview.2` —— 加入应用内更新器（旧流水线）。
 - `v0.20.4-harmony-preview.3` —— 加入 CBZ 临时目录 / 残留容错（旧流水线）。
 - 从 2026-10-03 起由本补丁流水线构建；补丁内容与 preview.3 完全一致（已用两套流程产出的源码树逐文件比对确认）。
+  切换当天用 `dry_run` 构建了 `v0.20.4-harmony-preview.4` 的 APK 做验证（未发布）：包名 `app.mihon.debug`、versionCode 2904、
+  versionName `0.20.4-harmony.4-7876`、签名证书与 preview.3 相同、ZIP 条目数相同。
 
 ## 3. 仓库结构
 
@@ -141,6 +143,8 @@ gh release list --repo Xun2202/mihon-harmony
 
 - Secrets：`SIGNING_KEY`（jks 的 Base64）、`KEY_STORE_PASSWORD`、`ALIAS`（`mihon-harmony`）、`KEY_PASSWORD`。
   RSA 4096，有效期 10000 天，2026-09-25 生成。
+- 签名证书 SHA-256：`4bd90284699327e1bf135ac394d5e8f9acc6da7257fa0967727ca2bad507ea8a`
+  （从 preview.3 和补丁流水线 dry_run 产物的 APK 签名块里读出，两者一致）。验证新产物时对这个值。
 - **备份现状（2026-10-03 核查）**：密钥文件 `mihon-harmony.jks` 和密码只保存在维护者本人电脑上
   （当时的本地克隆目录下的 `_private/` 子目录，由另一台机器上的 AI 会话生成）。GitHub Secrets 只能写入不能读出，
   所以云端 AI 会话**拿不到**这把钥匙。
