@@ -1,0 +1,196 @@
+From c8081586061f62855b791de8a8d96af26a22de85 Mon Sep 17 00:00:00 2001
+From: Xun2202 <98207886+Xun2202@users.noreply.github.com>
+Date: Sat, 3 Oct 2026 16:15:35 +0000
+Subject: [PATCH 2/3] updater: check this fork's GitHub releases for
+ -harmony-preview builds
+
+The stock updater asks api.github.com for mihonapp/mihon's latest release
+and only understands v0.1.2 / r1234 version strings, so a build versioned
+0.20.4-harmony.1 either crashes the parser or is offered the official APK,
+which cannot be installed over an APK signed with a different key.
+
+- AppUpdateChecker: GITHUB_REPO is Xun2202/mihon-harmony; RELEASE_TAG is
+  derived from VERSION_NAME as v<ver>-harmony-preview.<N> (used by the
+  "About" screen link).
+- ReleaseServiceImpl: list /releases?per_page=30 and pick the newest tag
+  containing "-harmony-preview." for preview builds, or "-harmony." without
+  "preview" for release builds. ABI-based APK selection is unchanged, so
+  release assets must keep the -arm64-v8a / -universal name fragments.
+- GetApplicationRelease: compare (major, minor, patch, harmony) tuples
+  parsed from "(\d+)\.(\d+)\.(\d+)-harmony(?:-preview)?\.(\d+)"; fall back to
+  the upstream logic only when parsing fails, with toIntOrNull() so an
+  unexpected tag cannot crash the app.
+---
+ .../data/updater/AppUpdateChecker.kt          | 32 ++++++-------
+ .../data/release/ReleaseServiceImpl.kt        | 16 +++++--
+ .../interactor/GetApplicationRelease.kt       | 45 +++++++++++++++----
+ 3 files changed, 66 insertions(+), 27 deletions(-)
+
+diff --git a/app/src/main/java/eu/kanade/tachiyomi/data/updater/AppUpdateChecker.kt b/app/src/main/java/eu/kanade/tachiyomi/data/updater/AppUpdateChecker.kt
+index c62e40f5c..263932458 100644
+--- a/app/src/main/java/eu/kanade/tachiyomi/data/updater/AppUpdateChecker.kt
++++ b/app/src/main/java/eu/kanade/tachiyomi/data/updater/AppUpdateChecker.kt
+@@ -12,11 +12,6 @@ class AppUpdateChecker {
+     private val getApplicationRelease: GetApplicationRelease by injectLazy()
+ 
+     suspend fun checkForUpdate(forceCheck: Boolean = false): GetApplicationRelease.Result {
+-        // Disable app update checks for older Android versions that we're going to drop support for
+-        // if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) {
+-        //     return GetApplicationRelease.Result.OsTooOld
+-        // }
+-
+         return withIOContext {
+             val result = getApplicationRelease.await(
+                 GetApplicationRelease.Arguments(
+@@ -34,19 +29,26 @@ class AppUpdateChecker {
+     }
+ }
+ 
+-val GITHUB_REPO: String by lazy {
+-    if (isPreviewBuildType) {
+-        "mihonapp/mihon-preview"
+-    } else {
+-        "mihonapp/mihon"
+-    }
+-}
++/**
++ * Mihon Harmony fork: both the stable and the preview channel are published as
++ * GitHub releases of the fork repository. The channel is told apart by the tag
++ * suffix (`-harmony.N` vs `-harmony-preview.N`).
++ */
++const val GITHUB_REPO: String = "Xun2202/mihon-harmony"
++
++private val HARMONY_VERSION_REGEX = Regex("""^(\d+\.\d+\.\d+)-harmony\.(\d+)""")
+ 
+ val RELEASE_TAG: String by lazy {
+-    if (isPreviewBuildType) {
+-        "r${BuildConfig.COMMIT_COUNT}"
+-    } else {
++    val match = HARMONY_VERSION_REGEX.find(BuildConfig.VERSION_NAME)
++    if (match == null) {
+         "v${BuildConfig.VERSION_NAME}"
++    } else {
++        val (base, patch) = match.destructured
++        if (isPreviewBuildType) {
++            "v$base-harmony-preview.$patch"
++        } else {
++            "v$base-harmony.$patch"
++        }
+     }
+ }
+ 
+diff --git a/data/src/main/java/tachiyomi/data/release/ReleaseServiceImpl.kt b/data/src/main/java/tachiyomi/data/release/ReleaseServiceImpl.kt
+index 247dc2244..67e4330de 100644
+--- a/data/src/main/java/tachiyomi/data/release/ReleaseServiceImpl.kt
++++ b/data/src/main/java/tachiyomi/data/release/ReleaseServiceImpl.kt
+@@ -16,13 +16,20 @@ class ReleaseServiceImpl(
+ ) : ReleaseService {
+ 
+     override suspend fun latest(arguments: GetApplicationRelease.Arguments): Release? {
+-        val release = with(json) {
++        // Mihon Harmony fork: stable and preview builds share one repository, so
++        // list recent releases and pick the newest one that belongs to our channel.
++        val releases = with(json) {
+             networkService.client
+-                .newCall(GET("https://api.github.com/repos/${arguments.repository}/releases/latest"))
++                .newCall(GET("https://api.github.com/repos/${arguments.repository}/releases?per_page=30"))
+                 .awaitSuccess()
+-                .parseAs<GithubRelease>()
++                .parseAs<List<GithubRelease>>()
+         }
+ 
++        val release = releases.firstOrNull { candidate ->
++            val isPreviewTag = PREVIEW_TAG_MARKER in candidate.version
++            if (arguments.isPreview) isPreviewTag else !isPreviewTag && STABLE_TAG_MARKER in candidate.version
++        } ?: return null
++
+         val downloadLink = getDownloadLink(release = release, isFoss = arguments.isFoss) ?: return null
+ 
+         return Release(
+@@ -51,6 +58,9 @@ class ReleaseServiceImpl(
+         private const val FOSS = "foss"
+         private val BUILD_TYPES = listOf(FOSS, "arm64-v8a", "armeabi-v7a", "x86_64", "x86")
+ 
++        private const val PREVIEW_TAG_MARKER = "-harmony-preview."
++        private const val STABLE_TAG_MARKER = "-harmony."
++
+         /**
+          * Regular expression that matches a mention to a valid GitHub username, like it's
+          * done in GitHub Flavored Markdown. It follows these constraints:
+diff --git a/domain/src/main/java/tachiyomi/domain/release/interactor/GetApplicationRelease.kt b/domain/src/main/java/tachiyomi/domain/release/interactor/GetApplicationRelease.kt
+index 23c7a783c..9ddfaa4af 100644
+--- a/domain/src/main/java/tachiyomi/domain/release/interactor/GetApplicationRelease.kt
++++ b/domain/src/main/java/tachiyomi/domain/release/interactor/GetApplicationRelease.kt
+@@ -28,28 +28,51 @@ class GetApplicationRelease(
+         versionName: String,
+         versionTag: String,
+     ): Boolean {
++        // Mihon Harmony fork: versions look like "0.20.4-harmony.1" (versionName,
++        // optionally followed by "-<commitCount>" in preview builds) and release tags
++        // look like "v0.20.4-harmony.1" or "v0.20.4-harmony-preview.1".
++        val newHarmony = parseHarmonyVersion(versionTag)
++        val oldHarmony = parseHarmonyVersion(versionName)
++        if (newHarmony != null && oldHarmony != null) {
++            return compareVersions(newHarmony, oldHarmony) > 0
++        }
++
++        // Fallback to the upstream Mihon logic.
+         // Removes prefixes like "r" or "v"
+         val newVersion = versionTag.replace("[^\\d.]".toRegex(), "")
+         return if (isPreview) {
+             // Preview builds: based on releases in "mihonapp/mihon-preview" repo
+             // tagged as something like "r1234"
+-            newVersion.toInt() > commitCount
++            newVersion.toIntOrNull()?.let { it > commitCount } ?: false
+         } else {
+             // Release builds: based on releases in "mihonapp/mihon" repo
+             // tagged as something like "v0.1.2"
+             val oldVersion = versionName.replace("[^\\d.]".toRegex(), "")
+ 
+-            val newSemVer = newVersion.split(".").map { it.toInt() }
+-            val oldSemVer = oldVersion.split(".").map { it.toInt() }
++            val newSemVer = newVersion.split(".").mapNotNull { it.toIntOrNull() }
++            val oldSemVer = oldVersion.split(".").mapNotNull { it.toIntOrNull() }
++
++            compareVersions(newSemVer, oldSemVer) > 0
++        }
++    }
+ 
+-            oldSemVer.mapIndexed { index, i ->
+-                if (newSemVer[index] > i) {
+-                    return true
+-                }
+-            }
++    /**
++     * Returns `[major, minor, patch, harmonyPatch]` or null when the string is not
++     * a Mihon Harmony version.
++     */
++    private fun parseHarmonyVersion(value: String): List<Int>? {
++        val match = HARMONY_VERSION_REGEX.find(value) ?: return null
++        return match.groupValues.drop(1).map { it.toInt() }
++    }
+ 
+-            false
++    private fun compareVersions(a: List<Int>, b: List<Int>): Int {
++        val size = maxOf(a.size, b.size)
++        for (index in 0 until size) {
++            val x = a.getOrElse(index) { 0 }
++            val y = b.getOrElse(index) { 0 }
++            if (x != y) return x.compareTo(y)
+         }
++        return 0
+     }
+ 
+     data class Arguments(
+@@ -66,4 +89,8 @@ class GetApplicationRelease(
+         data object NoNewUpdate : Result
+         data object OsTooOld : Result
+     }
++
++    private companion object {
++        val HARMONY_VERSION_REGEX = Regex("""(\d+)\.(\d+)\.(\d+)-harmony(?:-preview)?\.(\d+)""")
++    }
+ }
+-- 
+2.43.0
+

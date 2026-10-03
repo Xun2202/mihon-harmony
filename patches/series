@@ -1,0 +1,4 @@
+# Applied in order by scripts/prepare-source.sh
+0001-downloads-rename-fallback-for-saf-without-renamedocument.patch
+0002-updater-use-harmony-fork-releases.patch
+0003-downloads-cbz-temp-in-private-cache.patch

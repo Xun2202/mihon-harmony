@@ -1,0 +1,106 @@
+From b91af10c4acbf1b03ce4da00d0e2d90838f23699 Mon Sep 17 00:00:00 2001
+From: Xun2202 <98207886+Xun2202@users.noreply.github.com>
+Date: Sat, 3 Oct 2026 16:15:35 +0000
+Subject: [PATCH 3/3] downloads: keep CBZ temp files in the private cache,
+ tolerate stale archives
+
+HarmonyOS Gallery indexes every image under ZhuoyiTong's shared storage and
+ignores .nomedia, so the bare JPEGs inside "<chapter>_tmp" briefly show up
+in the gallery while a chapter is downloading.
+
+When "save as CBZ" is enabled, download into
+context.cacheDir/harmony_download_tmp/<mangaId>/<chapter>_tmp and only write
+the finished .cbz to the user-selected download directory. Directory mode
+(no CBZ) cannot avoid the gallery and is left unchanged.
+
+Also add finalizeArchive(): a leftover "<chapter>.cbz" from an earlier
+failed attempt made renameToOrCopy() fail forever with "target exists" and
+wedged the queue. Delete the stale target first, fall back to copy when the
+rename fails, and only log a warning when the .cbz_tmp source cannot be
+removed afterwards.
+
+Equivalent to .github/patches/harmony-preview-scripts/downloader.py in the
+previous fork layout.
+---
+ .../tachiyomi/data/download/Downloader.kt     | 48 ++++++++++++++++++-
+ 1 file changed, 46 insertions(+), 2 deletions(-)
+
+diff --git a/app/src/main/java/eu/kanade/tachiyomi/data/download/Downloader.kt b/app/src/main/java/eu/kanade/tachiyomi/data/download/Downloader.kt
+index 543bd853b..975a97688 100644
+--- a/app/src/main/java/eu/kanade/tachiyomi/data/download/Downloader.kt
++++ b/app/src/main/java/eu/kanade/tachiyomi/data/download/Downloader.kt
+@@ -62,6 +62,7 @@ import tachiyomi.i18n.MR
+ import uy.kohesive.injekt.Injekt
+ import uy.kohesive.injekt.api.get
+ import java.io.File
++import java.io.IOException
+ import java.util.Locale
+ import kotlin.time.Duration.Companion.seconds
+ 
+@@ -347,7 +348,18 @@ class Downloader(
+             download.chapter.scanlator,
+             download.chapter.url,
+         )
+-        val tmpDir = mangaDir.createDirectory(chapterDirname + TMP_DIR_SUFFIX)!!
++        // Harmony: in CBZ mode download pages into private app cache so the
++        // HarmonyOS gallery (which ignores .nomedia) never sees loose images.
++        val tmpDir = if (downloadPreferences.saveChaptersAsCBZ.get()) {
++            val cacheTmpDir = File(
++                context.cacheDir,
++                "harmony_download_tmp/${download.manga.id}/$chapterDirname$TMP_DIR_SUFFIX",
++            )
++            cacheTmpDir.mkdirs()
++            UniFile.fromFile(cacheTmpDir)!!
++        } else {
++            mangaDir.createDirectory(chapterDirname + TMP_DIR_SUFFIX)!!
++        }
+ 
+         try {
+             // If the page list already exists, start from the file
+@@ -622,10 +634,42 @@ class Downloader(
+                 writer.write(file)
+             }
+         }
+-        zip.renameToOrCopy("$dirname.cbz")
++        finalizeArchive(mangaDir, zip, "$dirname.cbz")
+         tmpDir.delete()
+     }
+ 
++    /**
++     * Harmony: moves the finished `.cbz_tmp` archive to its final name, tolerating
++     * SAF providers that support neither renaming nor reliable deletion.
++     */
++    private fun finalizeArchive(mangaDir: UniFile, zip: UniFile, targetName: String) {
++        // A leftover target from a previous failed attempt would block us forever.
++        mangaDir.findFile(targetName)?.let { stale ->
++            if (!stale.delete()) {
++                throw IOException("Failed to remove stale archive '$targetName'")
++            }
++        }
++
++        if (zip.renameTo(targetName)) return
++
++        val target = mangaDir.createFile(targetName)
++            ?: throw IOException("Failed to create archive '$targetName'")
++        try {
++            zip.openInputStream().use { input ->
++                target.openOutputStream().use { output ->
++                    input.copyTo(output)
++                }
++            }
++        } catch (e: Exception) {
++            target.delete()
++            throw IOException("Failed to copy archive to '$targetName'", e)
++        }
++
++        if (!zip.delete()) {
++            logcat(LogPriority.WARN) { "Archive copied to '$targetName' but temporary '${zip.name}' could not be deleted" }
++        }
++    }
++
+     /**
+      * Creates a ComicInfo.xml file inside the given directory.
+      */
+-- 
+2.43.0
+
