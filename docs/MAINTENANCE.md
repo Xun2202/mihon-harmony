@@ -145,12 +145,10 @@ gh release list --repo Xun2202/mihon-harmony
   RSA 4096，有效期 10000 天，2026-09-25 生成。
 - 签名证书 SHA-256：`4bd90284699327e1bf135ac394d5e8f9acc6da7257fa0967727ca2bad507ea8a`
   （从 preview.3 和补丁流水线 dry_run 产物的 APK 签名块里读出，两者一致）。验证新产物时对这个值。
-- **备份现状（2026-10-03 核查）**：密钥文件 `mihon-harmony.jks` 和密码只保存在维护者本人电脑上
-  （当时的本地克隆目录下的 `_private/` 子目录，由另一台机器上的 AI 会话生成）。GitHub Secrets 只能写入不能读出，
-  所以云端 AI 会话**拿不到**这把钥匙。
-- **待办**：请维护者把 `mihon-harmony.jks`、Base64 文本和密码上传到一个 **private** 仓库
-  `Xun2202/mihon-harmony-keystore`（与 `mihon-repo-keystore`、`animeko-harmony-keystore` 的做法一致），
-  之后任何会话都能恢复 Secrets。
+- **权威备份（2026-10-05 已上传）**：私有仓库 `Xun2202/mihon-harmony-keystore`，含 `signingkey.jks`、
+  `signingkey.jks.b64`（即 `SIGNING_KEY` 的值）和一份写明别名、两个密码、证书指纹及 `gh secret set` 命令的 README。
+  GitHub Secrets 只能写入不能读出；任何拿到可读该私有仓库 token 的会话都能据此恢复四个 Secrets。
+  维护者电脑的本地克隆下另有一份 git 忽略的 `_private/` 副本，非必需。
 - **丢失密钥 = 已安装用户无法覆盖升级**。若真的丢了：重新生成密钥、更新四个 Secrets、提醒用户先在 App 内备份数据再卸载重装。
 
 ## 7. 已知问题与排错
@@ -181,3 +179,4 @@ gh release list --repo Xun2202/mihon-harmony
 - 同日 新增 `downloader.py`（CBZ 临时目录移入私有缓存、残留容错）；发布 preview.3。
 - 2026-10-03 改为补丁流水线：删除源码快照，旧机制折算为 `patches/0001–0003`，新增 `scripts/prepare-source.sh`、
   `check_patches.yml`、`dry_run` 输入。
+- 2026-10-05 签名密钥、密码与恢复说明上传到私有仓库 `Xun2202/mihon-harmony-keystore`（§6）。
