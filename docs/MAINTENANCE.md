@@ -47,6 +47,8 @@
 - `v0.20.4-harmony-preview.6` —— 2026-10-06，加入补丁 0006（下载通知统一为 Animeko 样式：数量标题、速度 + 进度正文、
   进度条、展开显示当前项；新文件 `DownloadSpeedMeter.kt`）。与 anikku-harmony preview.4、animeko-harmony harmony.7 同一轮
   （versionCode 2906）。
+- `v0.20.4-harmony-preview.7` —— 2026-10-06，加入补丁 0007（启动时删除已安装完成的 `update.apk`）。Mihon 的更新流程本身在卓易通里一直正常，
+  这一版只是跟 anikku-harmony preview.5 / animeko-harmony harmony.8 一起把"更新包残留在缓存里"统一清掉（versionCode 2907）。
 
 ## 3. 仓库结构
 
@@ -58,6 +60,7 @@ patches/0003-*.patch
 patches/0004-*.patch
 patches/0005-*.patch
 patches/0006-*.patch
+patches/0007-*.patch
 scripts/prepare-source.sh      # 官方源码 → 套补丁 → 改版本号, 每步一个 commit
 .github/workflows/harmony_preview.yml   # 每日构建发布
 .github/workflows/check_patches.yml     # 补丁可套用性检查
@@ -127,6 +130,8 @@ rebase 时通常只需重新定位那几行插入点。
 （`launchDownloaderJob()` 开头的 1 Hz 定时器、每页完成的调用点、`downloadImage()` 里 `countingInto(DownloadSpeedMeter)`），
 加 `remainingDownloads()` 辅助函数、三份 `strings.xml` / `plurals.xml`；新文件 `DownloadSpeedMeter.kt` 与 anikku-harmony 0010 的
 同名文件逐字节相同，改其中一份要同步另一份。上游若重写通知器，按 README 补丁表里的统一格式重做即可。
+补丁 0007 只有两处：`AppUpdateDownloadJob` companion 里的 `deleteInstalledApk()`（与 anikku-harmony 0011 逐字相同）和 `App.onCreate`
+里 `WidgetManager` 之后的 `scope.launch(Dispatchers.IO) { ... }`。上游若自己加了清理逻辑，整个补丁可以删掉。
 
 ### 5.2 加新补丁
 
@@ -183,6 +188,7 @@ gh release list --repo Xun2202/mihon-harmony
 | 闪退 `ForegroundServiceDidNotStopInTimeException ... type dataSync` | Android 15+ 平台规则：dataSync 前台服务后台累计 6 小时 / 24 小时后系统要求停止。实际触发路径是卓易通把后台进程冻结，下载不走、前台服务却一直挂着，把额度白白耗光。补丁 0005（preview.5 起）用静音音轨 + 唤醒锁阻止冻结，并把下载服务改为 `mediaPlayback` 类型（无时限）；书架更新仍是 dataSync，但不再空转。若用户关闭了「后台保持运行（鸿蒙）」开关则回到官方行为：隔几小时切回前台重置额度 |
 | 后台下载停住 / 切回 App 才继续 | 卓易通冻结后台进程。确认 设置 → 下载 →「后台保持运行（鸿蒙）」开着（preview.5 起默认开）；logcat 里应有 `Background keep-alive started`。若鸿蒙后续版本连静音音频也拦，只能等上游 / 系统变化 |
 | 下载时其他 App 的音乐被暂停 / 变小声 | 不应发生：keep-alive 不请求音频焦点。若出现，检查 `BackgroundKeepAlive.kt` 是否被改成了 `requestAudioFocus` |
+| 更新装完后 `Android/data/app.mihon.debug/cache/update.apk` 还在 | preview.6 及之前的行为，0007 起下次启动会删；若 preview.7+ 仍在，说明文件里的 versionCode 比当前高（下载了新版但还没装），属预期 |
 | 下载通知速度一直 0 B/s、或进度不动 | 速度靠 `downloadImage()` 里的 `countingInto(DownloadSpeedMeter)` 计数，进度靠 `Download.progress`（页平均）。上游若改了图片下载路径（不再经 `saveTo`）或页进度模型，0006 要跟着挪；通知本身每秒刷新一次，700 ms 内同章节的重复更新会被丢弃，这是预期行为 |
 | 图库里仍能看到漫画图片 | 确认 App「保存为 CBZ」已开启；目录模式无法规避，去图库隐藏该相册。历史遗留的 `_tmp` 目录可手动删除 |
 | Release 步骤失败 `refusing to allow a GitHub App to create or update workflow` | 有人把推 tag 的逻辑加回来了。保持 `gh release create --target $GITHUB_SHA`，不要 `git push` tag |
@@ -215,3 +221,5 @@ gh release list --repo Xun2202/mihon-harmony
   `foregroundServiceType=0x3`）后发布 preview.5。
 - 同日 用户要求三个鸿蒙版应用的下载通知统一成 Animeko 的样式（速度 + 进度）。新增补丁 0006（`DownloadSpeedMeter`、
   通知重写、1 Hz 刷新）；`dry_run` 验证（versionCode 2906、新字符串与类都在产物里）后发布 preview.6。
+- 同日（晚） 用户问三个 App 更新完的 APK 会不会一直占存储。Mihon / Anikku 此前都不删（Animeko 的 Android 端也不删）。
+  新增补丁 0007（启动时删已安装的 `update.apk`，与 anikku-harmony 0011 同一段代码）；`dry_run` 验证后发布 preview.7。

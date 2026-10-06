@@ -17,7 +17,7 @@
 - 包名为 `app.mihon.debug`（preview 构建类型自带的后缀），与官方正式版 `app.mihon` 是两个独立应用，可以共存；harmony-preview 版本之间可直接覆盖安装。
 - 安装后到 设置 → 高级 → **扩展安装器** 选「**Private**」：扩展会装进 App 自己的目录，不再受卓易通对安装第三方 APK 的限制。
 - 建议开启 设置 → 下载 →「**保存为 CBZ**」。目录模式下，下载中的图片会被鸿蒙图库索引（见补丁 0003）。
-- 应用内「检查更新」已改为检查本仓库的 Release，不会再提示安装官方 APK。
+- 应用内「检查更新」已改为检查本仓库的 Release，不会再提示安装官方 APK。更新流程是上游原样：更多 → 关于 → 「检查更新」→ 新版本页面点「下载」，页面留在原地显示进度，下载完点「安装」交给系统安装器。装完后留在缓存里的 `update.apk` 会在下次启动时自动删除（preview.7 起）。
 - APK 被交给「出境易」而提示「暂不支持安装该应用」时，把 APK 复制到本机存储后用系统「文件管理」打开即可由卓易通安装（详细步骤见 [animeko-harmony 的说明](https://github.com/Xun2202/animeko-harmony#安装步骤鸿蒙-next--6--7)，两者相同）。
 - 后台下载：卓易通会在 App 切到后台几秒后冻结进程，下载队列、书架更新都会停住，直到再次打开 App。preview.5 起默认开启 设置 → 下载 →「**后台保持运行（鸿蒙）**」：下载 / 更新期间播放一段静音音轨并持有唤醒锁（补丁 0005），卓易通就不会冻结进程；不影响其他 App 的声音，不用时可关闭。
 - 已知限制：Android 15+ 规定「数据同步」类前台服务在后台累计只能跑 6 小时 / 24 小时，超时会被系统强制停止，在卓易通里表现为一次闪退（`ForegroundServiceDidNotStopInTimeException`）。preview.5 起下载服务改为声明「媒体播放」类（无时限），书架更新仍是数据同步类但不再会被冻结卡住；若关闭了上面的开关，就回到官方行为，大批量下载时建议隔几小时打开一次 App（切回前台会重置额度）。
@@ -33,6 +33,7 @@
 | [`0004-database-busy-timeout-and-room-like-connection-setup.patch`](./patches/0004-database-busy-timeout-and-room-like-connection-setup.patch) | 修复启动时闪退 `SQLException: Error code: 5, message: database is locked`。官方 v0.20.4 打开数据库没有设置 busy timeout，崩溃页面所在的 `:error_handler` 进程与主进程同时开着数据库、或上次被系统杀掉后要恢复 WAL 时，写入一遇到锁就直接崩。回移上游 [mihonapp/mihon@38e93086c8](https://github.com/mihonapp/mihon/commit/38e93086c8)：每条连接 `PRAGMA busy_timeout = 3000`，显式 WAL（低内存设备用 TRUNCATE），1 写 + 4 读连接池。 |
 | [`0005-downloads-background-keep-alive-silent-audio.patch`](./patches/0005-downloads-background-keep-alive-silent-audio.patch) | 卓易通在 App 退到后台几秒后就冻结进程，dataSync 前台服务、唤醒锁、电池优化白名单都拦不住（Animeko 上验证过，只有音频输出能让容器继续跑）。下载停住不说，空转的前台服务还会把 Android 15 的 6 小时 dataSync 额度耗光，最后以 `ForegroundServiceDidNotStopInTimeException` 闪退。新增 `BackgroundKeepAlive`：下载队列 / 书架更新运行期间循环播放一段静音 PCM（`AudioTrack` MODE_STATIC，不占 CPU，不抢音频焦点）并持有部分唤醒锁；下载服务改为声明 `mediaPlayback` 类型（无 6 小时限制）。设置 → 下载 →「后台保持运行（鸿蒙）」可关闭。 |
 | [`0006-downloads-notification-speed-and-progress.patch`](./patches/0006-downloads-notification-speed-and-progress.patch) | 三个鸿蒙版应用的下载通知统一成 Animeko 的样式：标题「正在下载 N 个章节」（排队 + 进行中），正文「下载：<速度>/s · <进度>%」，确定型进度条，展开后第二行显示当前「漫画 - 章节」（「隐藏通知内容」开启时省略）。新增 `DownloadSpeedMeter`（近 3 秒滑动平均，包装每页响应流计数；与 anikku-harmony 0010 同一份文件），下载器每秒刷新一次通知，同一章节 700 ms 内的重复更新丢弃。 |
+| [`0007-updater-delete-installed-apk.patch`](./patches/0007-updater-delete-installed-apk.patch) | 应用内更新下载到 `Android/data/<包名>/cache/update.apk` 的安装包此前没人删，一直留到下次更新被覆盖。`App.onCreate` 里新增的 `AppUpdateDownloadJob.deleteInstalledApk()` 用 `getPackageArchiveInfo` 读出它的 versionCode，不高于当前版本（或文件读不出来）就删除。与 anikku-harmony 0011 的清理逻辑逐字相同；Animeko 则在 harmony.8 里让 Android 端也调用上游已有的 `deleteInstalledFiles()`。 |
 
 补丁按 [`patches/series`](./patches/series) 的顺序套用。
 
