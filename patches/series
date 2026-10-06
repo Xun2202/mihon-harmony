@@ -2,3 +2,4 @@
 0001-downloads-rename-fallback-for-saf-without-renamedocument.patch
 0002-updater-use-harmony-fork-releases.patch
 0003-downloads-cbz-temp-in-private-cache.patch
+0004-database-busy-timeout-and-room-like-connection-setup.patch

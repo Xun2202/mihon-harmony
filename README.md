@@ -19,6 +19,7 @@
 - 建议开启 设置 → 下载 →「**保存为 CBZ**」。目录模式下，下载中的图片会被鸿蒙图库索引（见补丁 0003）。
 - 应用内「检查更新」已改为检查本仓库的 Release，不会再提示安装官方 APK。
 - APK 被交给「出境易」而提示「暂不支持安装该应用」时，把 APK 复制到本机存储后用系统「文件管理」打开即可由卓易通安装（详细步骤见 [animeko-harmony 的说明](https://github.com/Xun2202/animeko-harmony#安装步骤鸿蒙-next--6--7)，两者相同）。
+- 已知限制：Android 15+ 规定「数据同步」类前台服务在后台累计只能跑 6 小时 / 24 小时。下载队列或书架更新在后台连续跑满 6 小时后会被系统强制停止，在卓易通里可能表现为一次闪退（`ForegroundServiceDidNotStopInTimeException`），重新打开即可，下载会从断点继续。把 Mihon 切回前台会重置这 6 小时额度，大批量下载时建议隔几小时打开一次 App。
 
 ## 包含的补丁
 
@@ -27,6 +28,7 @@
 | [`0001-downloads-rename-fallback-for-saf-without-renamedocument.patch`](./patches/0001-downloads-rename-fallback-for-saf-without-renamedocument.patch) | 卓易通的文件提供方不支持 SAF `renameDocument`，下载的图片会停在 `.tmp`、章节下载失败。新增 `UniFile.renameToOrCopy()`：改名失败时回退为「复制到目标后删除源」。正常支持改名的设备仍走原流程。 |
 | [`0002-updater-use-harmony-fork-releases.patch`](./patches/0002-updater-use-harmony-fork-releases.patch) | 应用内更新改查本仓库的 GitHub Releases：preview 构建只认 tag 含 `-harmony-preview.` 的，版本号按 `(x, y, z, N)` 四元组比较。否则官方更新逻辑会推送官方 APK（签名不同无法安装）或因解析不了 `0.20.4-harmony.1` 而崩溃。 |
 | [`0003-downloads-cbz-temp-in-private-cache.patch`](./patches/0003-downloads-cbz-temp-in-private-cache.patch) | 鸿蒙图库会索引卓易通共享存储里的所有图片且不认 `.nomedia`。CBZ 模式下把下载临时目录移到 App 私有缓存，只有最终 `.cbz` 写入用户选择的目录；并增加 `finalizeArchive()`，清理上次失败残留的 `.cbz`，避免下载队列卡死。 |
+| [`0004-database-busy-timeout-and-room-like-connection-setup.patch`](./patches/0004-database-busy-timeout-and-room-like-connection-setup.patch) | 修复启动时闪退 `SQLException: Error code: 5, message: database is locked`。官方 v0.20.4 打开数据库没有设置 busy timeout，崩溃页面所在的 `:error_handler` 进程与主进程同时开着数据库、或上次被系统杀掉后要恢复 WAL 时，写入一遇到锁就直接崩。回移上游 [mihonapp/mihon@38e93086c8](https://github.com/mihonapp/mihon/commit/38e93086c8)：每条连接 `PRAGMA busy_timeout = 3000`，显式 WAL（低内存设备用 TRUNCATE），1 写 + 4 读连接池。 |
 
 补丁按 [`patches/series`](./patches/series) 的顺序套用。
 

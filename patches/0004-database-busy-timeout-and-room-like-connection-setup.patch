@@ -1,0 +1,107 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Xun2202 <98207886+Xun2202@users.noreply.github.com>
+Date: Tue, 6 Oct 2026 04:44:02 +0000
+Subject: [PATCH] database: busy timeout and Room-like connection setup to
+ avoid "database is locked"
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Crash seen on HarmonyOS/卓易通 (Android 16 compat layer) right after relaunching
+from the crash screen:
+
+    android.database.SQLException: Error code: 5, message: database is locked
+        at androidx.sqlite.driver.bundled.BundledSQLiteStatementKt.nativeStep
+        at com.eygraber.sqldelight.androidx.driver.AndroidxPreparedStatement.execute
+        at com.eygraber.sqldelight.androidx.driver.AndroidxSqliteExecutingDriver.executeStatement
+
+SQLITE_BUSY surfaces as a fatal exception because v0.20.4 opens tachiyomi.db
+without a busy timeout: the first time a write statement meets a lock held by
+another connection it fails immediately instead of waiting. Locks from
+outside the single writer pool do occur:
+
+- CrashActivity runs in the ":error_handler" process, and App.onCreate()
+  (WidgetManager, migrator) opens the same database there. When the user taps
+  "restart" the main process starts while the crash process is still alive.
+- After the process is killed (e.g. the dataSync foreground service timeout
+  on Android 15+), the next open has to recover the WAL file, during which
+  other connections get SQLITE_BUSY.
+
+Backport of upstream mihonapp/mihon@38e93086c8 ("Configure database
+connections like Room"), adapted to the Injekt AppModule of v0.20.4:
+
+- every connection (writer and readers) runs `PRAGMA busy_timeout = 3000`
+  via a custom AndroidxSqliteConnectionFactory, so a short lock is waited
+  out instead of failing;
+- journal mode is set explicitly: WAL unless the device is low on RAM
+  (TRUNCATE there), and the pool is one writer + four readers (one reader in
+  TRUNCATE mode) via MultipleReadersSingleWriter(nonWalCount = 1, walCount = 4).
+
+Upstream's `isWal = isLowRamDevice ?: true` reads inverted relative to its
+own comment ("WAL unless the device is low on RAM"); this patch follows the
+documented intent, which also keeps existing databases in the WAL mode the
+driver already used, so no journal-mode switch happens on upgrade.
+
+The sqldelight-androidx-driver build pinned by v0.20.4 (0637a964a1) already
+provides AndroidxSqliteConnectionFactory, SqliteJournalMode and the
+connectionFactory constructor; no dependency bump is needed.
+---
+ .../java/eu/kanade/tachiyomi/di/AppModule.kt  | 25 ++++++++++++++++++-
+ 1 file changed, 24 insertions(+), 1 deletion(-)
+
+diff --git a/app/src/main/java/eu/kanade/tachiyomi/di/AppModule.kt b/app/src/main/java/eu/kanade/tachiyomi/di/AppModule.kt
+index ed3f940..e0bfdf1 100644
+--- a/app/src/main/java/eu/kanade/tachiyomi/di/AppModule.kt
++++ b/app/src/main/java/eu/kanade/tachiyomi/di/AppModule.kt
+@@ -1,14 +1,22 @@
+ package eu.kanade.tachiyomi.di
+ 
++import android.app.ActivityManager
+ import android.app.Application
+ import android.content.Context
+ import androidx.core.content.ContextCompat
++import androidx.core.content.getSystemService
++import androidx.sqlite.SQLiteConnection
++import androidx.sqlite.SQLiteDriver
+ import androidx.sqlite.driver.bundled.BundledSQLiteDriver
++import androidx.sqlite.execSQL
+ import app.cash.sqldelight.db.SqlDriver
++import com.eygraber.sqldelight.androidx.driver.AndroidxSqliteConcurrencyModel.MultipleReadersSingleWriter
+ import com.eygraber.sqldelight.androidx.driver.AndroidxSqliteConfiguration
++import com.eygraber.sqldelight.androidx.driver.AndroidxSqliteConnectionFactory
+ import com.eygraber.sqldelight.androidx.driver.AndroidxSqliteDatabaseType
+ import com.eygraber.sqldelight.androidx.driver.AndroidxSqliteDriver
+ import com.eygraber.sqldelight.androidx.driver.FileProvider
++import com.eygraber.sqldelight.androidx.driver.SqliteJournalMode
+ import eu.kanade.domain.track.store.DelayedTrackingStore
+ import eu.kanade.tachiyomi.data.cache.ChapterCache
+ import eu.kanade.tachiyomi.data.cache.CoverCache
+@@ -60,12 +68,27 @@ class AppModule(val app: Application) : InjektModule {
+             synchronized(lock) {
+                 sqlDriverRef?.get()?.let { return@synchronized it }
+ 
++                // Configured like Room's connection manager: WAL unless the device is low on RAM, one writer
++                // with four readers (one in TRUNCATE mode), and a busy timeout on every connection so that a
++                // lock held by another connection or process (e.g. the :error_handler process, or WAL recovery
++                // after the app was killed) is waited out instead of failing with "database is locked".
++                val isWal = app.getSystemService<ActivityManager>()?.isLowRamDevice != true
+                 AndroidxSqliteDriver(
+-                    driver = BundledSQLiteDriver(),
++                    connectionFactory = object : AndroidxSqliteConnectionFactory {
++                        override val driver: SQLiteDriver = BundledSQLiteDriver()
++
++                        override fun createConnection(name: String): SQLiteConnection {
++                            return driver.open(name).apply {
++                                execSQL("PRAGMA busy_timeout = 3000")
++                            }
++                        }
++                    },
+                     databaseType = AndroidxSqliteDatabaseType.FileProvider(app, "tachiyomi.db"),
+                     schema = Database.Schema,
+                     configuration = AndroidxSqliteConfiguration(
+                         isForeignKeyConstraintsEnabled = true,
++                        journalMode = if (isWal) SqliteJournalMode.WAL else SqliteJournalMode.Truncate,
++                        concurrencyModel = MultipleReadersSingleWriter(isWal = isWal, nonWalCount = 1, walCount = 4),
+                     ),
+                 )
+                     .also { sqlDriverRef = WeakReference(it) }

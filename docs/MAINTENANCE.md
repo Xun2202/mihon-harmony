@@ -40,6 +40,8 @@
 - 从 2026-10-03 起由本补丁流水线构建；补丁内容与 preview.3 完全一致（已用两套流程产出的源码树逐文件比对确认）。
   切换当天用 `dry_run` 构建了 `v0.20.4-harmony-preview.4` 的 APK 做验证（未发布）：包名 `app.mihon.debug`、versionCode 2904、
   versionName `0.20.4-harmony.4-7876`、签名证书与 preview.3 相同、ZIP 条目数相同。
+- `v0.20.4-harmony-preview.4` —— 2026-10-06，加入补丁 0004（数据库 busy timeout / 连接池配置），修复 `database is locked` 闪退。
+  是补丁流水线发布的第一个正式版本（versionCode 2904）。
 
 ## 3. 仓库结构
 
@@ -48,6 +50,7 @@ patches/series                 # 套用顺序, 每行一个文件名, # 开头�
 patches/0001-*.patch           # git format-patch 格式, 基于官方 v0.20.4 生成
 patches/0002-*.patch
 patches/0003-*.patch
+patches/0004-*.patch
 scripts/prepare-source.sh      # 官方源码 → 套补丁 → 改版本号, 每步一个 commit
 .github/workflows/harmony_preview.yml   # 每日构建发布
 .github/workflows/check_patches.yml     # 补丁可套用性检查
@@ -108,7 +111,8 @@ git format-patch -o /path/to/mihon-harmony/patches v0.21.0..HEAD
 ```
 
 每个补丁的意图写在它的 commit message 里，解决冲突前先读一遍。补丁 0001 和 0003 都改 `Downloader.kt`，
-上游重构下载器时两者通常要一起重做。
+上游重构下载器时两者通常要一起重做。补丁 0004 是上游 `38e93086c8`（2026-09-30）的回移：下一个官方稳定版
+大概率已自带这段配置（上游已把它移到 `data/.../DatabaseBindings.kt` 并换成 Metro DI），届时直接从 `series` 删掉 0004 即可。
 
 ### 5.2 加新补丁
 
@@ -160,6 +164,9 @@ gh release list --repo Xun2202/mihon-harmony
 | `prepare-source.sh` 报 `Patch 000X ... does not apply` | 官方新版改动了补丁触及的代码。按 §5.1 rebase。先看 zsyou 仓库的 `.github/patches/harmony.patch` 是否已更新，可作参考 |
 | 编译报错在 `AppUpdateChecker.kt` / `ReleaseServiceImpl.kt` / `GetApplicationRelease.kt` | 官方改了这几个文件的接口（补丁 0002 是基于 v0.20.4 的近乎整文件改写）。取官方新版文件重新套用 0002 的意图 |
 | 编译报错在 `Downloader.kt` | 补丁 0001 / 0003 的改动点被上游重构。参考两个补丁的 commit message 重做 |
+| 编译报错在 `AppModule.kt`（`AndroidxSqliteConnectionFactory` / `SqliteJournalMode` 找不到） | 上游换了 sqldelight-androidx-driver 版本或已自带等价配置。先看官方新版的数据库驱动初始化处是否已有 `busy_timeout`；有则删掉 0004，没有则按新驱动 API 重做 |
+| 闪退 `SQLException: Error code: 5, message: database is locked` | 数据库写入撞锁且无 busy timeout。补丁 0004 已修（preview.4 起）；若再现，确认 0004 仍在 `series` 里且驱动版本未回退 |
+| 闪退 `ForegroundServiceDidNotStopInTimeException ... type dataSync` | Android 15+ 平台规则：dataSync 前台服务后台累计 6 小时 / 24 小时后系统要求停止，WorkManager 2.10+ 已实现 `onTimeout` 但卓易通里仍可能被判超时。**App 内无法规避**，不是补丁能修的问题；告知用户大批量下载时隔几小时切回前台（重置额度），重开 App 后下载从断点继续 |
 | 图库里仍能看到漫画图片 | 确认 App「保存为 CBZ」已开启；目录模式无法规避，去图库隐藏该相册。历史遗留的 `_tmp` 目录可手动删除 |
 | Release 步骤失败 `refusing to allow a GitHub App to create or update workflow` | 有人把推 tag 的逻辑加回来了。保持 `gh release create --target $GITHUB_SHA`，不要 `git push` tag |
 | 定时任务不跑 | 仓库 60 天无提交被 GitHub 暂停，到 Actions 页面手动 Enable |
@@ -184,3 +191,5 @@ gh release list --repo Xun2202/mihon-harmony
 - 2026-10-05 签名密钥、密码与恢复说明上传到私有仓库 `Xun2202/mihon-harmony-keystore`；同日所有签名密钥
   统一迁入私有仓库 `Xun2202/keystores`（本项目在 `mihon-harmony/` 目录），旧仓库归档；用迁入后的备份重写
   四个 Secrets 并以 `dry_run` 构建复核签名证书一致（§6）。
+- 2026-10-06 用户上报两次闪退（dataSync 前台服务超时、`database is locked`）。前者是平台限制（§7），后者新增补丁 0004
+  回移上游 `38e93086c8`（busy_timeout 3000 + 显式 WAL + 1 写 4 读连接池）；`dry_run` 验证后发布 preview.4。
