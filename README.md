@@ -21,6 +21,7 @@
 - APK 被交给「出境易」而提示「暂不支持安装该应用」时，把 APK 复制到本机存储后用系统「文件管理」打开即可由卓易通安装（详细步骤见 [animeko-harmony 的说明](https://github.com/Xun2202/animeko-harmony#安装步骤鸿蒙-next--6--7)，两者相同）。
 - 后台下载：卓易通会在 App 切到后台几秒后冻结进程，下载队列、书架更新都会停住，直到再次打开 App。preview.5 起默认开启 设置 → 下载 →「**后台保持运行（鸿蒙）**」：下载 / 更新期间播放一段静音音轨并持有唤醒锁（补丁 0005），卓易通就不会冻结进程；不影响其他 App 的声音，不用时可关闭。
 - 已知限制：Android 15+ 规定「数据同步」类前台服务在后台累计只能跑 6 小时 / 24 小时，超时会被系统强制停止，在卓易通里表现为一次闪退（`ForegroundServiceDidNotStopInTimeException`）。preview.5 起下载服务改为声明「媒体播放」类（无时限），书架更新仍是数据同步类但不再会被冻结卡住；若关闭了上面的开关，就回到官方行为，大批量下载时建议隔几小时打开一次 App（切回前台会重置额度）。
+- 下载通知（preview.6 起）与 Animeko / Anikku 的鸿蒙版统一：标题「正在下载 N 个章节」，正文「下载：<速度>/s · <进度>%」+ 进度条，下拉展开显示当前的「漫画 - 章节」（开启「隐藏通知内容」时不显示）。
 
 ## 包含的补丁
 
@@ -31,6 +32,7 @@
 | [`0003-downloads-cbz-temp-in-private-cache.patch`](./patches/0003-downloads-cbz-temp-in-private-cache.patch) | 鸿蒙图库会索引卓易通共享存储里的所有图片且不认 `.nomedia`。CBZ 模式下把下载临时目录移到 App 私有缓存，只有最终 `.cbz` 写入用户选择的目录；并增加 `finalizeArchive()`，清理上次失败残留的 `.cbz`，避免下载队列卡死。 |
 | [`0004-database-busy-timeout-and-room-like-connection-setup.patch`](./patches/0004-database-busy-timeout-and-room-like-connection-setup.patch) | 修复启动时闪退 `SQLException: Error code: 5, message: database is locked`。官方 v0.20.4 打开数据库没有设置 busy timeout，崩溃页面所在的 `:error_handler` 进程与主进程同时开着数据库、或上次被系统杀掉后要恢复 WAL 时，写入一遇到锁就直接崩。回移上游 [mihonapp/mihon@38e93086c8](https://github.com/mihonapp/mihon/commit/38e93086c8)：每条连接 `PRAGMA busy_timeout = 3000`，显式 WAL（低内存设备用 TRUNCATE），1 写 + 4 读连接池。 |
 | [`0005-downloads-background-keep-alive-silent-audio.patch`](./patches/0005-downloads-background-keep-alive-silent-audio.patch) | 卓易通在 App 退到后台几秒后就冻结进程，dataSync 前台服务、唤醒锁、电池优化白名单都拦不住（Animeko 上验证过，只有音频输出能让容器继续跑）。下载停住不说，空转的前台服务还会把 Android 15 的 6 小时 dataSync 额度耗光，最后以 `ForegroundServiceDidNotStopInTimeException` 闪退。新增 `BackgroundKeepAlive`：下载队列 / 书架更新运行期间循环播放一段静音 PCM（`AudioTrack` MODE_STATIC，不占 CPU，不抢音频焦点）并持有部分唤醒锁；下载服务改为声明 `mediaPlayback` 类型（无 6 小时限制）。设置 → 下载 →「后台保持运行（鸿蒙）」可关闭。 |
+| [`0006-downloads-notification-speed-and-progress.patch`](./patches/0006-downloads-notification-speed-and-progress.patch) | 三个鸿蒙版应用的下载通知统一成 Animeko 的样式：标题「正在下载 N 个章节」（排队 + 进行中），正文「下载：<速度>/s · <进度>%」，确定型进度条，展开后第二行显示当前「漫画 - 章节」（「隐藏通知内容」开启时省略）。新增 `DownloadSpeedMeter`（近 3 秒滑动平均，包装每页响应流计数；与 anikku-harmony 0010 同一份文件），下载器每秒刷新一次通知，同一章节 700 ms 内的重复更新丢弃。 |
 
 补丁按 [`patches/series`](./patches/series) 的顺序套用。
 
