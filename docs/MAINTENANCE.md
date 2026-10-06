@@ -42,6 +42,8 @@
   versionName `0.20.4-harmony.4-7876`、签名证书与 preview.3 相同、ZIP 条目数相同。
 - `v0.20.4-harmony-preview.4` —— 2026-10-06，加入补丁 0004（数据库 busy timeout / 连接池配置），修复 `database is locked` 闪退。
   是补丁流水线发布的第一个正式版本（versionCode 2904）。
+- `v0.20.4-harmony-preview.5` —— 2026-10-06，加入补丁 0005（后台保活：静音音轨 + 唤醒锁，下载服务改 `mediaPlayback` 类型，
+  设置 → 下载 新增开关）。修复卓易通后台冻结导致下载停住、以及由此触发的 dataSync 6 小时超时闪退（versionCode 2905）。
 
 ## 3. 仓库结构
 
@@ -51,6 +53,7 @@ patches/0001-*.patch           # git format-patch 格式, 基于官方 v0.20.4 �
 patches/0002-*.patch
 patches/0003-*.patch
 patches/0004-*.patch
+patches/0005-*.patch
 scripts/prepare-source.sh      # 官方源码 → 套补丁 → 改版本号, 每步一个 commit
 .github/workflows/harmony_preview.yml   # 每日构建发布
 .github/workflows/check_patches.yml     # 补丁可套用性检查
@@ -60,7 +63,7 @@ LICENSE                        # Apache-2.0 (沿用上游)
 ```
 
 旧 fork 布局（`.github/patches/harmony.patch` + workflow 内嵌 Python + 整文件覆盖目录 + `downloader.py`）
-已全部折算进上面三个标准补丁，不再有「字符串锚点替换」这种脆弱机制。
+已全部折算进 0001–0003 三个标准补丁，不再有「字符串锚点替换」这种脆弱机制。
 
 ## 4. 构建流程（`harmony_preview.yml` 做了什么）
 
@@ -113,6 +116,9 @@ git format-patch -o /path/to/mihon-harmony/patches v0.21.0..HEAD
 每个补丁的意图写在它的 commit message 里，解决冲突前先读一遍。补丁 0001 和 0003 都改 `Downloader.kt`，
 上游重构下载器时两者通常要一起重做。补丁 0004 是上游 `38e93086c8`（2026-09-30）的回移：下一个官方稳定版
 大概率已自带这段配置（上游已把它移到 `data/.../DatabaseBindings.kt` 并换成 Metro DI），届时直接从 `series` 删掉 0004 即可。
+补丁 0005 触及 `DownloadJob.kt` / `LibraryUpdateJob.kt` 的 `setForegroundSafely()` 之后一行、`getForegroundInfo()` 的服务类型、
+`DownloadPreferences.kt`、`SettingsDownloadScreen.kt`、manifest 和三份 strings.xml；新文件 `BackgroundKeepAlive.kt` 独立无依赖，
+rebase 时通常只需重新定位那几行插入点。
 
 ### 5.2 加新补丁
 
@@ -166,7 +172,9 @@ gh release list --repo Xun2202/mihon-harmony
 | 编译报错在 `Downloader.kt` | 补丁 0001 / 0003 的改动点被上游重构。参考两个补丁的 commit message 重做 |
 | 编译报错在 `AppModule.kt`（`AndroidxSqliteConnectionFactory` / `SqliteJournalMode` 找不到） | 上游换了 sqldelight-androidx-driver 版本或已自带等价配置。先看官方新版的数据库驱动初始化处是否已有 `busy_timeout`；有则删掉 0004，没有则按新驱动 API 重做 |
 | 闪退 `SQLException: Error code: 5, message: database is locked` | 数据库写入撞锁且无 busy timeout。补丁 0004 已修（preview.4 起）；若再现，确认 0004 仍在 `series` 里且驱动版本未回退 |
-| 闪退 `ForegroundServiceDidNotStopInTimeException ... type dataSync` | Android 15+ 平台规则：dataSync 前台服务后台累计 6 小时 / 24 小时后系统要求停止，WorkManager 2.10+ 已实现 `onTimeout` 但卓易通里仍可能被判超时。**App 内无法规避**，不是补丁能修的问题；告知用户大批量下载时隔几小时切回前台（重置额度），重开 App 后下载从断点继续 |
+| 闪退 `ForegroundServiceDidNotStopInTimeException ... type dataSync` | Android 15+ 平台规则：dataSync 前台服务后台累计 6 小时 / 24 小时后系统要求停止。实际触发路径是卓易通把后台进程冻结，下载不走、前台服务却一直挂着，把额度白白耗光。补丁 0005（preview.5 起）用静音音轨 + 唤醒锁阻止冻结，并把下载服务改为 `mediaPlayback` 类型（无时限）；书架更新仍是 dataSync，但不再空转。若用户关闭了「后台保持运行（鸿蒙）」开关则回到官方行为：隔几小时切回前台重置额度 |
+| 后台下载停住 / 切回 App 才继续 | 卓易通冻结后台进程。确认 设置 → 下载 →「后台保持运行（鸿蒙）」开着（preview.5 起默认开）；logcat 里应有 `Background keep-alive started`。若鸿蒙后续版本连静音音频也拦，只能等上游 / 系统变化 |
+| 下载时其他 App 的音乐被暂停 / 变小声 | 不应发生：keep-alive 不请求音频焦点。若出现，检查 `BackgroundKeepAlive.kt` 是否被改成了 `requestAudioFocus` |
 | 图库里仍能看到漫画图片 | 确认 App「保存为 CBZ」已开启；目录模式无法规避，去图库隐藏该相册。历史遗留的 `_tmp` 目录可手动删除 |
 | Release 步骤失败 `refusing to allow a GitHub App to create or update workflow` | 有人把推 tag 的逻辑加回来了。保持 `gh release create --target $GITHUB_SHA`，不要 `git push` tag |
 | 定时任务不跑 | 仓库 60 天无提交被 GitHub 暂停，到 Actions 页面手动 Enable |
@@ -193,3 +201,6 @@ gh release list --repo Xun2202/mihon-harmony
   四个 Secrets 并以 `dry_run` 构建复核签名证书一致（§6）。
 - 2026-10-06 用户上报两次闪退（dataSync 前台服务超时、`database is locked`）。前者是平台限制（§7），后者新增补丁 0004
   回移上游 `38e93086c8`（busy_timeout 3000 + 显式 WAL + 1 写 4 读连接池）；`dry_run` 验证后发布 preview.4。
+- 同日 用户反馈切后台后下载不走，并推测前者闪退是后台卡住把 6 小时额度耗光所致（成立）。新增补丁 0005 后台保活
+  （静音 `AudioTrack` + 唤醒锁，下载服务改 `mediaPlayback`，设置开关）；`dry_run` 验证（versionCode 2905、manifest
+  `foregroundServiceType=0x3`）后发布 preview.5。
