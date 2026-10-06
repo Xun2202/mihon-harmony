@@ -49,6 +49,9 @@
   （versionCode 2906）。
 - `v0.20.4-harmony-preview.7` —— 2026-10-06，加入补丁 0007（启动时删除已安装完成的 `update.apk`）。Mihon 的更新流程本身在卓易通里一直正常，
   这一版只是跟 anikku-harmony preview.5 / animeko-harmony harmony.8 一起把"更新包残留在缓存里"统一清掉（versionCode 2907）。
+- `v0.20.4-harmony-preview.8` —— 2026-10-06，加入补丁 0008（检查更新先读 `repo` 分支的 `releases.json` 镜像，再退回 `api.github.com`）。
+  起因是 Anikku 用户撞上匿名 GitHub 接口每 IP 每小时 60 次的配额（HTTP 403）；Mihon 走同一条路，只是还没撞上。
+  与 anikku-harmony preview.7 / animeko-harmony harmony.9 同一轮（versionCode 2908）。
 
 ## 3. 仓库结构
 
@@ -61,8 +64,11 @@ patches/0004-*.patch
 patches/0005-*.patch
 patches/0006-*.patch
 patches/0007-*.patch
+patches/0008-*.patch
 scripts/prepare-source.sh      # 官方源码 → 套补丁 → 改版本号, 每步一个 commit
-.github/workflows/harmony_preview.yml   # 每日构建发布
+scripts/write-release-index.sh # Releases 接口返回 → repo 分支的 releases.json / latest.json
+.github/workflows/harmony_preview.yml   # 每日构建发布, 最后写 Release 索引
+.github/workflows/release_index.yml     # Release 被手动增删改时重写索引 (也可手动触发)
 .github/workflows/check_patches.yml     # 补丁可套用性检查
 docs/MAINTENANCE.md            # 本文
 README.md                      # 面向用户的说明 + 补丁一览
@@ -96,6 +102,10 @@ LICENSE                        # Apache-2.0 (沿用上游)
    - **不推送 tag 到源码**。默认 `GITHUB_TOKEN` 无权推送含 workflow 文件改动的提交，所以让 `gh release create` 直接在 `main` 当前提交上建 tag。
    - **不要**把 `.sha1` / `.sha256` 之类的文件当作 Release 资产上传：更新器用「文件名含 `-arm64-v8a`」挑 APK，
      `mihon-xxx-arm64-v8a.apk.sha1` 会把下载链接顶掉。校验值只写进 Release 说明。
+8. **Release 索引**：`scripts/write-release-index.sh` 把 `gh api repos/<repo>/releases?per_page=30` 原样存成 `releases.json`、`jq` 取最新正式版存成 `latest.json`，
+   连同说明 `README.md` 提交到孤儿分支 `repo`（被并发推送拒绝就重取重写，最多 3 次）。应用内更新器（0008 起）优先读
+   `https://raw.githubusercontent.com/Xun2202/mihon-harmony/repo/releases.json`。`GITHUB_TOKEN` 创建的 Release 不触发 `release` 事件，所以必须在这里写；
+   手动改 Release 时由 `release_index.yml` 兜底。`repo` 分支不要手改。
 
 ## 5. 补丁维护（最常见的工作）
 
@@ -132,6 +142,10 @@ rebase 时通常只需重新定位那几行插入点。
 同名文件逐字节相同，改其中一份要同步另一份。上游若重写通知器，按 README 补丁表里的统一格式重做即可。
 补丁 0007 只有两处：`AppUpdateDownloadJob` companion 里的 `deleteInstalledApk()`（与 anikku-harmony 0011 逐字相同）和 `App.onCreate`
 里 `WidgetManager` 之后的 `scope.launch(Dispatchers.IO) { ... }`。上游若自己加了清理逻辑，整个补丁可以删掉。
+补丁 0008 只改 `ReleaseServiceImpl`：新增 `listReleases(repository)`（镜像 URL `https://raw.githubusercontent.com/$repository/repo/releases.json`，
+`networkService.client.newBuilder()` 三个超时都 10 秒；`CancellationException` 直接抛，其他异常 `logcat(WARN)` 后退回原来的 API URL），`latest()` 改调它。
+镜像文件必须保持是接口原样返回，`GithubRelease` 的字段（`tag_name` / `body` / `html_url` / `assets[].name` / `assets[].browser_download_url`）一个都不能少。
+与 anikku-harmony 0014 的 `listReleases()` 除 API URL 的 `?per_page=30` 外逐字相同，改一处要同步另一处。
 
 ### 5.2 加新补丁
 
@@ -193,7 +207,9 @@ gh release list --repo Xun2202/mihon-harmony
 | 图库里仍能看到漫画图片 | 确认 App「保存为 CBZ」已开启；目录模式无法规避，去图库隐藏该相册。历史遗留的 `_tmp` 目录可手动删除 |
 | Release 步骤失败 `refusing to allow a GitHub App to create or update workflow` | 有人把推 tag 的逻辑加回来了。保持 `gh release create --target $GITHUB_SHA`，不要 `git push` tag |
 | 定时任务不跑 | 仓库 60 天无提交被 GitHub 暂停，到 Actions 页面手动 Enable |
-| App 内检查不到更新 | 确认 Release 不是 draft、tag 含 `-harmony-preview.`、资产文件名含 `-arm64-v8a`；App 最多每 3 天自动查一次，可在「关于」页手动检查 |
+| App 内检查不到更新 | 确认 Release 不是 draft、tag 含 `-harmony-preview.`、资产文件名含 `-arm64-v8a`，且 `repo` 分支的 `releases.json` 里已有它（0008 起 App 先读镜像，CDN 缓存最多约 5 分钟）；0.20.4 的 `GetApplicationRelease` 没有节流，每次启动都会查一次，也可在「关于」页手动检查 |
+| 「检查更新」toast「HTTP error 403」 | 匿名 `api.github.com` 的配额（每个出口 IP 每小时 60 次）被用完，NAT / 代理后面所有人共用；仓库本身公开可访问。等一小时或换网络；preview.8 起先读 `repo` 分支的镜像，一般不会再撞上。仍 403 说明镜像也读不到（被墙 / 超时 10 秒），看 logcat 里的 `Release mirror unavailable` |
+| `repo` 分支的 `releases.json` 没更新 / 不存在 | 发版 workflow 的最后一步失败，或 Release 是手动改的而 `release_index.yml` 没跑。到 Actions 手动运行「Release index」；本地也可 `GH_TOKEN=... scripts/write-release-index.sh Xun2202/mihon-harmony` |
 | 卓易通里书架不自动更新 | 设置 → 书架 → 智能更新，取消全部限制选项 |
 | 通知栏不显示下载进度 | 卓易通通知兼容问题，无解，不影响功能 |
 
@@ -223,3 +239,6 @@ gh release list --repo Xun2202/mihon-harmony
   通知重写、1 Hz 刷新）；`dry_run` 验证（versionCode 2906、新字符串与类都在产物里）后发布 preview.6。
 - 同日（晚） 用户问三个 App 更新完的 APK 会不会一直占存储。Mihon / Anikku 此前都不删（Animeko 的 Android 端也不删）。
   新增补丁 0007（启动时删已安装的 `update.apk`，与 anikku-harmony 0011 同一段代码）；`dry_run` 验证后发布 preview.7。
+- 同日（深夜） Anikku 用户撞上「检查更新」HTTP 403（匿名 GitHub 接口每 IP 每小时 60 次配额）。三个 App 的更新检查都直接打 `api.github.com`，
+  按跨 App 规则统一改：流水线新增 `write-release-index.sh` / `release_index.yml` 把 Releases 接口返回镜像到 `repo` 分支，
+  新增补丁 0008 让 App 先读镜像再退回接口；`dry_run` 验证后发布 preview.8（versionCode 2908）。
