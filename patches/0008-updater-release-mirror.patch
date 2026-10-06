@@ -1,0 +1,103 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Xun2202 <98207886+Xun2202@users.noreply.github.com>
+Date: Tue, 6 Oct 2026 18:29:08 +0000
+Subject: [PATCH] updater: read the release list from the repo-branch mirror
+ first
+
+Checking for updates listed the fork's releases through api.github.com,
+whose anonymous quota is 60 requests per hour per IP address. Phones
+behind carrier NAT or a shared proxy exhaust it within minutes and the
+check fails with "HTTP error 403".
+
+The fork's CI now mirrors the "list releases" response to the `repo`
+branch of the release repository (releases.json). Read it from
+raw.githubusercontent.com first (a plain CDN, no such quota), with short
+timeouts, and fall back to the API when the mirror is unreachable.
+---
+ .../data/release/ReleaseServiceImpl.kt        | 49 ++++++++++++++++---
+ 1 file changed, 43 insertions(+), 6 deletions(-)
+
+diff --git a/data/src/main/java/tachiyomi/data/release/ReleaseServiceImpl.kt b/data/src/main/java/tachiyomi/data/release/ReleaseServiceImpl.kt
+index 67e4330..4f07af5 100644
+--- a/data/src/main/java/tachiyomi/data/release/ReleaseServiceImpl.kt
++++ b/data/src/main/java/tachiyomi/data/release/ReleaseServiceImpl.kt
+@@ -6,9 +6,13 @@ import eu.kanade.tachiyomi.network.NetworkHelper
+ import eu.kanade.tachiyomi.network.awaitSuccess
+ import eu.kanade.tachiyomi.network.parseAs
+ import kotlinx.serialization.json.Json
++import logcat.LogPriority
++import tachiyomi.core.common.util.system.logcat
+ import tachiyomi.domain.release.interactor.GetApplicationRelease
+ import tachiyomi.domain.release.model.Release
+ import tachiyomi.domain.release.service.ReleaseService
++import java.util.concurrent.TimeUnit
++import kotlin.coroutines.cancellation.CancellationException
+ 
+ class ReleaseServiceImpl(
+     private val networkService: NetworkHelper,
+@@ -18,12 +22,7 @@ class ReleaseServiceImpl(
+     override suspend fun latest(arguments: GetApplicationRelease.Arguments): Release? {
+         // Mihon Harmony fork: stable and preview builds share one repository, so
+         // list recent releases and pick the newest one that belongs to our channel.
+-        val releases = with(json) {
+-            networkService.client
+-                .newCall(GET("https://api.github.com/repos/${arguments.repository}/releases?per_page=30"))
+-                .awaitSuccess()
+-                .parseAs<List<GithubRelease>>()
+-        }
++        val releases = listReleases(arguments.repository)
+ 
+         val release = releases.firstOrNull { candidate ->
+             val isPreviewTag = PREVIEW_TAG_MARKER in candidate.version
+@@ -42,6 +41,41 @@ class ReleaseServiceImpl(
+         )
+     }
+ 
++    /**
++     * Lists the recent releases of the fork repository.
++     *
++     * The fork's CI mirrors the GitHub "list releases" response to the `repo` branch of
++     * the release repository. raw.githubusercontent.com is a plain CDN without the
++     * anonymous api.github.com quota of 60 requests per hour per IP, which phones behind
++     * carrier NAT or a shared proxy exhaust within minutes (HTTP 403). The API stays as
++     * the fallback for when the mirror is unreachable or has not been written yet.
++     */
++    private suspend fun listReleases(repository: String): List<GithubRelease> {
++        val mirrorClient = networkService.client.newBuilder()
++            .connectTimeout(MIRROR_TIMEOUT_SECONDS, TimeUnit.SECONDS)
++            .readTimeout(MIRROR_TIMEOUT_SECONDS, TimeUnit.SECONDS)
++            .callTimeout(MIRROR_TIMEOUT_SECONDS, TimeUnit.SECONDS)
++            .build()
++        return try {
++            with(json) {
++                mirrorClient
++                    .newCall(GET("https://raw.githubusercontent.com/$repository/repo/releases.json"))
++                    .awaitSuccess()
++                    .parseAs<List<GithubRelease>>()
++            }
++        } catch (e: CancellationException) {
++            throw e
++        } catch (e: Exception) {
++            logcat(LogPriority.WARN, e) { "Release mirror unavailable, falling back to the GitHub API" }
++            with(json) {
++                networkService.client
++                    .newCall(GET("https://api.github.com/repos/$repository/releases?per_page=30"))
++                    .awaitSuccess()
++                    .parseAs<List<GithubRelease>>()
++            }
++        }
++    }
++
+     private fun getDownloadLink(release: GithubRelease, isFoss: Boolean): String? {
+         val map = release.assets.associate { asset ->
+             BUILD_TYPES.find { "-$it" in asset.name } to asset.downloadLink
+@@ -61,6 +95,9 @@ class ReleaseServiceImpl(
+         private const val PREVIEW_TAG_MARKER = "-harmony-preview."
+         private const val STABLE_TAG_MARKER = "-harmony."
+ 
++        /** Short timeouts for the mirror: when it is blocked, fall back to the API without a long wait. */
++        private const val MIRROR_TIMEOUT_SECONDS = 10L
++
+         /**
+          * Regular expression that matches a mention to a valid GitHub username, like it's
+          * done in GitHub Flavored Markdown. It follows these constraints:
