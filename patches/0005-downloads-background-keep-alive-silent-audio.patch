@@ -1,0 +1,346 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Xun2202 <98207886+Xun2202@users.noreply.github.com>
+Date: Tue, 6 Oct 2026 05:29:13 +0000
+Subject: [PATCH] downloads: keep the process alive in the background on
+ HarmonyOS (silent audio + wake lock)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+On HarmonyOS 卓易通 the app process is suspended a few seconds after it
+leaves the foreground even though the download queue and the library update
+run inside WorkManager's dataSync foreground service. Downloads simply stop
+until the user reopens Mihon, and since the foreground service itself is
+never finished it keeps draining Android 15's 6-hour dataSync budget; when
+that runs out the system kills the process with
+
+    ForegroundServiceDidNotStopInTimeException: A foreground service of type
+    dataSync did not stop within its timeout
+
+which is exactly what the 2026-10-06 crash log shows. The same behaviour
+was verified with Animeko on the same device: dataSync service, partial wake
+lock and battery-optimisation exemption are all ignored, only audio output
+keeps the container running (animeko-harmony patch 0006).
+
+Add BackgroundKeepAlive: a ref-counted helper that, while at least one job
+holds it, loops a silent PCM buffer through an AudioTrack in MODE_STATIC
+(written once, looped by the audio HAL, no CPU) and holds a partial wake
+lock. No audio focus is requested, so other apps' playback is not ducked or
+paused. DownloadJob and LibraryUpdateJob acquire it right after
+setForeground(); the token is released when the worker's coroutine
+completes, fails or is cancelled.
+
+Because the download service now really is playing audio for its whole
+lifetime, DownloadJob declares FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK instead
+of DATA_SYNC (manifest: dataSync|mediaPlayback + the matching permission).
+mediaPlayback has no time limit on Android 15+, so a long queue no longer
+hits the 6-hour cut-off. The library update keeps dataSync.
+
+Everything is behind a new switch, Settings → Downloads → "Keep running in
+the background (HarmonyOS)", on by default; turning it off restores the
+upstream dataSync-only behaviour.
+---
+ app/src/main/AndroidManifest.xml              |   3 +-
+ .../settings/screen/SettingsDownloadScreen.kt |   5 +
+ .../tachiyomi/data/download/DownloadJob.kt    |  14 +-
+ .../data/library/LibraryUpdateJob.kt          |   5 +
+ .../util/system/BackgroundKeepAlive.kt        | 124 ++++++++++++++++++
+ .../download/service/DownloadPreferences.kt   |   6 +
+ .../moko-resources/base/strings.xml           |   2 +
+ .../moko-resources/zh-rCN/strings.xml         |   2 +
+ .../moko-resources/zh-rTW/strings.xml         |   2 +
+ 9 files changed, 158 insertions(+), 5 deletions(-)
+ create mode 100644 app/src/main/java/eu/kanade/tachiyomi/util/system/BackgroundKeepAlive.kt
+
+diff --git a/app/src/main/AndroidManifest.xml b/app/src/main/AndroidManifest.xml
+index a36b86e..e668155 100644
+--- a/app/src/main/AndroidManifest.xml
++++ b/app/src/main/AndroidManifest.xml
+@@ -32,6 +32,7 @@
+         tools:ignore="ProtectedPermissions" />
+ 
+     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
++    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+ 
+     <application
+         android:name=".App"
+@@ -220,7 +221,7 @@
+ 
+         <service
+             android:name="androidx.work.impl.foreground.SystemForegroundService"
+-            android:foregroundServiceType="dataSync"
++            android:foregroundServiceType="dataSync|mediaPlayback"
+             tools:node="merge" />
+ 
+         <provider
+diff --git a/app/src/main/java/eu/kanade/presentation/more/settings/screen/SettingsDownloadScreen.kt b/app/src/main/java/eu/kanade/presentation/more/settings/screen/SettingsDownloadScreen.kt
+index 3a5328f..ec42dd8 100644
+--- a/app/src/main/java/eu/kanade/presentation/more/settings/screen/SettingsDownloadScreen.kt
++++ b/app/src/main/java/eu/kanade/presentation/more/settings/screen/SettingsDownloadScreen.kt
+@@ -50,6 +50,11 @@ object SettingsDownloadScreen : SearchableSettings {
+                 title = stringResource(MR.strings.split_tall_images),
+                 subtitle = stringResource(MR.strings.split_tall_images_summary),
+             ),
++            Preference.PreferenceItem.SwitchPreference(
++                preference = downloadPreferences.keepAliveInBackground,
++                title = stringResource(MR.strings.pref_harmony_keep_alive),
++                subtitle = stringResource(MR.strings.pref_harmony_keep_alive_summary),
++            ),
+             Preference.PreferenceItem.SliderPreference(
+                 value = parallelSourceLimit,
+                 valueRange = 1..10,
+diff --git a/app/src/main/java/eu/kanade/tachiyomi/data/download/DownloadJob.kt b/app/src/main/java/eu/kanade/tachiyomi/data/download/DownloadJob.kt
+index b503629..f4c017d 100644
+--- a/app/src/main/java/eu/kanade/tachiyomi/data/download/DownloadJob.kt
++++ b/app/src/main/java/eu/kanade/tachiyomi/data/download/DownloadJob.kt
+@@ -13,6 +13,7 @@ import androidx.work.WorkManager
+ import androidx.work.WorkerParameters
+ import eu.kanade.tachiyomi.R
+ import eu.kanade.tachiyomi.data.notification.Notifications
++import eu.kanade.tachiyomi.util.system.BackgroundKeepAlive
+ import eu.kanade.tachiyomi.util.system.NetworkState
+ import eu.kanade.tachiyomi.util.system.activeNetworkState
+ import eu.kanade.tachiyomi.util.system.networkStateFlow
+@@ -45,10 +46,12 @@ class DownloadJob(context: Context, workerParams: WorkerParameters) : CoroutineW
+         return ForegroundInfo(
+             Notifications.ID_DOWNLOAD_CHAPTER_PROGRESS,
+             notification,
+-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+-                ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+-            } else {
+-                0
++            when {
++                Build.VERSION.SDK_INT < Build.VERSION_CODES.Q -> 0
++                // The keep-alive plays a silent track for the whole download, so the service is a media
++                // playback one; unlike dataSync that type has no 6-hour background limit on Android 15+.
++                downloadPreferences.keepAliveInBackground.get() -> ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK
++                else -> ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+             },
+         )
+     }
+@@ -65,6 +68,9 @@ class DownloadJob(context: Context, workerParams: WorkerParameters) : CoroutineW
+         }
+ 
+         setForegroundSafely()
++        if (downloadPreferences.keepAliveInBackground.get()) {
++            BackgroundKeepAlive.acquireForCurrentJob(applicationContext)
++        }
+ 
+         coroutineScope {
+             combineTransform(
+diff --git a/app/src/main/java/eu/kanade/tachiyomi/data/library/LibraryUpdateJob.kt b/app/src/main/java/eu/kanade/tachiyomi/data/library/LibraryUpdateJob.kt
+index f208966..9229e1e 100644
+--- a/app/src/main/java/eu/kanade/tachiyomi/data/library/LibraryUpdateJob.kt
++++ b/app/src/main/java/eu/kanade/tachiyomi/data/library/LibraryUpdateJob.kt
+@@ -23,6 +23,7 @@ import eu.kanade.tachiyomi.data.notification.Notifications
+ import eu.kanade.tachiyomi.source.model.SManga
+ import eu.kanade.tachiyomi.source.model.UpdateStrategy
+ import eu.kanade.tachiyomi.util.storage.getUriCompat
++import eu.kanade.tachiyomi.util.system.BackgroundKeepAlive
+ import eu.kanade.tachiyomi.util.system.createFileInCacheDir
+ import eu.kanade.tachiyomi.util.system.isConnectedToWifi
+ import eu.kanade.tachiyomi.util.system.isRunning
+@@ -47,6 +48,7 @@ import tachiyomi.core.common.util.system.logcat
+ import tachiyomi.domain.category.model.Category
+ import tachiyomi.domain.chapter.model.Chapter
+ import tachiyomi.domain.chapter.model.NoChaptersException
++import tachiyomi.domain.download.service.DownloadPreferences
+ import tachiyomi.domain.library.model.LibraryManga
+ import tachiyomi.domain.library.service.LibraryPreferences
+ import tachiyomi.domain.library.service.LibraryPreferences.Companion.DEVICE_CHARGING
+@@ -108,6 +110,9 @@ class LibraryUpdateJob(private val context: Context, workerParams: WorkerParamet
+         }
+ 
+         setForegroundSafely()
++        if (Injekt.get<DownloadPreferences>().keepAliveInBackground.get()) {
++            BackgroundKeepAlive.acquireForCurrentJob(context)
++        }
+ 
+         libraryPreferences.lastUpdatedTimestamp.set(Clock.System.now().toEpochMilliseconds())
+ 
+diff --git a/app/src/main/java/eu/kanade/tachiyomi/util/system/BackgroundKeepAlive.kt b/app/src/main/java/eu/kanade/tachiyomi/util/system/BackgroundKeepAlive.kt
+new file mode 100644
+index 0000000..3df906d
+--- /dev/null
++++ b/app/src/main/java/eu/kanade/tachiyomi/util/system/BackgroundKeepAlive.kt
+@@ -0,0 +1,124 @@
++package eu.kanade.tachiyomi.util.system
++
++import android.content.Context
++import android.media.AudioAttributes
++import android.media.AudioFormat
++import android.media.AudioTrack
++import android.os.PowerManager
++import androidx.core.content.getSystemService
++import kotlinx.coroutines.Job
++import kotlinx.coroutines.currentCoroutineContext
++import logcat.LogPriority
++import tachiyomi.core.common.util.system.logcat
++
++/**
++ * Keeps the app process running while a long background job (download queue, library update) is active.
++ *
++ * HarmonyOS 卓易通 suspends an Android app's process a few seconds after it leaves the foreground even
++ * when the app holds a dataSync foreground service, a wake lock and a battery-optimisation exemption
++ * (verified with Animeko on the same device). Downloads then stall until the user reopens the app, and
++ * the idle foreground service keeps draining Android 15's 6-hour dataSync budget. Audio output is the one
++ * activity the host keeps running, so while at least one job holds the keep-alive a silent PCM buffer is
++ * looped by the audio HAL ([AudioTrack.MODE_STATIC]: written once, no CPU) and a partial wake lock is
++ * held. Audio focus is deliberately not requested, so other apps' playback is neither ducked nor paused.
++ */
++object BackgroundKeepAlive {
++
++    private val lock = Any()
++    private var holders = 0
++    private var track: AudioTrack? = null
++    private var wakeLock: PowerManager.WakeLock? = null
++
++    /** Holds the keep-alive until the calling coroutine's [Job] completes, fails or is cancelled. */
++    suspend fun acquireForCurrentJob(context: Context) {
++        val token = acquire(context)
++        val job = currentCoroutineContext()[Job]
++        if (job == null) {
++            token.release()
++            return
++        }
++        job.invokeOnCompletion { token.release() }
++    }
++
++    fun acquire(context: Context): Token {
++        synchronized(lock) {
++            holders++
++            if (holders == 1) start(context.applicationContext)
++        }
++        return Token()
++    }
++
++    class Token internal constructor() {
++        private var released = false
++
++        fun release() {
++            synchronized(lock) {
++                if (released) return
++                released = true
++                holders--
++                if (holders == 0) stop()
++            }
++        }
++    }
++
++    private fun start(context: Context) {
++        try {
++            wakeLock = context.getSystemService<PowerManager>()
++                ?.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "$WAKE_LOCK_TAG:jobs")
++                ?.apply { acquire(WAKE_LOCK_TIMEOUT_MS) }
++        } catch (e: Exception) {
++            logcat(LogPriority.WARN, e) { "Failed to acquire keep-alive wake lock" }
++        }
++        try {
++            val minBuffer = AudioTrack.getMinBufferSize(SAMPLE_RATE, CHANNEL, ENCODING)
++            val bufferSize = maxOf(minBuffer, SAMPLE_RATE * BYTES_PER_FRAME) // >= 1 second of silence
++            val newTrack = AudioTrack.Builder()
++                .setAudioAttributes(
++                    AudioAttributes.Builder()
++                        .setUsage(AudioAttributes.USAGE_MEDIA)
++                        .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
++                        .build(),
++                )
++                .setAudioFormat(
++                    AudioFormat.Builder()
++                        .setSampleRate(SAMPLE_RATE)
++                        .setEncoding(ENCODING)
++                        .setChannelMask(CHANNEL)
++                        .build(),
++                )
++                .setBufferSizeInBytes(bufferSize)
++                .setTransferMode(AudioTrack.MODE_STATIC)
++                .build()
++            val silence = ByteArray(bufferSize)
++            newTrack.write(silence, 0, silence.size)
++            newTrack.setLoopPoints(0, bufferSize / BYTES_PER_FRAME, -1)
++            newTrack.play()
++            track = newTrack
++            logcat { "Background keep-alive started (silent audio + wake lock)" }
++        } catch (e: Exception) {
++            logcat(LogPriority.WARN, e) { "Failed to start silent audio keep-alive" }
++        }
++    }
++
++    private fun stop() {
++        track?.let { current ->
++            track = null
++            runCatching {
++                current.stop()
++                current.release()
++            }
++        }
++        wakeLock?.let { current ->
++            wakeLock = null
++            runCatching { if (current.isHeld) current.release() }
++        }
++        logcat { "Background keep-alive stopped" }
++    }
++
++    private const val WAKE_LOCK_TAG = "mihon:BackgroundKeepAlive"
++    private const val WAKE_LOCK_TIMEOUT_MS = 12 * 60 * 60 * 1000L
++    private const val SAMPLE_RATE = 8000
++    private const val CHANNEL = AudioFormat.CHANNEL_OUT_MONO
++    private const val ENCODING = AudioFormat.ENCODING_PCM_16BIT
++    private const val BYTES_PER_FRAME = 2
++}
+diff --git a/domain/src/main/java/tachiyomi/domain/download/service/DownloadPreferences.kt b/domain/src/main/java/tachiyomi/domain/download/service/DownloadPreferences.kt
+index bf5b84f..b08131d 100644
+--- a/domain/src/main/java/tachiyomi/domain/download/service/DownloadPreferences.kt
++++ b/domain/src/main/java/tachiyomi/domain/download/service/DownloadPreferences.kt
+@@ -16,6 +16,12 @@ class DownloadPreferences(
+ 
+     val splitTallImages: Preference<Boolean> = preferenceStore.getBoolean("split_tall_images", true)
+ 
++    // HarmonyOS 卓易通 suspends the process in the background; play a silent track while jobs run.
++    val keepAliveInBackground: Preference<Boolean> = preferenceStore.getBoolean(
++        "harmony_keep_alive_in_background",
++        true,
++    )
++
+     val autoDownloadWhileReading: Preference<Int> = preferenceStore.getInt("auto_download_while_reading", 0)
+ 
+     val removeAfterReadSlots: Preference<Int> = preferenceStore.getInt("remove_after_read_slots", -1)
+diff --git a/i18n/src/commonMain/moko-resources/base/strings.xml b/i18n/src/commonMain/moko-resources/base/strings.xml
+index ccba4a4..0568022 100644
+--- a/i18n/src/commonMain/moko-resources/base/strings.xml
++++ b/i18n/src/commonMain/moko-resources/base/strings.xml
+@@ -528,6 +528,8 @@
+     <string name="save_chapter_as_cbz">Save as CBZ archive</string>
+     <string name="split_tall_images">Split tall images</string>
+     <string name="split_tall_images_summary">Improves reader performance</string>
++    <string name="pref_harmony_keep_alive">Keep running in the background (HarmonyOS)</string>
++    <string name="pref_harmony_keep_alive_summary">Plays a silent audio track while downloading or updating the library so that 卓易通 does not suspend the app. Other apps' audio is not affected.</string>
+     <string name="pref_download_concurrent_sources">Concurrent source downloads</string>
+     <string name="pref_download_concurrent_pages">Concurrent page downloads</string>
+     <string name="pref_download_concurrent_pages_summary">Pages downloaded simultaneously per source</string>
+diff --git a/i18n/src/commonMain/moko-resources/zh-rCN/strings.xml b/i18n/src/commonMain/moko-resources/zh-rCN/strings.xml
+index ebf56e8..c92b47b 100644
+--- a/i18n/src/commonMain/moko-resources/zh-rCN/strings.xml
++++ b/i18n/src/commonMain/moko-resources/zh-rCN/strings.xml
+@@ -576,6 +576,8 @@
+     <string name="action_sort_last_manga_update">检查更新时间</string>
+     <string name="action_sort_unread_count">未读章数</string>
+     <string name="split_tall_images_summary">可以改善阅读器的性能</string>
++    <string name="pref_harmony_keep_alive">后台保持运行（鸿蒙）</string>
++    <string name="pref_harmony_keep_alive_summary">下载或更新书架时播放一段静音音轨，防止卓易通冻结应用；不影响其他应用的声音。</string>
+     <string name="download_notifier_split_page_not_found">分割时未找到第 %d 页</string>
+     <string name="download_notifier_split_page_path_not_found">未找到第 %d 页的文件路径</string>
+     <string name="pref_reset_viewer_flags">重置各作品阅读器独立设置</string>
+diff --git a/i18n/src/commonMain/moko-resources/zh-rTW/strings.xml b/i18n/src/commonMain/moko-resources/zh-rTW/strings.xml
+index a05bb78..8441d9e 100644
+--- a/i18n/src/commonMain/moko-resources/zh-rTW/strings.xml
++++ b/i18n/src/commonMain/moko-resources/zh-rTW/strings.xml
+@@ -574,6 +574,8 @@
+     <string name="action_sort_unread_count">未讀章數</string>
+     <string name="download_notifier_split_page_not_found">分割時找不到第 %d 頁</string>
+     <string name="split_tall_images_summary">用以改善閱讀器效能</string>
++    <string name="pref_harmony_keep_alive">在背景保持執行（HarmonyOS）</string>
++    <string name="pref_harmony_keep_alive_summary">下載或更新書庫時播放一段靜音音軌，避免卓易通凍結應用程式；不影響其他應用程式的聲音。</string>
+     <string name="download_notifier_split_page_path_not_found">找不到第 %d 頁的檔案路徑</string>
+     <string name="pref_reset_viewer_flags">重設個別閱讀器設定</string>
+     <string name="pref_reset_viewer_flags_summary">將所有作品的閱讀模式和螢幕方向還原為預設值</string>
