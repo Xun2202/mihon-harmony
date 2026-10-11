@@ -260,4 +260,6 @@ gh release list --repo Xun2202/mihon-harmony
 - 2026-10-11 Anikku 用户反馈「下载 100% 后变 !」，根因是卓易通 SAF 不支持 `renameDocument`、0001 的回退整份复制且失败无提示（anikku-harmony 0016）。
   Mihon 是同一份 `renameToOrCopy`（章节目录改名 = 每页再抄一遍），用户要求「mihon 一块改」。本机冷缓存构建先撞上 JitPack 的 FlexibleAdapter 404
   （CI 一直靠旧缓存）→ 补丁 0009 回迁上游的 Maven Central 坐标，`prepare-source.sh` 加「能反向套用即跳过」；补丁 0010 移植 0016。
-  本机 `:core:common:testDebugUnitTest`（8 个用例）与 `:app:assemblePreview` 通过，10 张补丁在干净 v0.20.4 上套用一致；发布 preview.9（versionCode 2909）。
+  本机 `:core:common:testDebugUnitTest`（8 个用例）与 `:app:assemblePreview` 通过，10 张补丁在干净 v0.20.4 上套用一致；`check_patches` run 38140034698 绿 →
+  正式发版 run 38140180515 → `v0.20.4-harmony-preview.9`（versionCode 2909，versionName `0.20.4-harmony.9-7883`，签名 `4bd90284…ea8a`，`repo` 分支 `bb04007`）。
+  没跑 `dry_run`（本地整包编译代替）；模拟器（TCG，无 KVM）上 Mihon 走到了 SAF 文件夹 + 下载一章，但界面级的「出错：…」截图没来得及截，用户要求改为真机验证。
