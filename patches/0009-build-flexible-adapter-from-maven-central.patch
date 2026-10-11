@@ -1,0 +1,42 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Xun2202 <98207886+Xun2202@users.noreply.github.com>
+Date: Sun, 11 Oct 2026 12:36:58 +0000
+Subject: [PATCH] build: resolve FlexibleAdapter from Maven Central instead of
+ JitPack
+
+JitPack no longer serves com.github.arkon.FlexibleAdapter:flexible-adapter:c8013533
+(its build status has been "Error" since 2026-02), so a cold-cache build of v0.20.4
+fails while resolving :app:previewCompileClasspath with "Could not find ...". The
+Harmony CI only kept working because setup-gradle restored an older dependency cache.
+Upstream main already switched to the identical artifact published on Maven Central
+(eu.davidea:flexible-adapter:5.1.0); this is a straight backport of that change.
+Same backport as anikku-harmony 0005.
+
+Drop this patch once the pinned upstream tag contains the switch (prepare-source.sh
+skips it automatically when it reverse-applies cleanly).
+---
+ gradle/libs.versions.toml | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/gradle/libs.versions.toml b/gradle/libs.versions.toml
+index 5268d2d..1b5fb37 100644
+--- a/gradle/libs.versions.toml
++++ b/gradle/libs.versions.toml
+@@ -37,7 +37,7 @@ directionalViewPager = "1.0.0"
+ diskLruCache = "2.0.2"
+ firebase-bom = "34.17.0"
+ firebase-crashlytics = "3.0.7"
+-flexibleAdapter = "c8013533"
++flexibleAdapter = "5.1.0"
+ google-services = "4.5.0"
+ image-decoder = "e03b81e18a"
+ injekt = "91edab2317"
+@@ -131,7 +131,7 @@ diskLruCache = { module = "com.jakewharton:disklrucache", version.ref = "diskLru
+ firebase-analytics = { module = "com.google.firebase:firebase-analytics" }
+ firebase-bom = { module = "com.google.firebase:firebase-bom", version.ref = "firebase-bom" }
+ firebase-crashlytics = { module = "com.google.firebase:firebase-crashlytics" }
+-flexibleAdapter = { module = "com.github.arkon.FlexibleAdapter:flexible-adapter", version.ref = "flexibleAdapter" }
++flexibleAdapter = { module = "eu.davidea:flexible-adapter", version.ref = "flexibleAdapter" }
+ image-decoder = { module = "com.github.mihonapp:image-decoder", version.ref = "image-decoder" }
+ injekt = { module = "com.github.mihonapp:injekt", version.ref = "injekt" }
+ jsoup = { module = "org.jsoup:jsoup", version.ref = "jsoup" }

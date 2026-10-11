@@ -23,6 +23,7 @@
 - 后台下载：卓易通会在 App 切到后台几秒后冻结进程，下载队列、书架更新都会停住，直到再次打开 App。preview.5 起默认开启 设置 → 下载 →「**后台保持运行（鸿蒙）**」：下载 / 更新期间播放一段静音音轨并持有唤醒锁（补丁 0005），卓易通就不会冻结进程；不影响其他 App 的声音，不用时可关闭。
 - 已知限制：Android 15+ 规定「数据同步」类前台服务在后台累计只能跑 6 小时 / 24 小时，超时会被系统强制停止，在卓易通里表现为一次闪退（`ForegroundServiceDidNotStopInTimeException`）。preview.5 起下载服务改为声明「媒体播放」类（无时限），书架更新仍是数据同步类但不再会被冻结卡住；若关闭了上面的开关，就回到官方行为，大批量下载时建议隔几小时打开一次 App（切回前台会重置额度）。
 - 下载通知（preview.6 起）与 Animeko / Anikku 的鸿蒙版统一：标题「正在下载 N 个章节」，正文「下载：<速度>/s · <进度>%」+ 进度条，下拉展开显示当前的「漫画 - 章节」（开启「隐藏通知内容」时不显示）。
+- **下载到 100% 后变成「!」、队列里只写「Error」**（preview.8 及之前，目录模式下）：卓易通的文件夹不支持改名，章节收尾时 `<章节>_tmp/` → `<章节>/` 的改名回退是把每一页再抄一遍，任何一步失败都没有提示。preview.9 起：目录改名优先用系统的「移动文档」（不经 App 复制），都失败才复制，残留的旧目录会被合并而不是报「已存在」，复制后核对大小并自动重试两次；下载队列里出错的章节会在章节名下面直接显示原因（哪一页为什么失败 / 目录里多了什么 / 「下载被中断」），不用再导日志。与 anikku-harmony preview.8（补丁 0016）同一份代码。
 
 ## 包含的补丁
 
@@ -36,6 +37,9 @@
 | [`0006-downloads-notification-speed-and-progress.patch`](./patches/0006-downloads-notification-speed-and-progress.patch) | 三个鸿蒙版应用的下载通知统一成 Animeko 的样式：标题「正在下载 N 个章节」（排队 + 进行中），正文「下载：<速度>/s · <进度>%」，确定型进度条，展开后第二行显示当前「漫画 - 章节」（「隐藏通知内容」开启时省略）。新增 `DownloadSpeedMeter`（近 3 秒滑动平均，包装每页响应流计数；与 anikku-harmony 0010 同一份文件），下载器每秒刷新一次通知，同一章节 700 ms 内的重复更新丢弃。 |
 | [`0007-updater-delete-installed-apk.patch`](./patches/0007-updater-delete-installed-apk.patch) | 应用内更新下载到 `Android/data/<包名>/cache/update.apk` 的安装包此前没人删，一直留到下次更新被覆盖。`App.onCreate` 里新增的 `AppUpdateDownloadJob.deleteInstalledApk()` 用 `getPackageArchiveInfo` 读出它的 versionCode，不高于当前版本（或文件读不出来）就删除。与 anikku-harmony 0011 的清理逻辑逐字相同；Animeko 则在 harmony.8 里让 Android 端也调用上游已有的 `deleteInstalledFiles()`。 |
 | [`0008-updater-release-mirror.patch`](./patches/0008-updater-release-mirror.patch) | 修复「检查更新」报「HTTP error 403」：匿名 `api.github.com` 每个出口 IP 每小时只有 60 次，NAT / 代理后面是所有人共用。`ReleaseServiceImpl.listReleases()` 优先读 `https://raw.githubusercontent.com/<repo>/repo/releases.json`（流水线写的接口原样镜像，连接 / 读取 / 整体超时各 10 秒），失败再退回 `api.github.com/repos/<repo>/releases?per_page=30`；`latest()` 其余逻辑（按 tag 后缀挑频道、按 ABI 挑 APK）不变。与 anikku-harmony 0014、animeko-harmony 0009 同一轮。 |
+
+| [`0009-build-flexible-adapter-from-maven-central.patch`](./patches/0009-build-flexible-adapter-from-maven-central.patch) | 构建修复，不改功能：JitPack 早已不再提供 `com.github.arkon.FlexibleAdapter:flexible-adapter:c8013533`（构建状态自 2026-02 起为 Error），CI 只是靠 `setup-gradle` 恢复的旧依赖缓存才一直没炸，本机冷缓存构建直接失败。改为上游 `main` 已切换的 Maven Central 同一产物 `eu.davidea:flexible-adapter:5.1.0`。与 anikku-harmony 0005 同源；下一个官方稳定版自带这行时 `prepare-source.sh` 会自动跳过它。 |
+| [`0010-downloads-finalize-with-fewer-saf-copies-and-error-reasons.patch`](./patches/0010-downloads-finalize-with-fewer-saf-copies-and-error-reasons.patch) | 移植 anikku-harmony 0016：`renameToOrCopy(targetName, resolver)` 目录改名先逐项 `DocumentsContract.moveDocument`（provider 侧移动，不经 App 复制），不行再复制，目标目录已存在（上次中断的残留）则合并、同大小文件跳过，复制后核对大小，源删不掉也不丢数据（`UniFileExtensions.kt` 与 Anikku 逐字节相同，单元测试 8 个）；章节目录收尾改名重试 3 次；`Download.error` + `fail()`，下载不完整时记录「N 页下载失败，例如第 X 页：<原因>」或目录内容列表，`stop()` 记「下载被中断」；下载队列行在章节名下显示「出错：<原因>」，右侧状态「Error」。每页 `.tmp` → `.jpg` 的改名不变（扩展名要等响应才知道，而且图片小）。 |
 
 补丁按 [`patches/series`](./patches/series) 的顺序套用。
 

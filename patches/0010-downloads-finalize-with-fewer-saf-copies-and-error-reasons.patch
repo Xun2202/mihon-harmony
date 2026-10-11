@@ -1,0 +1,549 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Xun2202 <98207886+Xun2202@users.noreply.github.com>
+Date: Sun, 11 Oct 2026 12:36:58 +0000
+Subject: [PATCH] downloads: finish chapters with fewer SAF copies and show why
+ a download failed
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Port of anikku-harmony 0016 to the manga downloader. On providers without
+renameDocument (HarmonyOS ZhuoyiTong's SAF bridge) the 0001 fallback copied the
+whole chapter directory page by page and any failure after the progress bar hit
+100% was invisible: isDownloadSuccessful() == false set ERROR without a message,
+notification or log line, and error notifications are not shown inside 卓易通.
+
+- UniFileExtensions.renameToOrCopy(targetName, resolver): byte-identical to the
+  Anikku copy. For directories, try DocumentsContract.moveDocument per child
+  first (metadata move on providers that support it), fall back to copying, merge
+  into an existing target directory left by an interrupted attempt (same-size
+  files are kept), verify copied sizes, and keep the copy when the stale source
+  cannot be deleted. Unit tests updated for the new semantics (8 tests).
+- Downloader: the final chapter directory rename goes through
+  retryStorageOperation (3 attempts, 2 s / 4 s). When the chapter is not
+  complete the reason is now recorded: "N page(s) failed to download, e.g. page
+  X: <error>" when pages errored, otherwise the unexpected folder contents.
+  stop() marks interrupted downloads with a readable reason; every other error
+  path records its message too.
+- Download.error + fail(message); DownloadHolder shows "Error" in the progress
+  column and "Error: <reason>" under the chapter name (up to 3 lines);
+  DownloadQueueViewModel refreshes the row when a download enters ERROR.
+- Strings harmony_download_unexpected_files / harmony_download_pages_failed /
+  harmony_download_error_prefix / harmony_download_interrupted in i18n base,
+  zh-rCN and zh-rTW.
+
+Per-page .tmp -> .<ext> renames are unchanged: the extension is only known after
+the response, and pages are small. Animeko is not affected (no SAF).
+---
+ .../tachiyomi/data/download/Downloader.kt     |  62 +++++++--
+ .../tachiyomi/data/download/model/Download.kt |  13 ++
+ .../tachiyomi/ui/download/DownloadHolder.kt   |  25 +++-
+ .../ui/download/DownloadQueueViewModel.kt     |   5 +-
+ .../core/common/storage/UniFileExtensions.kt  | 118 ++++++++++++------
+ .../common/storage/UniFileExtensionsTest.kt   |  53 +++++++-
+ .../moko-resources/base/strings.xml           |   4 +
+ .../moko-resources/zh-rCN/strings.xml         |   4 +
+ .../moko-resources/zh-rTW/strings.xml         |   4 +
+ 9 files changed, 232 insertions(+), 56 deletions(-)
+
+diff --git a/app/src/main/java/eu/kanade/tachiyomi/data/download/Downloader.kt b/app/src/main/java/eu/kanade/tachiyomi/data/download/Downloader.kt
+index cd854b5..8f405e4 100644
+--- a/app/src/main/java/eu/kanade/tachiyomi/data/download/Downloader.kt
++++ b/app/src/main/java/eu/kanade/tachiyomi/data/download/Downloader.kt
+@@ -150,7 +150,7 @@ class Downloader(
+         cancelDownloaderJob()
+         queueState.value
+             .filter { it.status == Download.State.DOWNLOADING }
+-            .forEach { it.status = Download.State.ERROR }
++            .forEach { it.fail(reason ?: context.stringResource(MR.strings.harmony_download_interrupted)) }
+ 
+         if (reason != null) {
+             notifier.onWarning(reason)
+@@ -338,20 +338,16 @@ class Downloader(
+      */
+     private suspend fun downloadChapter(download: Download) {
+         val mangaDir = provider.getMangaDir(download.manga.title, download.source).getOrElse { e ->
+-            download.status = Download.State.ERROR
++            download.fail(e.message)
+             notifier.onError(e.message, download.chapter.name, download.manga.title, download.manga.id)
+             return
+         }
+ 
+         val availSpace = DiskUtil.getAvailableStorageSpace(mangaDir)
+         if (availSpace != -1L && availSpace < MIN_DISK_SPACE) {
+-            download.status = Download.State.ERROR
+-            notifier.onError(
+-                context.stringResource(MR.strings.download_insufficient_space),
+-                download.chapter.name,
+-                download.manga.title,
+-                download.manga.id,
+-            )
++            val message = context.stringResource(MR.strings.download_insufficient_space)
++            download.fail(message)
++            notifier.onError(message, download.chapter.name, download.manga.title, download.manga.id)
+             return
+         }
+ 
+@@ -416,7 +412,30 @@ class Downloader(
+             // Do after download completes
+ 
+             if (!isDownloadSuccessful(download, tmpDir)) {
+-                download.status = Download.State.ERROR
++                // Harmony: say why instead of failing silently; the queue row shows this text.
++                val pageErrors = download.pages.orEmpty().mapNotNull { page ->
++                    (page.status as? Page.State.Error)?.error?.let { page.number to it }
++                }
++                val message = if (pageErrors.isNotEmpty()) {
++                    val (number, error) = pageErrors.first()
++                    context.stringResource(
++                        MR.strings.harmony_download_pages_failed,
++                        pageErrors.size,
++                        number,
++                        error.message ?: error.javaClass.simpleName,
++                    )
++                } else {
++                    val files = tmpDir.listFiles().orEmpty().mapNotNull { it.name }.sorted()
++                    context.stringResource(
++                        MR.strings.harmony_download_unexpected_files,
++                        files.joinToString(", ").ifEmpty { "-" },
++                    )
++                }
++                logcat(LogPriority.ERROR) { "Download of ${download.chapter.name} failed: $message" }
++                download.fail(message)
++                if (pageErrors.isEmpty()) {
++                    notifier.onError(message, download.chapter.name, download.manga.title, download.manga.id)
++                }
+                 return
+             }
+ 
+@@ -431,7 +450,11 @@ class Downloader(
+             if (downloadPreferences.saveChaptersAsCBZ.get()) {
+                 archiveChapter(mangaDir, chapterDirname, tmpDir)
+             } else {
+-                val chapterDir = tmpDir.renameToOrCopy(chapterDirname)
++                // Harmony: on providers without renameDocument this moves / copies every page;
++                // give flaky storage a second chance instead of failing at 100%.
++                val chapterDir = retryStorageOperation {
++                    tmpDir.renameToOrCopy(chapterDirname, context.contentResolver)
++                }
+                 DiskUtil.createNoMediaFile(chapterDir, context)
+             }
+             cache.addChapter(chapterDirname, mangaDir, download.manga)
+@@ -440,11 +463,26 @@ class Downloader(
+             if (error is CancellationException) throw error
+             // If the page list threw, it will resume here
+             logcat(LogPriority.ERROR, error)
+-            download.status = Download.State.ERROR
++            download.fail(error.message ?: error.javaClass.simpleName)
+             notifier.onError(error.message, download.chapter.name, download.manga.title, download.manga.id)
+         }
+     }
+ 
++    /** Harmony: retries a storage operation three times (2 s, 4 s) before giving up. */
++    private suspend fun <T> retryStorageOperation(block: () -> T): T {
++        var attempt = 0
++        while (true) {
++            try {
++                return block()
++            } catch (e: IOException) {
++                attempt++
++                if (attempt >= 3) throw e
++                logcat(LogPriority.WARN, e) { "Storage operation failed, retrying ($attempt)" }
++                delay((1L shl attempt) * 1000)
++            }
++        }
++    }
++
+     /**
+      * Gets the image from the filesystem if it exists or downloads it otherwise.
+      *
+diff --git a/app/src/main/java/eu/kanade/tachiyomi/data/download/model/Download.kt b/app/src/main/java/eu/kanade/tachiyomi/data/download/model/Download.kt
+index de59138..f0681ea 100644
+--- a/app/src/main/java/eu/kanade/tachiyomi/data/download/model/Download.kt
++++ b/app/src/main/java/eu/kanade/tachiyomi/data/download/model/Download.kt
+@@ -40,9 +40,22 @@ data class Download(
+     var status: State
+         get() = _statusFlow.value
+         set(status) {
++            if (status != State.ERROR) error = null
+             _statusFlow.value = status
+         }
+ 
++    /**
++     * Why the download ended in [State.ERROR]; shown in the download queue because error
++     * notifications are not displayed inside HarmonyOS ZhuoyiTong.
++     */
++    @Transient
++    var error: String? = null
++
++    fun fail(message: String?) {
++        error = message?.takeIf { it.isNotBlank() }
++        _statusFlow.value = State.ERROR
++    }
++
+     @Transient
+     val progressFlow = flow {
+         if (pages == null) {
+diff --git a/app/src/main/java/eu/kanade/tachiyomi/ui/download/DownloadHolder.kt b/app/src/main/java/eu/kanade/tachiyomi/ui/download/DownloadHolder.kt
+index 514357d..fa81b6f 100644
+--- a/app/src/main/java/eu/kanade/tachiyomi/ui/download/DownloadHolder.kt
++++ b/app/src/main/java/eu/kanade/tachiyomi/ui/download/DownloadHolder.kt
+@@ -7,6 +7,8 @@ import eu.kanade.tachiyomi.R
+ import eu.kanade.tachiyomi.data.download.model.Download
+ import eu.kanade.tachiyomi.databinding.DownloadItemBinding
+ import eu.kanade.tachiyomi.util.view.popupMenu
++import tachiyomi.core.common.i18n.stringResource
++import tachiyomi.i18n.MR
+ 
+ /**
+  * Class used to hold the data of a download.
+@@ -36,6 +38,7 @@ class DownloadHolder(private val view: View, val adapter: DownloadAdapter) :
+         this.download = download
+         // Update the chapter name.
+         binding.chapterTitle.text = download.chapter.name
++        binding.chapterTitle.maxLines = 1
+ 
+         // Update the manga title
+         binding.mangaFullTitle.text = download.manga.title
+@@ -49,8 +52,8 @@ class DownloadHolder(private val view: View, val adapter: DownloadAdapter) :
+         } else {
+             binding.downloadProgress.max = pages.size * 100
+             notifyProgress()
+-            notifyDownloadedPages()
+         }
++        notifyDownloadedPages()
+     }
+ 
+     /**
+@@ -68,8 +71,24 @@ class DownloadHolder(private val view: View, val adapter: DownloadAdapter) :
+      * Updates the text field of the number of downloaded pages.
+      */
+     fun notifyDownloadedPages() {
+-        val pages = download.pages ?: return
+-        binding.downloadProgressText.text = "${download.downloadedImages}/${pages.size}"
++        val pages = download.pages
++        binding.downloadProgressText.text = when {
++            download.status == Download.State.ERROR -> {
++                view.context.stringResource(MR.strings.download_notifier_title_error)
++            }
++            pages == null -> ""
++            else -> "${download.downloadedImages}/${pages.size}"
++        }
++        // Harmony: error notifications are not shown inside 卓易通, so put the reason in the row itself.
++        val error = download.error.takeIf { download.status == Download.State.ERROR }
++        if (error != null) {
++            binding.chapterTitle.maxLines = 3
++            binding.chapterTitle.text = download.chapter.name + "\n" +
++                view.context.stringResource(MR.strings.harmony_download_error_prefix, error)
++        } else {
++            binding.chapterTitle.maxLines = 1
++            binding.chapterTitle.text = download.chapter.name
++        }
+     }
+ 
+     override fun onItemReleased(position: Int) {
+diff --git a/app/src/main/java/eu/kanade/tachiyomi/ui/download/DownloadQueueViewModel.kt b/app/src/main/java/eu/kanade/tachiyomi/ui/download/DownloadQueueViewModel.kt
+index 5601ae0..5af9ca8 100644
+--- a/app/src/main/java/eu/kanade/tachiyomi/ui/download/DownloadQueueViewModel.kt
++++ b/app/src/main/java/eu/kanade/tachiyomi/ui/download/DownloadQueueViewModel.kt
+@@ -198,7 +198,10 @@ class DownloadQueueViewModel(
+                 onUpdateProgress(download)
+                 onUpdateDownloadedPages(download)
+             }
+-            Download.State.ERROR -> cancelProgressJob(download)
++            Download.State.ERROR -> {
++                cancelProgressJob(download)
++                onUpdateDownloadedPages(download)
++            }
+             else -> {
+                 /* unused */
+             }
+diff --git a/core/common/src/main/kotlin/tachiyomi/core/common/storage/UniFileExtensions.kt b/core/common/src/main/kotlin/tachiyomi/core/common/storage/UniFileExtensions.kt
+index 80c9c93..8834377 100644
+--- a/core/common/src/main/kotlin/tachiyomi/core/common/storage/UniFileExtensions.kt
++++ b/core/common/src/main/kotlin/tachiyomi/core/common/storage/UniFileExtensions.kt
+@@ -1,5 +1,7 @@
+ package tachiyomi.core.common.storage
+ 
++import android.content.ContentResolver
++import android.provider.DocumentsContract
+ import com.hippo.unifile.UniFile
+ import java.io.IOException
+ 
+@@ -14,42 +16,44 @@ val UniFile.displayablePath: String
+ 
+ /**
+  * Renames this file, falling back to copying and deleting it when the storage provider does not
+- * support renaming documents.
++ * support renaming documents (HarmonyOS ZhuoyiTong's SAF bridge, some OEM providers).
+  *
++ * For directories the fallback first tries to move the children into the new directory with
++ * [DocumentsContract.moveDocument] (a metadata operation on providers that support it) and only
++ * streams the data through the app when that is unsupported as well. An existing target directory
++ * is reused (merged into) so a previously interrupted fallback can be completed. When the copy
++ * succeeded but the source could not be deleted the copy is kept and the stale source is left
++ * behind: callers that already have the finished data must not lose it over a failed delete.
++ *
++ * @param resolver used for [DocumentsContract.moveDocument]; without it the fallback always copies.
+  * @return the renamed file, or the newly created file when the fallback is used.
+  */
+-fun UniFile.renameToOrCopy(targetName: String): UniFile {
++fun UniFile.renameToOrCopy(targetName: String, resolver: ContentResolver? = null): UniFile {
+     if (renameTo(targetName)) return this
+ 
+     val parent = parentFile
+         ?: throw IOException("Failed to rename $displayablePath: parent directory is unavailable")
+-    if (parent.findFile(targetName) != null) {
+-        throw IOException("Failed to rename $displayablePath: target '$targetName' already exists")
++    val existing = parent.findFile(targetName)
++    val target = when {
++        existing == null -> createCopyTarget(parent, targetName)
++            ?: throw IOException("Failed to rename $displayablePath: could not create target '$targetName'")
++        isDirectory && existing.isDirectory -> existing
++        else -> throw IOException("Failed to rename $displayablePath: target '$targetName' already exists")
+     }
+ 
+-    val target = createCopyTarget(parent, targetName)
+-        ?: throw IOException("Failed to rename $displayablePath: could not create target '$targetName'")
+-
+     try {
+-        copyContentsTo(target)
++        transferContentsTo(target, resolver)
+     } catch (e: Exception) {
+-        val rollbackFailed = !target.deleteSafely()
+-        val rollbackMessage = if (rollbackFailed) "; failed to remove incomplete target" else ""
+-        throw IOException("Failed to copy $displayablePath to '$targetName'$rollbackMessage", e)
++        if (existing == null) {
++            val rollbackFailed = !target.deleteSafely()
++            val rollbackMessage = if (rollbackFailed) "; failed to remove incomplete target" else ""
++            throw IOException("Failed to copy $displayablePath to '$targetName'$rollbackMessage", e)
++        }
++        throw IOException("Failed to copy $displayablePath into existing '$targetName'", e)
+     }
+ 
+-    val sourceDeleted = try {
+-        delete()
+-    } catch (e: Exception) {
+-        val rollbackFailed = !target.deleteSafely()
+-        val rollbackMessage = if (rollbackFailed) "; failed to remove copied target" else ""
+-        throw IOException("Copied $displayablePath to '$targetName', but failed to delete source$rollbackMessage", e)
+-    }
+-    if (!sourceDeleted) {
+-        val rollbackFailed = !target.deleteSafely()
+-        val rollbackMessage = if (rollbackFailed) "; failed to remove copied target" else ""
+-        throw IOException("Copied $displayablePath to '$targetName', but failed to delete source$rollbackMessage")
+-    }
++    // The data is safe in the target now; a leftover source only wastes space.
++    deleteSafely()
+ 
+     return target
+ }
+@@ -63,22 +67,60 @@ private fun UniFile.deleteSafely(): Boolean = try {
+     false
+ }
+ 
+-private fun UniFile.copyContentsTo(target: UniFile) {
+-    if (isDirectory) {
+-        val children = listFiles()
+-            ?: throw IOException("Failed to list directory $displayablePath")
+-        children.forEach { child ->
+-            val childName = child.name
+-                ?: throw IOException("A file in $displayablePath has no name")
+-            val childTarget = child.createCopyTarget(target, childName)
+-                ?: throw IOException("Failed to create '$childName' in " + target.displayablePath)
+-            child.copyContentsTo(childTarget)
+-        }
+-    } else {
+-        openInputStream().use { input ->
+-            target.openOutputStream().use { output ->
+-                input.copyTo(output)
++private fun UniFile.transferContentsTo(target: UniFile, resolver: ContentResolver?) {
++    if (!isDirectory) {
++        copyFileTo(target)
++        return
++    }
++
++    val children = listFiles()
++        ?: throw IOException("Failed to list directory $displayablePath")
++    children.forEach { child ->
++        val childName = child.name
++            ?: throw IOException("A file in $displayablePath has no name")
++        val existing = target.findFile(childName)
++        if (existing != null) {
++            // Left behind by an interrupted earlier attempt: keep it when it is complete.
++            if (!child.isDirectory && !existing.isDirectory && existing.length() == child.length()) {
++                return@forEach
+             }
++            existing.deleteSafely()
++        }
++        if (resolver != null && child.moveInto(target, resolver)) {
++            return@forEach
+         }
++        val childTarget = child.createCopyTarget(target, childName)
++            ?: throw IOException("Failed to create '$childName' in " + target.displayablePath)
++        child.transferContentsTo(childTarget, resolver)
++    }
++}
++
++/**
++ * Moves this document into [newParent] without streaming its data through the app. Returns false
++ * when the documents are not SAF documents or the provider does not support moving.
++ */
++private fun UniFile.moveInto(newParent: UniFile, resolver: ContentResolver): Boolean {
++    val source = uri
++    val oldParent = parentFile?.uri ?: return false
++    if (source.scheme != ContentResolver.SCHEME_CONTENT) return false
++    if (newParent.uri.scheme != ContentResolver.SCHEME_CONTENT) return false
++    return try {
++        DocumentsContract.moveDocument(resolver, source, oldParent, newParent.uri) != null
++    } catch (_: Exception) {
++        false
++    }
++}
++
++private fun UniFile.copyFileTo(target: UniFile) {
++    openInputStream().use { input ->
++        target.openOutputStream().use { output ->
++            input.copyTo(output)
++        }
++    }
++    val expected = length()
++    val actual = target.length()
++    // Some providers report 0 / -1 until their metadata is refreshed; only trust a positive size.
++    if (expected > 0 && actual > 0 && actual != expected) {
++        throw IOException("Copied ${target.displayablePath} is $actual bytes, expected $expected")
+     }
+ }
+diff --git a/core/common/src/test/java/tachiyomi/core/common/storage/UniFileExtensionsTest.kt b/core/common/src/test/java/tachiyomi/core/common/storage/UniFileExtensionsTest.kt
+index eaa9f82..c588277 100644
+--- a/core/common/src/test/java/tachiyomi/core/common/storage/UniFileExtensionsTest.kt
++++ b/core/common/src/test/java/tachiyomi/core/common/storage/UniFileExtensionsTest.kt
+@@ -60,6 +60,7 @@ class UniFileExtensionsTest {
+         every { parent.createDirectory("chapter") } returns target
+         every { source.listFiles() } returns arrayOf(child)
+         every { child.name } returns "001.jpg"
++        every { target.findFile("001.jpg") } returns null
+         every { target.createFile("001.jpg") } returns childTarget
+         every { child.openInputStream() } returns ByteArrayInputStream(contents)
+         every { childTarget.openOutputStream() } returns output
+@@ -103,7 +104,7 @@ class UniFileExtensionsTest {
+     }
+ 
+     @Test
+-    fun `removes copied target when deleting source fails`() {
++    fun `keeps copied target when deleting source fails`() {
+         val parent = mockDirectory()
+         val source = mockFile(path = "/source.tmp")
+         val target = mockFile()
+@@ -114,17 +115,65 @@ class UniFileExtensionsTest {
+         every { source.openInputStream() } returns ByteArrayInputStream(byteArrayOf())
+         every { target.openOutputStream() } returns ByteArrayOutputStream()
+         every { source.delete() } returns false
++
++        assertSame(target, source.renameToOrCopy("source.jpg"))
++        verify(exactly = 0) { target.delete() }
++    }
++
++    @Test
++    fun `fails when the copy has a different size`() {
++        val parent = mockDirectory()
++        val source = mockFile(path = "/source.tmp", length = 5)
++        val target = mockFile(length = 3)
++        every { source.renameTo("source.jpg") } returns false
++        every { source.parentFile } returns parent
++        every { parent.findFile("source.jpg") } returns null
++        every { parent.createFile("source.jpg") } returns target
++        every { source.openInputStream() } returns ByteArrayInputStream("image".toByteArray())
++        every { target.openOutputStream() } returns ByteArrayOutputStream()
+         every { target.delete() } returns true
+ 
+         assertThrows(IOException::class.java) {
+             source.renameToOrCopy("source.jpg")
+         }
+         verify(exactly = 1) { target.delete() }
++        verify(exactly = 0) { source.delete() }
++    }
++
++    @Test
++    fun `merges into an existing target directory`() {
++        val contents = "image".toByteArray()
++        val output = ByteArrayOutputStream()
++        val parent = mockDirectory()
++        val source = mockDirectory()
++        val existing = mockDirectory()
++        val done = mockFile(length = 5)
++        val doneCopy = mockFile(length = 5)
++        val pending = mockFile(length = 5)
++        val pendingTarget = mockFile(length = 5)
++        every { source.renameTo("chapter") } returns false
++        every { source.parentFile } returns parent
++        every { parent.findFile("chapter") } returns existing
++        every { source.listFiles() } returns arrayOf(done, pending)
++        every { done.name } returns "001.jpg"
++        every { pending.name } returns "002.jpg"
++        every { existing.findFile("001.jpg") } returns doneCopy
++        every { existing.findFile("002.jpg") } returns null
++        every { existing.createFile("002.jpg") } returns pendingTarget
++        every { pending.openInputStream() } returns ByteArrayInputStream(contents)
++        every { pendingTarget.openOutputStream() } returns output
++        every { source.delete() } returns true
++
++        assertSame(existing, source.renameToOrCopy("chapter"))
++        assertArrayEquals(contents, output.toByteArray())
++        verify(exactly = 0) { done.openInputStream() }
++        verify(exactly = 0) { parent.createDirectory(any()) }
+     }
+ 
+-    private fun mockFile(path: String = "/file"): UniFile = mockk {
++    private fun mockFile(path: String = "/file", length: Long = 0): UniFile = mockk {
+         every { isDirectory } returns false
+         every { filePath } returns path
++        every { length() } returns length
+     }
+ 
+     private fun mockDirectory(): UniFile = mockk {
+diff --git a/i18n/src/commonMain/moko-resources/base/strings.xml b/i18n/src/commonMain/moko-resources/base/strings.xml
+index 3e63ef3..b3edb3e 100644
+--- a/i18n/src/commonMain/moko-resources/base/strings.xml
++++ b/i18n/src/commonMain/moko-resources/base/strings.xml
+@@ -530,6 +530,10 @@
+     <string name="split_tall_images_summary">Improves reader performance</string>
+     <string name="pref_harmony_keep_alive">Keep running in the background (HarmonyOS)</string>
+     <string name="pref_harmony_keep_alive_summary">Plays a silent audio track while downloading or updating the library so that 卓易通 does not suspend the app. Other apps' audio is not affected.</string>
++    <string name="harmony_download_unexpected_files">Download folder has unexpected contents: %1$s</string>
++    <string name="harmony_download_pages_failed">%1$d page(s) failed to download, e.g. page %2$d: %3$s</string>
++    <string name="harmony_download_error_prefix">Error: %1$s</string>
++    <string name="harmony_download_interrupted">Interrupted (network lost or downloader stopped); tap the chapter to download again</string>
+     <string name="download_notifier_speed_progress">Download: %1$s/s · %2$d%%</string>
+     <string name="pref_download_concurrent_sources">Concurrent source downloads</string>
+     <string name="pref_download_concurrent_pages">Concurrent page downloads</string>
+diff --git a/i18n/src/commonMain/moko-resources/zh-rCN/strings.xml b/i18n/src/commonMain/moko-resources/zh-rCN/strings.xml
+index b6d4117..029de7e 100644
+--- a/i18n/src/commonMain/moko-resources/zh-rCN/strings.xml
++++ b/i18n/src/commonMain/moko-resources/zh-rCN/strings.xml
+@@ -578,6 +578,10 @@
+     <string name="split_tall_images_summary">可以改善阅读器的性能</string>
+     <string name="pref_harmony_keep_alive">后台保持运行（鸿蒙）</string>
+     <string name="pref_harmony_keep_alive_summary">下载或更新书架时播放一段静音音轨，防止卓易通冻结应用；不影响其他应用的声音。</string>
++    <string name="harmony_download_unexpected_files">下载目录内容异常：%1$s</string>
++    <string name="harmony_download_pages_failed">%1$d 页下载失败，例如第 %2$d 页：%3$s</string>
++    <string name="harmony_download_error_prefix">出错：%1$s</string>
++    <string name="harmony_download_interrupted">下载被中断（网络断开或下载服务被停止），点一下该章节重新下载</string>
+     <string name="download_notifier_speed_progress">下载：%1$s/s · %2$d%%</string>
+     <string name="download_notifier_split_page_not_found">分割时未找到第 %d 页</string>
+     <string name="download_notifier_split_page_path_not_found">未找到第 %d 页的文件路径</string>
+diff --git a/i18n/src/commonMain/moko-resources/zh-rTW/strings.xml b/i18n/src/commonMain/moko-resources/zh-rTW/strings.xml
+index 6f0c11e..40b2b8b 100644
+--- a/i18n/src/commonMain/moko-resources/zh-rTW/strings.xml
++++ b/i18n/src/commonMain/moko-resources/zh-rTW/strings.xml
+@@ -576,6 +576,10 @@
+     <string name="split_tall_images_summary">用以改善閱讀器效能</string>
+     <string name="pref_harmony_keep_alive">在背景保持執行（HarmonyOS）</string>
+     <string name="pref_harmony_keep_alive_summary">下載或更新書庫時播放一段靜音音軌，避免卓易通凍結應用程式；不影響其他應用程式的聲音。</string>
++    <string name="harmony_download_unexpected_files">下載目錄內容異常：%1$s</string>
++    <string name="harmony_download_pages_failed">%1$d 頁下載失敗，例如第 %2$d 頁：%3$s</string>
++    <string name="harmony_download_error_prefix">錯誤：%1$s</string>
++    <string name="harmony_download_interrupted">下載已中斷（網路斷線或下載服務被停止），點一下該章節重新下載</string>
+     <string name="download_notifier_speed_progress">下載：%1$s/s · %2$d%%</string>
+     <string name="download_notifier_split_page_path_not_found">找不到第 %d 頁的檔案路徑</string>
+     <string name="pref_reset_viewer_flags">重設個別閱讀器設定</string>

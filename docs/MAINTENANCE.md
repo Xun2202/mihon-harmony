@@ -52,6 +52,9 @@
 - `v0.20.4-harmony-preview.8` —— 2026-10-06，加入补丁 0008（检查更新先读 `repo` 分支的 `releases.json` 镜像，再退回 `api.github.com`）。
   起因是 Anikku 用户撞上匿名 GitHub 接口每 IP 每小时 60 次的配额（HTTP 403）；Mihon 走同一条路，只是还没撞上。
   与 anikku-harmony preview.7 / animeko-harmony harmony.9 同一轮（versionCode 2908）。
+- `v0.20.4-harmony-preview.9` —— 2026-10-11，加入补丁 0009（FlexibleAdapter 改从 Maven Central 取，构建修复）和 0010（移植 anikku-harmony 0016：
+  目录改名 `moveDocument` / 合并 / 校验 / 重试，下载队列显示失败原因）。起因是 Anikku 用户的「下载 100% 后变 !」；Mihon 的 0001 是同一份
+  `renameToOrCopy`，按跨 App 规则一起改（versionCode 2909）。
 
 ## 3. 仓库结构
 
@@ -65,6 +68,8 @@ patches/0005-*.patch
 patches/0006-*.patch
 patches/0007-*.patch
 patches/0008-*.patch
+patches/0009-*.patch           # 依赖回迁, 上游稳定版自带后 prepare-source.sh 自动跳过
+patches/0010-*.patch
 scripts/prepare-source.sh      # 官方源码 → 套补丁 → 改版本号, 每步一个 commit
 scripts/write-release-index.sh # Releases 接口返回 → repo 分支的 releases.json / latest.json
 .github/workflows/harmony_preview.yml   # 每日构建发布, 最后写 Release 索引
@@ -146,6 +151,16 @@ rebase 时通常只需重新定位那几行插入点。
 `networkService.client.newBuilder()` 三个超时都 10 秒；`CancellationException` 直接抛，其他异常 `logcat(WARN)` 后退回原来的 API URL），`latest()` 改调它。
 镜像文件必须保持是接口原样返回，`GithubRelease` 的字段（`tag_name` / `body` / `html_url` / `assets[].name` / `assets[].browser_download_url`）一个都不能少。
 与 anikku-harmony 0014 的 `listReleases()` 除 API URL 的 `?per_page=30` 外逐字相同，改一处要同步另一处。
+补丁 0009 只改 `gradle/libs.versions.toml` 两行（版本 `5.1.0`、坐标 `eu.davidea:flexible-adapter`）。`prepare-source.sh` 现在会先 `git apply --check --reverse`，
+能干净反向套用的补丁视为上游已包含而跳过，所以下个稳定版带了这行时不用动 `series`（`check_patches` 对 `main` 的试套也不会被它打红）。
+补丁 0010 改五处：`core/common/.../UniFileExtensions.kt`（整文件重写，与 anikku-harmony 0016 的同名文件**逐字节相同**，改一处同步另一处；
+对应单元测试 `UniFileExtensionsTest` 8 个用例，上游若动 UniFile 封装先跑 `:core:common:testDebugUnitTest`）、`Downloader.kt`
+（`stop()` 用 `fail(reason ?: harmony_download_interrupted)`；`downloadChapter()` 三处 `status = ERROR` 改 `fail(message)`，
+`isDownloadSuccessful()` 为假时按页错误 / 目录内容拼原因并 `logcat(ERROR)`，收尾 `retryStorageOperation { tmpDir.renameToOrCopy(chapterDirname, context.contentResolver) }`；
+新增 `retryStorageOperation()` 3 次 2 s / 4 s）、`model/Download.kt`（`error` 字段 + `fail()`，`status` setter 置非 ERROR 时清空）、
+`ui/download/DownloadHolder.kt`（`notifyDownloadedPages()` 在 ERROR 时右侧显示「Error」、章节名下追加「出错：…」且 `maxLines = 3`；`bind()` 总是调用它）
+与 `DownloadQueueViewModel.onStatusChange` 的 ERROR 分支多调一次 `onUpdateDownloadedPages`；四条字符串 `harmony_download_*` 在 `i18n` base / zh-rCN / zh-rTW。
+CBZ 模式（0003 的 `finalizeArchive`）没有动：它本来就是单文件复制。
 
 ### 5.2 加新补丁
 
@@ -242,3 +257,7 @@ gh release list --repo Xun2202/mihon-harmony
 - 同日（深夜） Anikku 用户撞上「检查更新」HTTP 403（匿名 GitHub 接口每 IP 每小时 60 次配额）。三个 App 的更新检查都直接打 `api.github.com`，
   按跨 App 规则统一改：流水线新增 `write-release-index.sh` / `release_index.yml` 把 Releases 接口返回镜像到 `repo` 分支，
   新增补丁 0008 让 App 先读镜像再退回接口；`dry_run` 验证后发布 preview.8（versionCode 2908）。
+- 2026-10-11 Anikku 用户反馈「下载 100% 后变 !」，根因是卓易通 SAF 不支持 `renameDocument`、0001 的回退整份复制且失败无提示（anikku-harmony 0016）。
+  Mihon 是同一份 `renameToOrCopy`（章节目录改名 = 每页再抄一遍），用户要求「mihon 一块改」。本机冷缓存构建先撞上 JitPack 的 FlexibleAdapter 404
+  （CI 一直靠旧缓存）→ 补丁 0009 回迁上游的 Maven Central 坐标，`prepare-source.sh` 加「能反向套用即跳过」；补丁 0010 移植 0016。
+  本机 `:core:common:testDebugUnitTest`（8 个用例）与 `:app:assemblePreview` 通过，10 张补丁在干净 v0.20.4 上套用一致；发布 preview.9（versionCode 2909）。
