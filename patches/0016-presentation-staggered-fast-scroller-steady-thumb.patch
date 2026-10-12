@@ -1,17 +1,26 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Xun2202 <98207886+Xun2202@users.noreply.github.com>
 Date: Mon, 12 Oct 2026 17:00:56 +0000
-Subject: [PATCH] library: stop the staggered fast scroller thumb from jumping
+Subject: [PATCH] presentation: keep the staggered fast scroller thumb steady
 
-The thumb used the average height of whichever cells were on screen. Mixing
-3:2 and 2:3 cells changes that average as the window moves, so the thumb
-twitched. Heights are now kept by index for the life of the grid state.
-Offset and range sum those heights, using the running average where a cell
-has not been measured yet, and full-line rows are left out. The content
-padding before the list is still added to the offset, as the previous
-estimate did, so a resting list reports offset 0.
+The thumb position was estimated from the average height of the items
+currently on screen. A panorama grid mixes 3:2 and 2:3 cells, so that
+average changed whenever the window did and the thumb jumped.
 
-Harmony-only: same staggered-grid scroller estimate as the one being added on Anikku; Animeko does not use this scroller.
+Heights are now recorded per index as items are measured. The average
+moves only when a stored height changes, and items not seen yet use
+that average. Full-line rows (search bar, section header) are left out
+of the average; LazyStaggeredGridItemInfo does not expose the span, so
+a row is recognised by being wider than a lane cell. Lane count is the
+most columns observed so far. Dragging still maps the thumb to
+scrollToItem(laneCount * row, offset within the row).
+
+Item offset does not include beforeContentPadding (padding is applied
+at placement), so the scroll offset follows the content position and
+the padding is added only to the scroll range.
+
+Harmony-only: the estimate is line-identical in mihon-harmony 0016 and
+anikku-harmony 0023; Animeko does not use this scroller.
 ---
  .../core/components/VerticalFastScroller.kt   | 101 ++++++++++++++----
  1 file changed, 81 insertions(+), 20 deletions(-)
