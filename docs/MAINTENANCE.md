@@ -64,6 +64,7 @@
   功能与 preview.11 相同；0004（busy_timeout）/ 0009（FlexibleAdapter）因上游已含而删除，其余补丁号不变（§5.1 有逐张要点）。
   流水线：解码密钥到文件给 `storeFile`、按源码树自动识别 nightly / preview 构建类型、`assembleNightly`。
   versionCode 3601（上游 36 × 100 + 1），versionName `0.21.0-harmony.1-8157`，包名仍 `app.mihon.debug`，签名不变，可从 v0.20.4 系列直接覆盖（升级前先在 App 里备份，见 README）。
+- `v0.21.0-harmony-preview.2` —— 2026-10-12，加入补丁 0014：书架 / 浏览页新增显示模式「全景松散网格」（从 anikku-harmony 0015 + 0020 移植：横版封面按 3:2 画、瀑布流排布、自动列宽 168 dp）。versionCode 3602。
 
 ## 3. 仓库结构
 
@@ -82,6 +83,7 @@ patches/0010-*.patch
 patches/0011-*.patch
 patches/0012-*.patch
 patches/0013-*.patch           # 0011 的补充: 重试失败章节不算「已在队列」
+patches/0014-*.patch           # 显示模式「全景松散网格」(Anikku 0015 + 0020 的移植)
 scripts/prepare-source.sh      # 官方源码 → 套补丁 → 改版本号, 每步一个 commit
 scripts/write-release-index.sh # Releases 接口返回 → repo 分支的 releases.json / latest.json
 .github/workflows/harmony_preview.yml   # 每日构建发布, 最后写 Release 索引
@@ -199,6 +201,13 @@ CBZ 模式（0003 的 `finalizeArchive`）没有动：它本来就是单文件�
 `App.kt`（`LogcatLogger.loggers += HarmonyLogBuffer`）。上游若把 `CrashLogUtil.dumpLogs` 的 logcat 命令改掉，只需保留 `filterNoise` 这段管道即可。
 噪音特征取自用户 2026-10-12 的导出（HOP-AL10，701 行里 513 行 `BLASTBufferQueue`、82 行 tag 为包名的 `SurfaceDelegator` / `client is nullptr`、44 行 `HwAssetManagerEx`、38 行 `HwViewRootImpl`、6 行 `Display`）；再出现别的刷屏 tag 往 `HARMONY_NOISE_MARKERS` 里加一行即可。
 补丁 0013 只改 `queueChapters()`：`alreadyQueued` 再按 `queuedDownloads[it.id]?.status == ERROR` 拆成 `retried` / `stillQueued`，`QueueResult` 多一个 `retried` 字段（不计入 `skipped`）。
+
+补丁 0014 是 Anikku（KMK 血统）「全景封面」功能的精简移植，只保留网格部分，没有 Anikku 的 `usePanoramaCover` 开关——Mihon 直接多一个显示模式 `LibraryDisplayMode.ComfortableGridPanorama`（序列化 `COMFORTABLE_GRID_PANORAMA`，`values` 变 5 个，`LibraryFlagsTest` 的断言同步改 5）。
+`MangaCover.kt` 新增 `Panorama(3f / 2f)` 和 `onCoverLoaded`（coil3 `AsyncImage.onSuccess`）；`CommonMangaItem.kt` 的 `MangaComfortableGridItem` 多 `usePanoramaCover` / `coverRatio` 参数，`coverRatio.floatValue <= 0.75f` 时格子按 3:2（`RATIO_SWITCH_TO_PANORAMA`，与 Anikku 常量同值）；
+`LibraryComfortableGrid.kt` 全景模式走 `LazyLibraryStaggeredGrid`（`LazyLibraryGrid.kt` 新增，`columns == 0` 时 `StaggeredGridCells.Adaptive(PanoramaGridMinColumnWidth = 168.dp)`），`rememberCoverRatio(mangaId, usePanoramaCover)` 与 Anikku 0020 同一份逻辑（进程级 `ConcurrentHashMap`，全景模式未知封面默认 `9f / 16f`）；
+`presentation-core` 的 `LazyGrid.kt` / `VerticalFastScroller.kt` 新增 `FastScrollLazyVerticalStaggeredGrid` / `VerticalStaggeredGridFastScroller`（与 anikku-harmony 0020 同源）。
+浏览页：`BrowseSourceViewModel` 拆出 `getColumnCount(orientation)`（0 = 自动），`BrowseSourceContent` / `BrowseSourceScreen` / `MigrateSourceSearchScreen` 多传 `columnCount`，`BrowseSourceComfortableGrid` 全景模式用普通 `LazyVerticalStaggeredGrid`（上游浏览页本来没有快速滚动条，保持一致；Anikku 0021 的浏览页是带快速滚动条的，且列数用 `CountedGridCells` 传——两边实现不同、效果相同）。`BrowseSourceToolbar` 的显示模式菜单多一项，图标与松散网格相同。
+字符串 `action_display_comfortable_grid_panorama`：base「Panorama comfortable grid」/ zh-rCN「全景松散网格」/ zh-rTW「全景鬆散格狀」。此补丁由子代理（grok-4.7-high-fast）按 `/workspace/.cursor/rules/orchestration.mdc` 流程完成，主代理复核 diff 并独立重跑 `:app:compileNightlyKotlin spotlessCheck :domain:test`。
 
 ### 5.2 加新补丁
 

@@ -1,0 +1,1042 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Xun2202 <98207886+Xun2202@users.noreply.github.com>
+Date: Mon, 12 Oct 2026 15:22:14 +0000
+Subject: [PATCH] library: add a panorama comfortable grid display mode (wide
+ covers, staggered layout)
+
+The panorama comfortable grid is added because the same layout in Anikku
+was preferred for wide covers.
+
+Library and browse gain a display mode that draws a cover in a 3:2 cell
+when its height/width is at most 0.75, and lays those cells out in a
+staggered grid whose automatic columns are 168 dp wide. Cover orientation
+is cached for the process lifetime so a cell keeps its shape after it
+scrolls off screen and back.
+
+Harmony-only: ported from anikku-harmony 0015 + 0020 (KMK panorama cover feature reduced to the grid); Animeko has no such grid.
+---
+ .../presentation/browse/BrowseSourceScreen.kt |  16 ++
+ .../components/BrowseSourceComfortableGrid.kt |  53 ++++++
+ .../browse/components/BrowseSourceToolbar.kt  |  15 +-
+ .../library/LibrarySettingsDialog.kt          |   3 +
+ .../library/components/CommonMangaItem.kt     |  54 +++++-
+ .../library/components/LazyLibraryGrid.kt     |  51 ++++++
+ .../components/LibraryComfortableGrid.kt      | 152 +++++++++++++---
+ .../library/components/LibraryPager.kt        |  16 ++
+ .../manga/components/MangaCover.kt            |  11 ++
+ .../search/MigrateSourceSearchScreen.kt       |   3 +
+ .../source/browse/BrowseSourceScreen.kt       |   3 +
+ .../source/browse/BrowseSourceViewModel.kt    |  12 +-
+ .../library/model/LibraryDisplayMode.kt       |  13 +-
+ .../domain/library/model/LibraryFlagsTest.kt  |   2 +-
+ .../moko-resources/base/strings.xml           |   1 +
+ .../moko-resources/zh-rCN/strings.xml         |   1 +
+ .../moko-resources/zh-rTW/strings.xml         |   1 +
+ .../presentation/core/components/LazyGrid.kt  |  44 +++++
+ .../core/components/VerticalFastScroller.kt   | 170 ++++++++++++++++++
+ 19 files changed, 581 insertions(+), 40 deletions(-)
+
+diff --git a/app/src/main/java/eu/kanade/presentation/browse/BrowseSourceScreen.kt b/app/src/main/java/eu/kanade/presentation/browse/BrowseSourceScreen.kt
+index 08d211e..ac81717 100644
+--- a/app/src/main/java/eu/kanade/presentation/browse/BrowseSourceScreen.kt
++++ b/app/src/main/java/eu/kanade/presentation/browse/BrowseSourceScreen.kt
+@@ -40,6 +40,9 @@ fun BrowseSourceContent(
+     source: Source?,
+     mangaList: LazyPagingItems<StateFlow<Manga>>,
+     columns: GridCells,
++    // Harmony -->
++    columnCount: Int,
++    // Harmony <--
+     displayMode: LibraryDisplayMode,
+     snackbarHostState: SnackbarHostState,
+     contentPadding: PaddingValues,
+@@ -126,6 +129,19 @@ fun BrowseSourceContent(
+                 onMangaLongClick = onMangaLongClick,
+             )
+         }
++        // Harmony -->
++        LibraryDisplayMode.ComfortableGridPanorama -> {
++            BrowseSourceComfortableGrid(
++                mangaList = mangaList,
++                columns = columns,
++                contentPadding = contentPadding,
++                onMangaClick = onMangaClick,
++                onMangaLongClick = onMangaLongClick,
++                usePanoramaCover = true,
++                columnCount = columnCount,
++            )
++        }
++        // Harmony <--
+         LibraryDisplayMode.List -> {
+             BrowseSourceList(
+                 mangaList = mangaList,
+diff --git a/app/src/main/java/eu/kanade/presentation/browse/components/BrowseSourceComfortableGrid.kt b/app/src/main/java/eu/kanade/presentation/browse/components/BrowseSourceComfortableGrid.kt
+index 825c1c7..e5df59d 100644
+--- a/app/src/main/java/eu/kanade/presentation/browse/components/BrowseSourceComfortableGrid.kt
++++ b/app/src/main/java/eu/kanade/presentation/browse/components/BrowseSourceComfortableGrid.kt
+@@ -5,6 +5,9 @@ import androidx.compose.foundation.layout.PaddingValues
+ import androidx.compose.foundation.lazy.grid.GridCells
+ import androidx.compose.foundation.lazy.grid.GridItemSpan
+ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
++import androidx.compose.foundation.lazy.staggeredgrid.LazyVerticalStaggeredGrid
++import androidx.compose.foundation.lazy.staggeredgrid.StaggeredGridCells
++import androidx.compose.foundation.lazy.staggeredgrid.StaggeredGridItemSpan
+ import androidx.compose.runtime.Composable
+ import androidx.compose.runtime.collectAsState
+ import androidx.compose.runtime.getValue
+@@ -13,6 +16,8 @@ import androidx.paging.LoadState
+ import androidx.paging.compose.LazyPagingItems
+ import eu.kanade.presentation.library.components.CommonMangaItemDefaults
+ import eu.kanade.presentation.library.components.MangaComfortableGridItem
++import eu.kanade.presentation.library.components.PanoramaGridMinColumnWidth
++import eu.kanade.presentation.library.components.rememberCoverRatio
+ import kotlinx.coroutines.flow.StateFlow
+ import tachiyomi.domain.manga.model.Manga
+ import tachiyomi.domain.manga.model.MangaCover
+@@ -25,7 +30,48 @@ fun BrowseSourceComfortableGrid(
+     contentPadding: PaddingValues,
+     onMangaClick: (Manga) -> Unit,
+     onMangaLongClick: (Manga) -> Unit,
++    // Harmony -->
++    usePanoramaCover: Boolean = false,
++    columnCount: Int = 0,
++    // Harmony <--
+ ) {
++    // Harmony -->
++    if (usePanoramaCover) {
++        LazyVerticalStaggeredGrid(
++            columns = if (columnCount == 0) {
++                StaggeredGridCells.Adaptive(PanoramaGridMinColumnWidth)
++            } else {
++                StaggeredGridCells.Fixed(columnCount)
++            },
++            contentPadding = contentPadding + PaddingValues(8.dp),
++            verticalItemSpacing = CommonMangaItemDefaults.GridVerticalSpacer,
++            horizontalArrangement = Arrangement.spacedBy(CommonMangaItemDefaults.GridHorizontalSpacer),
++        ) {
++            if (mangaList.loadState.prepend is LoadState.Loading) {
++                item(span = StaggeredGridItemSpan.FullLine) {
++                    BrowseSourceLoadingItem()
++                }
++            }
++
++            items(count = mangaList.itemCount) { index ->
++                val manga by mangaList[index]?.collectAsState() ?: return@items
++                BrowseSourceComfortableGridItem(
++                    manga = manga,
++                    onClick = { onMangaClick(manga) },
++                    onLongClick = { onMangaLongClick(manga) },
++                    usePanoramaCover = true,
++                )
++            }
++
++            if (mangaList.loadState.refresh is LoadState.Loading || mangaList.loadState.append is LoadState.Loading) {
++                item(span = StaggeredGridItemSpan.FullLine) {
++                    BrowseSourceLoadingItem()
++                }
++            }
++        }
++        return
++    }
++    // Harmony <--
+     LazyVerticalGrid(
+         columns = columns,
+         contentPadding = contentPadding + PaddingValues(8.dp),
+@@ -60,6 +106,9 @@ private fun BrowseSourceComfortableGridItem(
+     manga: Manga,
+     onClick: () -> Unit = {},
+     onLongClick: () -> Unit = onClick,
++    // Harmony -->
++    usePanoramaCover: Boolean = false,
++    // Harmony <--
+ ) {
+     MangaComfortableGridItem(
+         title = manga.title,
+@@ -76,5 +125,9 @@ private fun BrowseSourceComfortableGridItem(
+         },
+         onLongClick = onLongClick,
+         onClick = onClick,
++        // Harmony -->
++        usePanoramaCover = usePanoramaCover,
++        coverRatio = rememberCoverRatio(manga.id, usePanoramaCover),
++        // Harmony <--
+     )
+ }
+diff --git a/app/src/main/java/eu/kanade/presentation/browse/components/BrowseSourceToolbar.kt b/app/src/main/java/eu/kanade/presentation/browse/components/BrowseSourceToolbar.kt
+index 440a9df..f5f348a 100644
+--- a/app/src/main/java/eu/kanade/presentation/browse/components/BrowseSourceToolbar.kt
++++ b/app/src/main/java/eu/kanade/presentation/browse/components/BrowseSourceToolbar.kt
+@@ -60,7 +60,11 @@ fun BrowseSourceToolbar(
+                             title = stringResource(MR.strings.action_display_mode),
+                             icon = when (displayMode) {
+                                 LibraryDisplayMode.List -> MaterialSymbols.AutoMirroredRoundedFilled.ViewList
+-                                LibraryDisplayMode.ComfortableGrid -> MaterialSymbols.RoundedFilled.ViewModule
++                                LibraryDisplayMode.ComfortableGrid,
++                                // Harmony -->
++                                LibraryDisplayMode.ComfortableGridPanorama,
++                                // Harmony <--
++                                -> MaterialSymbols.RoundedFilled.ViewModule
+                                 LibraryDisplayMode.CompactGrid,
+                                 LibraryDisplayMode.CoverOnlyGrid,
+                                 -> MaterialSymbols.RoundedFilled.ViewCompact
+@@ -105,6 +109,15 @@ fun BrowseSourceToolbar(
+                     selectingDisplayMode = false
+                     onDisplayModeChange(LibraryDisplayMode.ComfortableGrid)
+                 }
++                // Harmony -->
++                RadioMenuItem(
++                    text = { Text(text = stringResource(MR.strings.action_display_comfortable_grid_panorama)) },
++                    isChecked = displayMode == LibraryDisplayMode.ComfortableGridPanorama,
++                ) {
++                    selectingDisplayMode = false
++                    onDisplayModeChange(LibraryDisplayMode.ComfortableGridPanorama)
++                }
++                // Harmony <--
+                 RadioMenuItem(
+                     text = { Text(text = stringResource(MR.strings.action_display_grid)) },
+                     isChecked = displayMode == LibraryDisplayMode.CompactGrid,
+diff --git a/app/src/main/java/eu/kanade/presentation/library/LibrarySettingsDialog.kt b/app/src/main/java/eu/kanade/presentation/library/LibrarySettingsDialog.kt
+index ec12ed1..c4a6727 100644
+--- a/app/src/main/java/eu/kanade/presentation/library/LibrarySettingsDialog.kt
++++ b/app/src/main/java/eu/kanade/presentation/library/LibrarySettingsDialog.kt
+@@ -220,6 +220,9 @@ private fun ColumnScope.SortPage(
+ private val displayModes = listOf(
+     MR.strings.action_display_grid to LibraryDisplayMode.CompactGrid,
+     MR.strings.action_display_comfortable_grid to LibraryDisplayMode.ComfortableGrid,
++    // Harmony -->
++    MR.strings.action_display_comfortable_grid_panorama to LibraryDisplayMode.ComfortableGridPanorama,
++    // Harmony <--
+     MR.strings.action_display_cover_only_grid to LibraryDisplayMode.CoverOnlyGrid,
+     MR.strings.action_display_list to LibraryDisplayMode.List,
+ )
+diff --git a/app/src/main/java/eu/kanade/presentation/library/components/CommonMangaItem.kt b/app/src/main/java/eu/kanade/presentation/library/components/CommonMangaItem.kt
+index 0ec67f5..2a8067b 100644
+--- a/app/src/main/java/eu/kanade/presentation/library/components/CommonMangaItem.kt
++++ b/app/src/main/java/eu/kanade/presentation/library/components/CommonMangaItem.kt
+@@ -23,6 +23,9 @@ import androidx.compose.material3.Text
+ import androidx.compose.material3.contentColorFor
+ import androidx.compose.runtime.Composable
+ import androidx.compose.runtime.CompositionLocalProvider
++import androidx.compose.runtime.MutableFloatState
++import androidx.compose.runtime.mutableFloatStateOf
++import androidx.compose.runtime.remember
+ import androidx.compose.ui.Alignment
+ import androidx.compose.ui.Modifier
+ import androidx.compose.ui.draw.alpha
+@@ -36,6 +39,7 @@ import androidx.compose.ui.text.style.TextOverflow
+ import androidx.compose.ui.unit.Dp
+ import androidx.compose.ui.unit.dp
+ import androidx.compose.ui.unit.sp
++import coil3.compose.AsyncImagePainter
+ import eu.kanade.presentation.manga.components.MangaCover
+ import mihon.icons.materialsymbols.MaterialSymbols
+ import mihon.icons.materialsymbols.roundedfilled.PlayArrow
+@@ -64,6 +68,9 @@ private val ContinueReadingButtonListSpacing = 8.dp
+ 
+ private const val GRID_SELECTED_COVER_ALPHA = 0.76f
+ 
++// Harmony: height / width; at or below this the cover uses the 3:2 panorama cell.
++private const val RATIO_SWITCH_TO_PANORAMA = 0.75f
++
+ /**
+  * Layout of grid list item with title overlaying the cover.
+  * Accepts null [title] for a cover-only view.
+@@ -185,7 +192,22 @@ fun MangaComfortableGridItem(
+     coverBadgeStart: (@Composable RowScope.() -> Unit)? = null,
+     coverBadgeEnd: (@Composable RowScope.() -> Unit)? = null,
+     onClickContinueReading: (() -> Unit)? = null,
++    // Harmony -->
++    usePanoramaCover: Boolean = false,
++    coverRatio: MutableFloatState = remember { mutableFloatStateOf(1f) },
++    // Harmony <--
+ ) {
++    // Harmony -->
++    val wideCover = usePanoramaCover && coverRatio.floatValue <= RATIO_SWITCH_TO_PANORAMA
++    val onCoverLoaded: ((AsyncImagePainter.State.Success) -> Unit)? = if (usePanoramaCover) {
++        { result ->
++            val image = result.result.image
++            coverRatio.floatValue = image.height.toFloat() / image.width
++        }
++    } else {
++        null
++    }
++    // Harmony <--
+     GridItemSelectable(
+         isSelected = isSelected,
+         onClick = onClick,
+@@ -193,13 +215,28 @@ fun MangaComfortableGridItem(
+     ) {
+         Column {
+             MangaGridCover(
++                // Harmony -->
++                ratio = if (wideCover) MangaCover.Panorama.ratio else MangaCover.Book.ratio,
++                // Harmony <--
+                 cover = {
+-                    MangaCover.Book(
+-                        modifier = Modifier
+-                            .fillMaxWidth()
+-                            .alpha(if (isSelected) GRID_SELECTED_COVER_ALPHA else coverAlpha),
+-                        data = coverData,
+-                    )
++                    // Harmony -->
++                    val coverModifier = Modifier
++                        .fillMaxWidth()
++                        .alpha(if (isSelected) GRID_SELECTED_COVER_ALPHA else coverAlpha)
++                    if (wideCover) {
++                        MangaCover.Panorama(
++                            modifier = coverModifier,
++                            data = coverData,
++                            onCoverLoaded = onCoverLoaded,
++                        )
++                    } else {
++                        MangaCover.Book(
++                            modifier = coverModifier,
++                            data = coverData,
++                            onCoverLoaded = onCoverLoaded,
++                        )
++                    }
++                    // Harmony <--
+                 },
+                 badgesStart = coverBadgeStart,
+                 badgesEnd = coverBadgeEnd,
+@@ -234,6 +271,9 @@ fun MangaComfortableGridItem(
+ private fun MangaGridCover(
+     modifier: Modifier = Modifier,
+     cover: @Composable BoxScope.() -> Unit = {},
++    // Harmony -->
++    ratio: Float = MangaCover.Book.ratio,
++    // Harmony <--
+     badgesStart: (@Composable RowScope.() -> Unit)? = null,
+     badgesEnd: (@Composable RowScope.() -> Unit)? = null,
+     content: @Composable (BoxScope.() -> Unit)? = null,
+@@ -241,7 +281,7 @@ private fun MangaGridCover(
+     Box(
+         modifier = modifier
+             .fillMaxWidth()
+-            .aspectRatio(MangaCover.Book.ratio),
++            .aspectRatio(ratio),
+     ) {
+         cover()
+         content?.invoke(this)
+diff --git a/app/src/main/java/eu/kanade/presentation/library/components/LazyLibraryGrid.kt b/app/src/main/java/eu/kanade/presentation/library/components/LazyLibraryGrid.kt
+index 4cc5b1f..fc2a4ee 100644
+--- a/app/src/main/java/eu/kanade/presentation/library/components/LazyLibraryGrid.kt
++++ b/app/src/main/java/eu/kanade/presentation/library/components/LazyLibraryGrid.kt
+@@ -5,10 +5,15 @@ import androidx.compose.foundation.layout.PaddingValues
+ import androidx.compose.foundation.lazy.grid.GridCells
+ import androidx.compose.foundation.lazy.grid.GridItemSpan
+ import androidx.compose.foundation.lazy.grid.LazyGridScope
++import androidx.compose.foundation.lazy.staggeredgrid.LazyStaggeredGridScope
++import androidx.compose.foundation.lazy.staggeredgrid.StaggeredGridCells
++import androidx.compose.foundation.lazy.staggeredgrid.StaggeredGridItemSpan
+ import androidx.compose.runtime.Composable
+ import androidx.compose.ui.Modifier
++import androidx.compose.ui.unit.Dp
+ import androidx.compose.ui.unit.dp
+ import tachiyomi.presentation.core.components.FastScrollLazyVerticalGrid
++import tachiyomi.presentation.core.components.FastScrollLazyVerticalStaggeredGrid
+ import tachiyomi.presentation.core.util.plus
+ 
+ @Composable
+@@ -28,6 +33,52 @@ internal fun LazyLibraryGrid(
+     )
+ }
+ 
++// Harmony -->
++
++/**
++ * Grid whose lanes flow independently, so cells of different heights (a 3:2 panorama cover next
++ * to a 2:3 book cover) don't leave empty space below the shorter one.
++ */
++@Composable
++internal fun LazyLibraryStaggeredGrid(
++    modifier: Modifier = Modifier,
++    columns: Int,
++    minColumnWidth: Dp,
++    contentPadding: PaddingValues,
++    content: LazyStaggeredGridScope.() -> Unit,
++) {
++    FastScrollLazyVerticalStaggeredGrid(
++        columns = if (columns == 0) {
++            StaggeredGridCells.Adaptive(minColumnWidth)
++        } else {
++            StaggeredGridCells.Fixed(columns)
++        },
++        modifier = modifier,
++        contentPadding = contentPadding + PaddingValues(8.dp),
++        verticalItemSpacing = CommonMangaItemDefaults.GridVerticalSpacer,
++        horizontalArrangement = Arrangement.spacedBy(CommonMangaItemDefaults.GridHorizontalSpacer),
++        content = content,
++    )
++}
++
++internal fun LazyStaggeredGridScope.globalSearchItem(
++    searchQuery: String?,
++    onGlobalSearchClicked: () -> Unit,
++) {
++    if (!searchQuery.isNullOrEmpty()) {
++        item(
++            span = StaggeredGridItemSpan.FullLine,
++            contentType = "library_global_search_item",
++        ) {
++            GlobalSearchItem(
++                searchQuery = searchQuery,
++                onClick = onGlobalSearchClicked,
++            )
++        }
++    }
++}
++// Harmony <--
++
+ internal fun LazyGridScope.globalSearchItem(
+     searchQuery: String?,
+     onGlobalSearchClicked: () -> Unit,
+diff --git a/app/src/main/java/eu/kanade/presentation/library/components/LibraryComfortableGrid.kt b/app/src/main/java/eu/kanade/presentation/library/components/LibraryComfortableGrid.kt
+index 2c6655d..a6315ca 100644
+--- a/app/src/main/java/eu/kanade/presentation/library/components/LibraryComfortableGrid.kt
++++ b/app/src/main/java/eu/kanade/presentation/library/components/LibraryComfortableGrid.kt
+@@ -3,11 +3,20 @@ package eu.kanade.presentation.library.components
+ import androidx.compose.foundation.layout.PaddingValues
+ import androidx.compose.foundation.layout.fillMaxSize
+ import androidx.compose.foundation.lazy.grid.items
++import androidx.compose.foundation.lazy.staggeredgrid.items
+ import androidx.compose.runtime.Composable
++import androidx.compose.runtime.LaunchedEffect
++import androidx.compose.runtime.MutableFloatState
++import androidx.compose.runtime.mutableFloatStateOf
++import androidx.compose.runtime.remember
++import androidx.compose.runtime.snapshotFlow
+ import androidx.compose.ui.Modifier
++import androidx.compose.ui.unit.dp
+ import eu.kanade.tachiyomi.ui.library.LibraryItem
++import kotlinx.coroutines.flow.drop
+ import tachiyomi.domain.library.model.LibraryManga
+ import tachiyomi.domain.manga.model.MangaCover
++import java.util.concurrent.ConcurrentHashMap
+ 
+ @Composable
+ internal fun LibraryComfortableGrid(
+@@ -20,7 +29,41 @@ internal fun LibraryComfortableGrid(
+     onClickContinueReading: ((LibraryManga) -> Unit)?,
+     searchQuery: String?,
+     onGlobalSearchClicked: () -> Unit,
++    // Harmony -->
++    usePanoramaCover: Boolean = false,
++    // Harmony <--
+ ) {
++    // Harmony -->
++    // Panorama mode mixes 3:2 and 2:3 cells. A regular grid makes every row as tall as its tallest
++    // cell, which leaves a big hole under each wide cover that shares a row with a book cover; a
++    // staggered grid lets each lane flow on its own. Wide covers also need wider auto columns than
++    // the 128 dp meant for book covers, otherwise they come out short and cramped.
++    if (usePanoramaCover) {
++        LazyLibraryStaggeredGrid(
++            modifier = Modifier.fillMaxSize(),
++            columns = columns,
++            minColumnWidth = PanoramaGridMinColumnWidth,
++            contentPadding = contentPadding,
++        ) {
++            globalSearchItem(searchQuery, onGlobalSearchClicked)
++
++            items(
++                items = items,
++                contentType = { "library_comfortable_grid_item" },
++            ) { libraryItem ->
++                LibraryComfortableGridItem(
++                    libraryItem = libraryItem,
++                    isSelected = libraryItem.libraryManga.manga.id in selection,
++                    onClick = onClick,
++                    onLongClick = onLongClick,
++                    onClickContinueReading = onClickContinueReading,
++                    usePanoramaCover = true,
++                )
++            }
++        }
++        return
++    }
++    // Harmony <--
+     LazyLibraryGrid(
+         modifier = Modifier.fillMaxSize(),
+         columns = columns,
+@@ -32,35 +75,88 @@ internal fun LibraryComfortableGrid(
+             items = items,
+             contentType = { "library_comfortable_grid_item" },
+         ) { libraryItem ->
+-            val manga = libraryItem.libraryManga.manga
+-            MangaComfortableGridItem(
+-                isSelected = manga.id in selection,
+-                title = manga.title,
+-                coverData = MangaCover(
+-                    mangaId = manga.id,
+-                    sourceId = manga.source,
+-                    isMangaFavorite = manga.favorite,
+-                    url = manga.thumbnailUrl,
+-                    lastModified = manga.coverLastModified,
+-                ),
+-                coverBadgeStart = {
+-                    DownloadsBadge(count = libraryItem.badges.downloadCount)
+-                    UnreadBadge(count = libraryItem.badges.unreadCount)
+-                },
+-                coverBadgeEnd = {
+-                    LanguageBadge(
+-                        isLocal = libraryItem.badges.isLocal,
+-                        sourceLanguage = libraryItem.badges.sourceLanguage,
+-                    )
+-                },
+-                onLongClick = { onLongClick(libraryItem.libraryManga) },
+-                onClick = { onClick(libraryItem.libraryManga) },
+-                onClickContinueReading = if (onClickContinueReading != null && libraryItem.unreadCount > 0) {
+-                    { onClickContinueReading(libraryItem.libraryManga) }
+-                } else {
+-                    null
+-                },
++            LibraryComfortableGridItem(
++                libraryItem = libraryItem,
++                isSelected = libraryItem.libraryManga.manga.id in selection,
++                onClick = onClick,
++                onLongClick = onLongClick,
++                onClickContinueReading = onClickContinueReading,
++                usePanoramaCover = usePanoramaCover,
+             )
+         }
+     }
+ }
++
++@Composable
++private fun LibraryComfortableGridItem(
++    libraryItem: LibraryItem,
++    isSelected: Boolean,
++    onClick: (LibraryManga) -> Unit,
++    onLongClick: (LibraryManga) -> Unit,
++    onClickContinueReading: ((LibraryManga) -> Unit)?,
++    usePanoramaCover: Boolean,
++) {
++    val manga = libraryItem.libraryManga.manga
++    MangaComfortableGridItem(
++        isSelected = isSelected,
++        title = manga.title,
++        coverData = MangaCover(
++            mangaId = manga.id,
++            sourceId = manga.source,
++            isMangaFavorite = manga.favorite,
++            url = manga.thumbnailUrl,
++            lastModified = manga.coverLastModified,
++        ),
++        coverBadgeStart = {
++            DownloadsBadge(count = libraryItem.badges.downloadCount)
++            UnreadBadge(count = libraryItem.badges.unreadCount)
++        },
++        coverBadgeEnd = {
++            LanguageBadge(
++                isLocal = libraryItem.badges.isLocal,
++                sourceLanguage = libraryItem.badges.sourceLanguage,
++            )
++        },
++        onLongClick = { onLongClick(libraryItem.libraryManga) },
++        onClick = { onClick(libraryItem.libraryManga) },
++        onClickContinueReading = if (onClickContinueReading != null && libraryItem.unreadCount > 0) {
++            { onClickContinueReading(libraryItem.libraryManga) }
++        } else {
++            null
++        },
++        // Harmony -->
++        usePanoramaCover = usePanoramaCover,
++        coverRatio = rememberCoverRatio(manga.id, usePanoramaCover),
++        // Harmony <--
++    )
++}
++
++// Harmony -->
++
++/** Auto column width for the panorama grid; a 3:2 cover at this width is as tall as a 2:3 cover at 128 dp is wide. */
++internal val PanoramaGridMinColumnWidth = 168.dp
++
++/**
++ * Cover orientation (height / width) by manga id, kept for the process lifetime so a cell keeps
++ * its shape when it scrolls back into view instead of jumping from book to panorama once the
++ * image is decoded again. In panorama mode an unknown cover is assumed wide, since that is what
++ * the mode is for.
++ */
++private val coverRatios = ConcurrentHashMap<Long, Float>()
++
++/** height / width of a 16:9 thumbnail, the common shape of video covers. */
++private const val WIDE_COVER_RATIO = 9f / 16f
++
++@Composable
++internal fun rememberCoverRatio(mangaId: Long, usePanoramaCover: Boolean): MutableFloatState {
++    val ratio = remember(mangaId) {
++        mutableFloatStateOf(coverRatios[mangaId] ?: if (usePanoramaCover) WIDE_COVER_RATIO else 1f)
++    }
++    LaunchedEffect(mangaId) {
++        snapshotFlow { ratio.floatValue }
++            .drop(1)
++            .collect { coverRatios[mangaId] = it }
++    }
++    return ratio
++}
++// Harmony <--
+diff --git a/app/src/main/java/eu/kanade/presentation/library/components/LibraryPager.kt b/app/src/main/java/eu/kanade/presentation/library/components/LibraryPager.kt
+index b3bfd0f..7b11ed7 100644
+--- a/app/src/main/java/eu/kanade/presentation/library/components/LibraryPager.kt
++++ b/app/src/main/java/eu/kanade/presentation/library/components/LibraryPager.kt
+@@ -118,6 +118,22 @@ fun LibraryPager(
+                     onGlobalSearchClicked = onGlobalSearchClicked,
+                 )
+             }
++            // Harmony -->
++            LibraryDisplayMode.ComfortableGridPanorama -> {
++                LibraryComfortableGrid(
++                    items = items,
++                    columns = columns,
++                    contentPadding = contentPadding,
++                    selection = selection,
++                    onClick = onClickManga,
++                    onLongClick = onLongClickManga,
++                    onClickContinueReading = onClickContinueReading,
++                    searchQuery = searchQuery,
++                    onGlobalSearchClicked = onGlobalSearchClicked,
++                    usePanoramaCover = true,
++                )
++            }
++            // Harmony <--
+         }
+     }
+ }
+diff --git a/app/src/main/java/eu/kanade/presentation/manga/components/MangaCover.kt b/app/src/main/java/eu/kanade/presentation/manga/components/MangaCover.kt
+index 4fb1cf8..0fd4f5c 100644
+--- a/app/src/main/java/eu/kanade/presentation/manga/components/MangaCover.kt
++++ b/app/src/main/java/eu/kanade/presentation/manga/components/MangaCover.kt
+@@ -12,12 +12,17 @@ import androidx.compose.ui.graphics.painter.ColorPainter
+ import androidx.compose.ui.layout.ContentScale
+ import androidx.compose.ui.semantics.Role
+ import coil3.compose.AsyncImage
++import coil3.compose.AsyncImagePainter
+ import eu.kanade.presentation.util.rememberResourceBitmapPainter
+ import eu.kanade.tachiyomi.R
+ 
+ enum class MangaCover(val ratio: Float) {
+     Square(1f / 1f),
+     Book(2f / 3f),
++
++    // Harmony -->
++    Panorama(3f / 2f),
++    // Harmony <--
+     ;
+ 
+     @Composable
+@@ -27,6 +32,9 @@ enum class MangaCover(val ratio: Float) {
+         contentDescription: String = "",
+         shape: Shape = MaterialTheme.shapes.extraSmall,
+         onClick: (() -> Unit)? = null,
++        // Harmony -->
++        onCoverLoaded: ((AsyncImagePainter.State.Success) -> Unit)? = null,
++        // Harmony <--
+     ) {
+         AsyncImage(
+             model = data,
+@@ -47,6 +55,9 @@ enum class MangaCover(val ratio: Float) {
+                     },
+                 ),
+             contentScale = ContentScale.Crop,
++            // Harmony -->
++            onSuccess = onCoverLoaded,
++            // Harmony <--
+         )
+     }
+ }
+diff --git a/app/src/main/java/eu/kanade/tachiyomi/ui/browse/migration/search/MigrateSourceSearchScreen.kt b/app/src/main/java/eu/kanade/tachiyomi/ui/browse/migration/search/MigrateSourceSearchScreen.kt
+index fe0e37a..5e6d2c9 100644
+--- a/app/src/main/java/eu/kanade/tachiyomi/ui/browse/migration/search/MigrateSourceSearchScreen.kt
++++ b/app/src/main/java/eu/kanade/tachiyomi/ui/browse/migration/search/MigrateSourceSearchScreen.kt
+@@ -106,6 +106,9 @@ data class MigrateSourceSearchScreen(
+                 source = source,
+                 mangaList = viewModel.mangaPagerFlowFlow.collectAsLazyPagingItems(),
+                 columns = viewModel.getColumnsPreference(LocalConfiguration.current.orientation),
++                // Harmony -->
++                columnCount = viewModel.getColumnCount(LocalConfiguration.current.orientation),
++                // Harmony <--
+                 displayMode = viewModel.displayMode,
+                 snackbarHostState = snackbarHostState,
+                 contentPadding = paddingValues,
+diff --git a/app/src/main/java/eu/kanade/tachiyomi/ui/browse/source/browse/BrowseSourceScreen.kt b/app/src/main/java/eu/kanade/tachiyomi/ui/browse/source/browse/BrowseSourceScreen.kt
+index abcdf16..728d32e 100644
+--- a/app/src/main/java/eu/kanade/tachiyomi/ui/browse/source/browse/BrowseSourceScreen.kt
++++ b/app/src/main/java/eu/kanade/tachiyomi/ui/browse/source/browse/BrowseSourceScreen.kt
+@@ -217,6 +217,9 @@ data class BrowseSourceScreen(
+                 source = source,
+                 mangaList = viewModel.mangaPagerFlowFlow.collectAsLazyPagingItems(),
+                 columns = viewModel.getColumnsPreference(LocalConfiguration.current.orientation),
++                // Harmony -->
++                columnCount = viewModel.getColumnCount(LocalConfiguration.current.orientation),
++                // Harmony <--
+                 displayMode = viewModel.displayMode,
+                 snackbarHostState = snackbarHostState,
+                 contentPadding = paddingValues,
+diff --git a/app/src/main/java/eu/kanade/tachiyomi/ui/browse/source/browse/BrowseSourceViewModel.kt b/app/src/main/java/eu/kanade/tachiyomi/ui/browse/source/browse/BrowseSourceViewModel.kt
+index 7d080a7..8ee7108 100644
+--- a/app/src/main/java/eu/kanade/tachiyomi/ui/browse/source/browse/BrowseSourceViewModel.kt
++++ b/app/src/main/java/eu/kanade/tachiyomi/ui/browse/source/browse/BrowseSourceViewModel.kt
+@@ -147,14 +147,22 @@ class BrowseSourceViewModel(
+         .stateIn(viewModelScope, SharingStarted.Lazily, emptyFlow())
+ 
+     fun getColumnsPreference(orientation: Int): GridCells {
++        val columns = getColumnCount(orientation)
++        return if (columns == 0) GridCells.Adaptive(128.dp) else GridCells.Fixed(columns)
++    }
++
++    // Harmony -->
++    // Raw column count (0 = automatic) so panorama mode can build staggered cells without
++    // changing the GridCells the other display modes use.
++    fun getColumnCount(orientation: Int): Int {
+         val isLandscape = orientation == Configuration.ORIENTATION_LANDSCAPE
+-        val columns = if (isLandscape) {
++        return if (isLandscape) {
+             libraryPreferences.landscapeColumns
+         } else {
+             libraryPreferences.portraitColumns
+         }.get()
+-        return if (columns == 0) GridCells.Adaptive(128.dp) else GridCells.Fixed(columns)
+     }
++    // Harmony <--
+ 
+     fun resetFilters() {
+         val source = source ?: return
+diff --git a/domain/src/main/java/tachiyomi/domain/library/model/LibraryDisplayMode.kt b/domain/src/main/java/tachiyomi/domain/library/model/LibraryDisplayMode.kt
+index bc2fde0..6f64b06 100644
+--- a/domain/src/main/java/tachiyomi/domain/library/model/LibraryDisplayMode.kt
++++ b/domain/src/main/java/tachiyomi/domain/library/model/LibraryDisplayMode.kt
+@@ -4,6 +4,11 @@ sealed interface LibraryDisplayMode {
+ 
+     data object CompactGrid : LibraryDisplayMode
+     data object ComfortableGrid : LibraryDisplayMode
++
++    // Harmony -->
++    data object ComfortableGridPanorama : LibraryDisplayMode
++    // Harmony <--
++
+     data object List : LibraryDisplayMode
+     data object CoverOnlyGrid : LibraryDisplayMode
+ 
+@@ -18,12 +23,15 @@ sealed interface LibraryDisplayMode {
+     }
+ 
+     companion object {
+-        val values by lazy { setOf(CompactGrid, ComfortableGrid, List, CoverOnlyGrid) }
++        val values by lazy { setOf(CompactGrid, ComfortableGrid, ComfortableGridPanorama, List, CoverOnlyGrid) }
+         val default = CompactGrid
+ 
+         fun deserialize(serialized: String): LibraryDisplayMode {
+             return when (serialized) {
+                 "COMFORTABLE_GRID" -> ComfortableGrid
++                // Harmony -->
++                "COMFORTABLE_GRID_PANORAMA" -> ComfortableGridPanorama
++                // Harmony <--
+                 "COMPACT_GRID" -> CompactGrid
+                 "COVER_ONLY_GRID" -> CoverOnlyGrid
+                 "LIST" -> List
+@@ -35,6 +43,9 @@ sealed interface LibraryDisplayMode {
+     fun serialize(): String {
+         return when (this) {
+             ComfortableGrid -> "COMFORTABLE_GRID"
++            // Harmony -->
++            ComfortableGridPanorama -> "COMFORTABLE_GRID_PANORAMA"
++            // Harmony <--
+             CompactGrid -> "COMPACT_GRID"
+             CoverOnlyGrid -> "COVER_ONLY_GRID"
+             List -> "LIST"
+diff --git a/domain/src/test/java/tachiyomi/domain/library/model/LibraryFlagsTest.kt b/domain/src/test/java/tachiyomi/domain/library/model/LibraryFlagsTest.kt
+index 11af8eb..7e6c79c 100644
+--- a/domain/src/test/java/tachiyomi/domain/library/model/LibraryFlagsTest.kt
++++ b/domain/src/test/java/tachiyomi/domain/library/model/LibraryFlagsTest.kt
+@@ -11,7 +11,7 @@ class LibraryFlagsTest {
+ 
+     @Test
+     fun `Check the amount of flags`() {
+-        LibraryDisplayMode.values.size shouldBe 4
++        LibraryDisplayMode.values.size shouldBe 5
+         LibrarySort.types.size shouldBe 10
+         LibrarySort.directions.size shouldBe 2
+     }
+diff --git a/i18n/src/commonMain/moko-resources/base/strings.xml b/i18n/src/commonMain/moko-resources/base/strings.xml
+index ea66570..8acbebc 100644
+--- a/i18n/src/commonMain/moko-resources/base/strings.xml
++++ b/i18n/src/commonMain/moko-resources/base/strings.xml
+@@ -120,6 +120,7 @@
+     <string name="action_display">Display</string>
+     <string name="action_display_grid">Compact grid</string>
+     <string name="action_display_comfortable_grid">Comfortable grid</string>
++    <string name="action_display_comfortable_grid_panorama">Panorama comfortable grid</string>
+     <string name="action_display_list">List</string>
+     <string name="action_display_cover_only_grid">Cover-only grid</string>
+     <string name="action_display_download_badge">Downloaded chapters</string>
+diff --git a/i18n/src/commonMain/moko-resources/zh-rCN/strings.xml b/i18n/src/commonMain/moko-resources/zh-rCN/strings.xml
+index 007139d..1da8228 100644
+--- a/i18n/src/commonMain/moko-resources/zh-rCN/strings.xml
++++ b/i18n/src/commonMain/moko-resources/zh-rCN/strings.xml
+@@ -368,6 +368,7 @@
+     <string name="pref_library_update_refresh_metadata">自动刷新作品信息</string>
+     <string name="action_migrate">迁移</string>
+     <string name="action_display_comfortable_grid">松散网格</string>
++    <string name="action_display_comfortable_grid_panorama">全景松散网格</string>
+     <string name="tabs_header">标签</string>
+     <string name="action_display_show_tabs">显示分类标签</string>
+     <string name="page_list_empty_error">没有图片</string>
+diff --git a/i18n/src/commonMain/moko-resources/zh-rTW/strings.xml b/i18n/src/commonMain/moko-resources/zh-rTW/strings.xml
+index ed73d52..f9c47f4 100644
+--- a/i18n/src/commonMain/moko-resources/zh-rTW/strings.xml
++++ b/i18n/src/commonMain/moko-resources/zh-rTW/strings.xml
+@@ -307,6 +307,7 @@
+     <string name="gray_background">灰色</string>
+     <string name="pref_category_display">檢視</string>
+     <string name="action_display_comfortable_grid">鬆散格狀</string>
++    <string name="action_display_comfortable_grid_panorama">全景鬆散格狀</string>
+     <string name="pref_category_for_this_series">套用於這部作品</string>
+     <string name="pref_category_reading">翻閱</string>
+     <string name="pref_category_library_update">全域更新</string>
+diff --git a/presentation-core/src/main/java/tachiyomi/presentation/core/components/LazyGrid.kt b/presentation-core/src/main/java/tachiyomi/presentation/core/components/LazyGrid.kt
+index f0061e1..75e4cee 100644
+--- a/presentation-core/src/main/java/tachiyomi/presentation/core/components/LazyGrid.kt
++++ b/presentation-core/src/main/java/tachiyomi/presentation/core/components/LazyGrid.kt
+@@ -7,6 +7,11 @@ import androidx.compose.foundation.lazy.grid.LazyGridScope
+ import androidx.compose.foundation.lazy.grid.LazyGridState
+ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+ import androidx.compose.foundation.lazy.grid.rememberLazyGridState
++import androidx.compose.foundation.lazy.staggeredgrid.LazyStaggeredGridScope
++import androidx.compose.foundation.lazy.staggeredgrid.LazyStaggeredGridState
++import androidx.compose.foundation.lazy.staggeredgrid.LazyVerticalStaggeredGrid
++import androidx.compose.foundation.lazy.staggeredgrid.StaggeredGridCells
++import androidx.compose.foundation.lazy.staggeredgrid.rememberLazyStaggeredGridState
+ import androidx.compose.material3.MaterialTheme
+ import androidx.compose.runtime.Composable
+ import androidx.compose.ui.Modifier
+@@ -56,3 +61,42 @@ fun FastScrollLazyVerticalGrid(
+         )
+     }
+ }
++
++// Harmony -->
++@Composable
++fun FastScrollLazyVerticalStaggeredGrid(
++    columns: StaggeredGridCells,
++    modifier: Modifier = Modifier,
++    state: LazyStaggeredGridState = rememberLazyStaggeredGridState(),
++    thumbAllowed: () -> Boolean = { true },
++    thumbColor: Color = MaterialTheme.colorScheme.primary,
++    contentPadding: PaddingValues = PaddingValues(0.dp),
++    topContentPadding: Dp = Dp.Hairline,
++    bottomContentPadding: Dp = Dp.Hairline,
++    endContentPadding: Dp = Dp.Hairline,
++    verticalItemSpacing: Dp = 0.dp,
++    horizontalArrangement: Arrangement.Horizontal = Arrangement.Start,
++    userScrollEnabled: Boolean = true,
++    content: LazyStaggeredGridScope.() -> Unit,
++) {
++    VerticalStaggeredGridFastScroller(
++        state = state,
++        modifier = modifier,
++        thumbAllowed = thumbAllowed,
++        thumbColor = thumbColor,
++        topContentPadding = topContentPadding,
++        bottomContentPadding = bottomContentPadding,
++        endContentPadding = endContentPadding,
++    ) {
++        LazyVerticalStaggeredGrid(
++            columns = columns,
++            state = state,
++            contentPadding = contentPadding,
++            verticalItemSpacing = verticalItemSpacing,
++            horizontalArrangement = horizontalArrangement,
++            userScrollEnabled = userScrollEnabled,
++            content = content,
++        )
++    }
++}
++// Harmony <--
+diff --git a/presentation-core/src/main/java/tachiyomi/presentation/core/components/VerticalFastScroller.kt b/presentation-core/src/main/java/tachiyomi/presentation/core/components/VerticalFastScroller.kt
+index 601cd8e..3847ec1 100644
+--- a/presentation-core/src/main/java/tachiyomi/presentation/core/components/VerticalFastScroller.kt
++++ b/presentation-core/src/main/java/tachiyomi/presentation/core/components/VerticalFastScroller.kt
+@@ -22,6 +22,7 @@ import androidx.compose.foundation.lazy.LazyListItemInfo
+ import androidx.compose.foundation.lazy.LazyListState
+ import androidx.compose.foundation.lazy.grid.GridCells
+ import androidx.compose.foundation.lazy.grid.LazyGridState
++import androidx.compose.foundation.lazy.staggeredgrid.LazyStaggeredGridState
+ import androidx.compose.foundation.shape.RoundedCornerShape
+ import androidx.compose.foundation.systemGestureExclusion
+ import androidx.compose.material3.MaterialTheme
+@@ -455,6 +456,175 @@ private fun computeGridScrollRange(state: LazyGridState, columnCount: Int): Int
+     return (endSpacing + (laidOutArea.toFloat() / laidOutRows) * totalRows).roundToInt()
+ }
+ 
++// Harmony -->
++
++/**
++ * Draws a vertical fast scroller next to a [androidx.compose.foundation.lazy.staggeredgrid.LazyVerticalStaggeredGrid].
++ *
++ * Lanes of a staggered grid have independent heights, so the scroll range is estimated from the
++ * average visible item height: one "row" is [laneCount] items.
++ */
++@Composable
++fun VerticalStaggeredGridFastScroller(
++    state: LazyStaggeredGridState,
++    modifier: Modifier = Modifier,
++    thumbAllowed: () -> Boolean = { true },
++    thumbColor: Color = MaterialTheme.colorScheme.primary,
++    topContentPadding: Dp = Dp.Hairline,
++    bottomContentPadding: Dp = Dp.Hairline,
++    endContentPadding: Dp = Dp.Hairline,
++    content: @Composable () -> Unit,
++) {
++    SubcomposeLayout(modifier = modifier) { constraints ->
++        val contentPlaceable = subcompose("content", content).map { it.measure(constraints) }
++        val contentHeight = contentPlaceable.fastMaxBy { it.height }?.height ?: 0
++        val contentWidth = contentPlaceable.fastMaxBy { it.width }?.width ?: 0
++
++        val scrollerConstraints = constraints.copy(minWidth = 0, minHeight = 0)
++        val scrollerPlaceable = subcompose("scroller") {
++            val layoutInfo = state.layoutInfo
++            val showScroller = remember(layoutInfo.totalItemsCount) {
++                layoutInfo.visibleItemsInfo.size < layoutInfo.totalItemsCount
++            }
++            if (!showScroller) return@subcompose
++            val thumbTopPadding = with(LocalDensity.current) { topContentPadding.toPx() }
++            var thumbOffsetY by remember(thumbTopPadding) { mutableFloatStateOf(thumbTopPadding) }
++
++            val dragInteractionSource = remember { MutableInteractionSource() }
++            val isThumbDragged by dragInteractionSource.collectIsDraggedAsState()
++            val scrolled = remember {
++                MutableSharedFlow<Unit>(
++                    extraBufferCapacity = 1,
++                    onBufferOverflow = BufferOverflow.DROP_OLDEST,
++                )
++            }
++
++            val thumbBottomPadding = with(LocalDensity.current) { bottomContentPadding.toPx() }
++            val heightPx = contentHeight.toFloat() -
++                thumbTopPadding -
++                thumbBottomPadding -
++                state.layoutInfo.afterContentPadding
++            val thumbHeightPx = with(LocalDensity.current) { ThumbLength.toPx() }
++            val trackHeightPx = heightPx - thumbHeightPx
++
++            // When thumb dragged
++            LaunchedEffect(thumbOffsetY) {
++                if (layoutInfo.totalItemsCount == 0 || !isThumbDragged) return@LaunchedEffect
++                val estimate = estimateStaggeredGrid(state) ?: return@LaunchedEffect
++
++                val scrollRatio = (thumbOffsetY - thumbTopPadding) / trackHeightPx
++                val scrollAmt = scrollRatio * (estimate.scrollRange - heightPx).coerceAtLeast(1f)
++                val rowNumber = (scrollAmt / estimate.rowHeight).toInt()
++                val rowOffset = scrollAmt - rowNumber * estimate.rowHeight
++
++                state.scrollToItem(
++                    index = (estimate.laneCount * rowNumber).coerceIn(0, layoutInfo.totalItemsCount - 1),
++                    scrollOffset = rowOffset.roundToInt(),
++                )
++                scrolled.tryEmit(Unit)
++            }
++
++            // When list scrolled
++            LaunchedEffect(state.firstVisibleItemIndex, state.firstVisibleItemScrollOffset) {
++                if (state.layoutInfo.totalItemsCount == 0 || isThumbDragged) return@LaunchedEffect
++                val estimate = estimateStaggeredGrid(state) ?: return@LaunchedEffect
++                val extraScrollRange = (estimate.scrollRange - heightPx).coerceAtLeast(1f)
++                val proportion = (estimate.scrollOffset / extraScrollRange).coerceIn(0f, 1f)
++                thumbOffsetY = trackHeightPx * proportion + thumbTopPadding
++                scrolled.tryEmit(Unit)
++            }
++
++            // Thumb alpha. Harmony: same fade as VerticalGridFastScroller; this file has no FadeOutAnimationSpec.
++            val alpha = remember { Animatable(0f) }
++            val isThumbVisible = alpha.value > 0f
++            LaunchedEffect(scrolled, alpha) {
++                scrolled
++                    .sample(0.1.seconds)
++                    .collectLatest {
++                        if (thumbAllowed()) {
++                            alpha.snapTo(1f)
++                            delay(ScrollBarVisibilityDuration)
++                            alpha.animateTo(0f, animationSpec = ImmediateFadeOutAnimationSpec)
++                        } else {
++                            alpha.animateTo(0f, animationSpec = ImmediateFadeOutAnimationSpec)
++                        }
++                    }
++            }
++
++            Box(
++                modifier = Modifier
++                    .offset { IntOffset(0, thumbOffsetY.roundToInt()) }
++                    .then(
++                        if (isThumbVisible && !state.isScrollInProgress) {
++                            Modifier.draggable(
++                                interactionSource = dragInteractionSource,
++                                orientation = Orientation.Vertical,
++                                state = rememberDraggableState { delta ->
++                                    val newOffsetY = thumbOffsetY + delta
++                                    thumbOffsetY = newOffsetY.coerceIn(
++                                        thumbTopPadding,
++                                        thumbTopPadding + trackHeightPx,
++                                    )
++                                },
++                            )
++                        } else {
++                            Modifier
++                        },
++                    )
++                    .then(
++                        if (isThumbVisible && !isThumbDragged && !state.isScrollInProgress) {
++                            Modifier.systemGestureExclusion()
++                        } else {
++                            Modifier
++                        },
++                    )
++                    .height(ThumbLength)
++                    .padding(end = endContentPadding)
++                    .width(ThumbThickness)
++                    .alpha(alpha.value)
++                    .background(color = thumbColor, shape = ThumbShape),
++            )
++        }.map { it.measure(scrollerConstraints) }
++        val scrollerWidth = scrollerPlaceable.fastMaxBy { it.width }?.width ?: 0
++
++        layout(contentWidth, contentHeight) {
++            contentPlaceable.fastForEach {
++                it.place(0, 0)
++            }
++            scrollerPlaceable.fastForEach {
++                it.placeRelative(contentWidth - scrollerWidth, 0)
++            }
++        }
++    }
++}
++
++private class StaggeredGridEstimate(
++    val laneCount: Int,
++    /** Average item height including spacing; a row is one item per lane. */
++    val rowHeight: Float,
++    val scrollOffset: Float,
++    val scrollRange: Float,
++)
++
++private fun estimateStaggeredGrid(state: LazyStaggeredGridState): StaggeredGridEstimate? {
++    val layoutInfo = state.layoutInfo
++    val visibleItems = layoutInfo.visibleItemsInfo
++    if (visibleItems.isEmpty() || layoutInfo.totalItemsCount == 0) return null
++
++    val laneCount = (visibleItems.maxOf { it.lane } + 1).coerceAtLeast(1)
++    val rowHeight = visibleItems.sumOf { it.size.height }.toFloat() / visibleItems.size +
++        layoutInfo.mainAxisItemSpacing
++    if (rowHeight <= 0f) return null
++
++    val firstChild = visibleItems.minBy { it.index }
++    val rowsBefore = firstChild.index / laneCount
++    val scrollOffset = rowsBefore * rowHeight - firstChild.offset.y + layoutInfo.beforeContentPadding
++    val totalRows = (layoutInfo.totalItemsCount + laneCount - 1) / laneCount
++    val scrollRange = totalRows * rowHeight + layoutInfo.beforeContentPadding + layoutInfo.afterContentPadding
++    return StaggeredGridEstimate(laneCount, rowHeight, scrollOffset, scrollRange)
++}
++// Harmony <--
++
+ private class MutableData<T>(var value: T)
+ 
+ object Scroller {
