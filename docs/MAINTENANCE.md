@@ -291,3 +291,7 @@ gh release list --repo Xun2202/mihon-harmony
   没有任何 `Downloader` 记录。从代码定位到 `queueChapters()` 对磁盘已有目录的静默过滤（见 §5.1 补丁 0011），用户要求「错误噪音」和下载问题一起修。
   新增补丁 0011 / 0012，本机 `:app:compilePreviewKotlin` 通过，12 张补丁在干净 v0.20.4 上套用后与开发树一致；同一时刻 Mihon 官方发布了 **v0.21.0**（2026-10-11 20:51 UTC，273 个提交），
   `check_patches` 对「最新稳定版」的试套从这次 push 起变红（0001 起就套不上，只有 0012 能套），每日定时构建也会因此失败直到补丁 rebase 到 v0.21.0；preview.10 仍手动指定 `upstream_tag=v0.20.4`。
+  `dry_run` run 38205970728 绿 → 正式 run 38206617187 → `v0.20.4-harmony-preview.10`（05:12 UTC，versionCode 2910，versionName `0.20.4-harmony.10-7885`，签名 `4bd90284…ea8a`，
+  arm64 26,428,273 B，SHA-256 `8aaf3187…83fe`，`repo` 分支 `02e4861`）。发出后自查：点「!」重试失败章节会被 0011 算成「已在队列中」而弹提示 → 补丁 0013 →
+  `dry_run` run 38207395009 绿 → 正式 run 38208441462 → `v0.20.4-harmony-preview.11`（05:38 UTC，versionCode 2911，versionName `0.20.4-harmony.11-7886`，
+  arm64 26,428,273 B，SHA-256 `5f73702a…52a5`，签名一致，DEX 含 `HarmonyLogBuffer` / `already on disk as` / `Removing incomplete leftover`，`resources.arsc` 含三种语言的 `harmony_download_skipped*`，`repo` 分支 `0869f50`）。
