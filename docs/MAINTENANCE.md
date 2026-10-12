@@ -58,6 +58,7 @@
 - `v0.20.4-harmony-preview.10` —— 2026-10-12，加入补丁 0011（点「下载」被静默跳过的修复：按下载缓存判断已下载、磁盘残留目录完整则登记 / 不完整则删掉重下、
   漫画页面 Snackbar 说明没入队的原因）和 0012（崩溃日志过滤卓易通图形层噪音 + 附应用自己的最近 600 行日志）。起因是用户上报「有个资源点了下载按钮卡了一下但没开始」，
   导出的 crash log 里 701 行有 690 行是卓易通噪音、Mihon 自己只剩 3 行（versionCode 2910）。
+- `v0.20.4-harmony-preview.11` —— 2026-10-12，加入补丁 0013（重试失败章节不再弹「已在队列中」）。preview.10 发出后自查发现的，与 Anikku preview.10 同一轮（versionCode 2911）。
 
 ## 3. 仓库结构
 
@@ -75,6 +76,7 @@ patches/0009-*.patch           # 依赖回迁, 上游稳定版自带后 prepare-
 patches/0010-*.patch
 patches/0011-*.patch
 patches/0012-*.patch
+patches/0013-*.patch           # 0011 的补充: 重试失败章节不算「已在队列」
 scripts/prepare-source.sh      # 官方源码 → 套补丁 → 改版本号, 每步一个 commit
 scripts/write-release-index.sh # Releases 接口返回 → repo 分支的 releases.json / latest.json
 .github/workflows/harmony_preview.yml   # 每日构建发布, 最后写 Release 索引
@@ -179,6 +181,7 @@ CBZ 模式（0003 的 `finalizeArchive`）没有动：它本来就是单文件�
 新文件 `util/system/HarmonyLogBuffer.kt`（`object : LogcatLogger`，`ArrayDeque` 600 行，`isLoggable(priority) = priority >= DEBUG`；与 anikku-harmony 0019 的同名文件**逐字节相同**）、
 `App.kt`（`LogcatLogger.loggers += HarmonyLogBuffer`）。上游若把 `CrashLogUtil.dumpLogs` 的 logcat 命令改掉，只需保留 `filterNoise` 这段管道即可。
 噪音特征取自用户 2026-10-12 的导出（HOP-AL10，701 行里 513 行 `BLASTBufferQueue`、82 行 tag 为包名的 `SurfaceDelegator` / `client is nullptr`、44 行 `HwAssetManagerEx`、38 行 `HwViewRootImpl`、6 行 `Display`）；再出现别的刷屏 tag 往 `HARMONY_NOISE_MARKERS` 里加一行即可。
+补丁 0013 只改 `queueChapters()`：`alreadyQueued` 再按 `queuedDownloads[it.id]?.status == ERROR` 拆成 `retried` / `stillQueued`，`QueueResult` 多一个 `retried` 字段（不计入 `skipped`）。
 
 ### 5.2 加新补丁
 

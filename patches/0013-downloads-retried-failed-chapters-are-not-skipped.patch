@@ -1,0 +1,55 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Xun2202 <98207886+Xun2202@users.noreply.github.com>
+Date: Mon, 12 Oct 2026 05:17:17 +0000
+Subject: [PATCH] downloads: do not report a retried failed chapter as "already
+ in the queue"
+
+Tapping a chapter whose download failed re-queues it through the same path
+as a fresh download (the caller then calls startDownloads()), so 0011
+counted it as "already in the queue" and showed the skip snackbar on every
+retry. Chapters that are in the queue in ERROR state are now reported as
+`retried` and not as skipped. Same change folded into anikku-harmony 0018.
+---
+ .../eu/kanade/tachiyomi/data/download/Downloader.kt  | 12 +++++++++---
+ 1 file changed, 9 insertions(+), 3 deletions(-)
+
+diff --git a/app/src/main/java/eu/kanade/tachiyomi/data/download/Downloader.kt b/app/src/main/java/eu/kanade/tachiyomi/data/download/Downloader.kt
+index d19cef1..861c5df 100644
+--- a/app/src/main/java/eu/kanade/tachiyomi/data/download/Downloader.kt
++++ b/app/src/main/java/eu/kanade/tachiyomi/data/download/Downloader.kt
+@@ -300,8 +300,10 @@ class Downloader(
+         val (alreadyDownloaded, notDownloaded) = chapters.partition {
+             cache.isChapterDownloaded(it.name, it.scanlator, it.url, manga.title, manga.source, skipCache = false)
+         }
+-        val queuedChapterIds = queueState.value.map { it.chapter.id }.toSet()
+-        val (alreadyQueued, toQueue) = notDownloaded.partition { it.id in queuedChapterIds }
++        val queuedDownloads = queueState.value.associateBy { it.chapter.id }
++        val (alreadyQueued, toQueue) = notDownloaded.partition { it.id in queuedDownloads }
++        // A failed download the user taps again is restarted by the caller (startDownloads), not skipped.
++        val (retried, stillQueued) = alreadyQueued.partition { queuedDownloads[it.id]?.status == Download.State.ERROR }
+         val chaptersToQueue = toQueue
+             // Add chapters to queue from the start.
+             .sortedByDescending { it.sourceOrder }
+@@ -337,17 +339,21 @@ class Downloader(
+         }
+         return QueueResult(
+             queued = chaptersToQueue.size,
++            retried = retried.size,
+             alreadyDownloaded = alreadyDownloaded.size,
+-            alreadyQueued = alreadyQueued.size,
++            alreadyQueued = stillQueued.size,
+         )
+     }
+ 
+     /**
+      * Harmony: outcome of [queueChapters], so callers can tell the user why nothing
+      * started instead of silently dropping chapters.
++     *
++     * @property retried chapters already in the queue in ERROR state; the caller restarts them.
+      */
+     data class QueueResult(
+         val queued: Int = 0,
++        val retried: Int = 0,
+         val alreadyDownloaded: Int = 0,
+         val alreadyQueued: Int = 0,
+         val sourceUnavailable: Int = 0,
