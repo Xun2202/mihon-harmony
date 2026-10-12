@@ -334,3 +334,8 @@ gh release list --repo Xun2202/mihon-harmony
   manifest 前台服务类型 `0x3` + `0x800`，DEX 含 `HarmonyLogBuffer` / `DownloadSpeedMeter` / `BackgroundKeepAlive` / `renameToOrCopy` / `/repo/releases.json` / `update.apk`，`resources.arsc` 含「未加入下载队列」「正在下载 %1$d 个章节」「后台保持运行」）
   → 正式 run 38219338765 → **`v0.21.0-harmony-preview.1`**（07:48 UTC，target `9bcbd23f2`，非 draft / prerelease；arm64 26,889,289 B，SHA-256 `94c147b4…4344`，universal 67,198,288 B，SHA-256 `88bae6cd…027b`；
   重新下载的 Release 资产包名 / versionCode / 签名复核一致；`repo` 分支 `094ef55`，`releases.json` 第一项即 preview.1，共 12 条）。
+- 2026-10-12（晚） 用户：「mihon 能不能也加上全景的选项」+ 要求改用「主代理解析意图、Grok 子代理执行、主代理复核」的流程（`/workspace/.cursor/rules/orchestration.mdc`，本轮首次使用）。
+  补丁 0014 由子代理（grok-4.7-high-fast）在 `/tmp/mihon-021` `dev-021` 上写成一个提交 `cdefaae`（19 个文件，+581 / −40，含 i18n 三语）；主代理复核作者 / diff（与 anikku-harmony 0015 + 0020 同源，`// Harmony` 标注完整）并独立重跑 `flock /tmp/gradle.lock ./gradlew :app:compileNightlyKotlin spotlessCheck :domain:test`（不带 `--max-workers`）通过。
+  12 张补丁在干净 v0.21.0 上套用后与开发树只差版本号行。推 `main` `f4d55a24f` → `check_patches` run 38270707846 绿 → `dry_run` run 38270706712 绿 → 正式 run 38271885997 → **`v0.21.0-harmony-preview.2`**（15:47 UTC，target `f4d55a24f`，非 draft / prerelease；
+  `app.mihon.debug`，versionCode 3602，versionName `0.21.0-harmony.2-8158`，签名 `4bd90284…ea8a`，arm64 26,922,641 B，SHA-256 `0ae2b296…37cc`，universal 67,231,640 B；DEX 含 `ComfortableGridPanorama` / `COMFORTABLE_GRID_PANORAMA` / `VerticalStaggeredGridFastScroller` / `LazyLibraryStaggeredGrid` / `rememberCoverRatio` / `getColumnCount`，
+  `resources.arsc` 含「Panorama comfortable grid」「全景松散网格」「全景鬆散格狀」；`repo` 分支 `df4609e`，`releases.json` 第一项即 preview.2，共 14 条）。同轮 Anikku 浏览页 / 相关作品页全景网格为 anikku-harmony 0021（`v0.2.0-harmony-preview.12`）。
