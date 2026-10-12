@@ -1,8 +1,8 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Xun2202 <98207886+Xun2202@users.noreply.github.com>
 Date: Tue, 6 Oct 2026 10:32:08 +0000
-Subject: [PATCH] downloads: Animeko-style progress notification with speed and
- progress
+Subject: [PATCH] downloads: Animeko-style progress notification with
+ speed and progress
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
@@ -20,8 +20,13 @@ wrapping every page body with countingInto(); the downloader refreshes
 the notification once a second so the numbers keep moving between page
 completions, and the notifier drops updates for the same chapter that
 arrive within 700 ms.
+
+Rebased from the v0.20.4 series (0006): v0.21.0 already rate-limits the
+progress notification (500 ms, under a lock, always posting the last page),
+so the fork no longer keeps its own 700 ms limiter; the paused notification
+is the upstream one (separate id) and only gets the shared text.
 ---
- .../data/download/DownloadNotifier.kt         | 49 ++++++++++---
+ .../data/download/DownloadNotifier.kt         | 30 +++++---
  .../data/download/DownloadSpeedMeter.kt       | 70 +++++++++++++++++++
  .../tachiyomi/data/download/Downloader.kt     | 21 +++++-
  .../moko-resources/base/plurals.xml           |  5 ++
@@ -30,44 +35,32 @@ arrive within 700 ms.
  .../moko-resources/zh-rCN/strings.xml         |  1 +
  .../moko-resources/zh-rTW/plurals.xml         |  4 ++
  .../moko-resources/zh-rTW/strings.xml         |  1 +
- 9 files changed, 143 insertions(+), 13 deletions(-)
+ 9 files changed, 124 insertions(+), 13 deletions(-)
  create mode 100644 app/src/main/java/eu/kanade/tachiyomi/data/download/DownloadSpeedMeter.kt
 
 diff --git a/app/src/main/java/eu/kanade/tachiyomi/data/download/DownloadNotifier.kt b/app/src/main/java/eu/kanade/tachiyomi/data/download/DownloadNotifier.kt
-index 47f48c3..5b97620 100644
+index 999c1c2..8a5bad6 100644
 --- a/app/src/main/java/eu/kanade/tachiyomi/data/download/DownloadNotifier.kt
 +++ b/app/src/main/java/eu/kanade/tachiyomi/data/download/DownloadNotifier.kt
-@@ -3,6 +3,8 @@ package eu.kanade.tachiyomi.data.download
- import android.app.PendingIntent
+@@ -4,6 +4,7 @@ import android.app.PendingIntent
  import android.content.Context
  import android.graphics.BitmapFactory
-+import android.os.SystemClock
+ import android.os.SystemClock
 +import android.text.format.Formatter
  import androidx.core.app.NotificationCompat
+ import dev.zacsweers.metro.Inject
  import eu.kanade.tachiyomi.R
- import eu.kanade.tachiyomi.core.security.SecurityPreferences
-@@ -14,6 +16,7 @@ import eu.kanade.tachiyomi.util.lang.chop
+@@ -16,6 +17,7 @@ import eu.kanade.tachiyomi.util.lang.chop
  import eu.kanade.tachiyomi.util.system.cancelNotification
  import eu.kanade.tachiyomi.util.system.notificationBuilder
  import eu.kanade.tachiyomi.util.system.notify
 +import tachiyomi.core.common.i18n.pluralStringResource
  import tachiyomi.core.common.i18n.stringResource
  import tachiyomi.i18n.MR
- import uy.kohesive.injekt.injectLazy
-@@ -47,6 +50,10 @@ internal class DownloadNotifier(private val context: Context) {
-      */
-     private var isDownloading = false
- 
-+    // Harmony: the progress notification is posted on every page and by a 1 Hz ticker; cap the rate.
-+    private var lastProgressPostedAt = 0L
-+    private var lastProgressChapterId: Long? = null
-+
-     /**
-      * Shows a notification from this builder.
-      *
-@@ -67,9 +74,21 @@ internal class DownloadNotifier(private val context: Context) {
-     /**
-      * Called when download progress changes.
+ import java.util.regex.Pattern
+@@ -71,10 +73,15 @@ class DownloadNotifier(
+      * Called for every downloaded page from parallel downloads, so it shares the builder under a lock and skips
+      * updates that come faster than the system would show them anyway.
       *
 +     * Harmony: same layout as Animeko's download service notification so that the three apps read
 +     * alike in the HarmonyOS shade: title "Downloading N chapters", text "Download: <speed>/s · <progress>%",
@@ -76,19 +69,13 @@ index 47f48c3..5b97620 100644
       * @param download download object containing download information.
 +     * @param remaining number of queued or active downloads.
       */
+     @Synchronized
 -    fun onProgressChange(download: Download) {
 +    fun onProgressChange(download: Download, remaining: Int) {
-+        val now = SystemClock.elapsedRealtime()
-+        if (download.chapter.id == lastProgressChapterId && now - lastProgressPostedAt < MIN_PROGRESS_INTERVAL_MS) {
-+            return
-+        }
-+        lastProgressPostedAt = now
-+        lastProgressChapterId = download.chapter.id
-+
-         with(progressNotificationBuilder) {
-             if (!isDownloading) {
-                 setSmallIcon(android.R.drawable.stat_sys_download)
-@@ -90,27 +109,28 @@ internal class DownloadNotifier(private val context: Context) {
+         val now = SystemClock.elapsedRealtime()
+         val isComplete = download.downloadedImages == download.pages?.size
+         if (!isComplete && now - lastProgressNotificationTime < PROGRESS_NOTIFICATION_INTERVAL_MS) return
+@@ -101,27 +108,28 @@ class DownloadNotifier(
                  )
              }
  
@@ -127,33 +114,6 @@ index 47f48c3..5b97620 100644
              setOngoing(true)
  
              show(Notifications.ID_DOWNLOAD_CHAPTER_PROGRESS)
-@@ -121,7 +141,9 @@ internal class DownloadNotifier(private val context: Context) {
-      * Show notification when download is paused.
-      */
-     fun onPaused() {
-+        lastProgressChapterId = null
-         with(progressNotificationBuilder) {
-+            setStyle(null)
-             setContentTitle(context.stringResource(MR.strings.chapter_paused))
-             setContentText(context.stringResource(MR.strings.download_notifier_download_paused))
-             setSmallIcon(R.drawable.ic_pause_24dp)
-@@ -158,6 +180,7 @@ internal class DownloadNotifier(private val context: Context) {
- 
-         // Reset states to default
-         isDownloading = false
-+        lastProgressChapterId = null
-     }
- 
-     /**
-@@ -227,4 +250,8 @@ internal class DownloadNotifier(private val context: Context) {
-         // Reset download information
-         isDownloading = false
-     }
-+
-+    companion object {
-+        private const val MIN_PROGRESS_INTERVAL_MS = 700L
-+    }
- }
 diff --git a/app/src/main/java/eu/kanade/tachiyomi/data/download/DownloadSpeedMeter.kt b/app/src/main/java/eu/kanade/tachiyomi/data/download/DownloadSpeedMeter.kt
 new file mode 100644
 index 0000000..f8aacab
@@ -231,10 +191,10 @@ index 0000000..f8aacab
 +    }
 +}
 diff --git a/app/src/main/java/eu/kanade/tachiyomi/data/download/Downloader.kt b/app/src/main/java/eu/kanade/tachiyomi/data/download/Downloader.kt
-index 975a976..cd854b5 100644
+index 9b19c59..d5ad647 100644
 --- a/app/src/main/java/eu/kanade/tachiyomi/data/download/Downloader.kt
 +++ b/app/src/main/java/eu/kanade/tachiyomi/data/download/Downloader.kt
-@@ -5,6 +5,7 @@ import com.hippo.unifile.UniFile
+@@ -8,6 +8,7 @@ import dev.zacsweers.metro.SingleIn
  import eu.kanade.domain.chapter.model.toSChapter
  import eu.kanade.domain.manga.model.getComicInfo
  import eu.kanade.tachiyomi.data.cache.ChapterCache
@@ -242,10 +202,10 @@ index 975a976..cd854b5 100644
  import eu.kanade.tachiyomi.data.download.model.Download
  import eu.kanade.tachiyomi.data.library.LibraryUpdateNotifier
  import eu.kanade.tachiyomi.data.notification.NotificationHandler
-@@ -195,6 +196,17 @@ class Downloader(
-         if (isRunning) return
+@@ -221,6 +222,17 @@ class Downloader(
+             withContext(NonCancellable) { previousJob?.join() }
+             val owner = coroutineContext.job
  
-         downloaderJob = scope.launch {
 +            // Harmony: refresh the notification once a second so the speed and the progress keep
 +            // moving between page completions. Cancelled together with the downloader job.
 +            DownloadSpeedMeter.reset()
@@ -260,16 +220,16 @@ index 975a976..cd854b5 100644
              val activeDownloadsFlow = combine(
                  queueState,
                  downloadPreferences.parallelSourceLimit.changes(),
-@@ -398,7 +410,7 @@ class Downloader(
-             }
-                 .collect {
-                     // Do when page is downloaded.
--                    notifier.onProgressChange(download)
-+                    notifier.onProgressChange(download, remainingDownloads())
-                 }
+@@ -492,7 +504,7 @@ class Downloader(
+                         }
  
-             // Do after download completes
-@@ -496,7 +508,7 @@ class Downloader(
+                         getOrDownloadImage(page, download, tmpDir)
+-                        notifier.onProgressChange(download)
++                        notifier.onProgressChange(download, remainingDownloads())
+                     }.invokeOnCompletion { slots.release() }
+                 }
+                 pagesStarted.complete(Unit)
+@@ -593,7 +605,7 @@ class Downloader(
  
              val completedFile = try {
                  source.getImage(page, file.length()).use {
@@ -278,7 +238,7 @@ index 975a976..cd854b5 100644
                          // If the server supports partial downloads (HTTP 206),
                          // append to the existing file.
                          // Otherwise, start from scratch and overwrite the file.
-@@ -710,6 +722,11 @@ class Downloader(
+@@ -809,6 +821,11 @@ class Downloader(
          return queueState.value.none { it.status.value <= Download.State.DOWNLOADING.value }
      }
  
@@ -288,8 +248,8 @@ index 975a976..cd854b5 100644
 +    }
 +
      private fun addAllToQueue(downloads: List<Download>) {
-         _queueState.update {
-             downloads.forEach { download ->
+         _queueState.update { queue ->
+             // Callers filter off the queue's thread, so a chapter may have been queued in the meantime
 diff --git a/i18n/src/commonMain/moko-resources/base/plurals.xml b/i18n/src/commonMain/moko-resources/base/plurals.xml
 index 3f47118..bafb7e5 100644
 --- a/i18n/src/commonMain/moko-resources/base/plurals.xml
@@ -305,11 +265,11 @@ index 3f47118..bafb7e5 100644
 +    </plurals>
  </resources>
 diff --git a/i18n/src/commonMain/moko-resources/base/strings.xml b/i18n/src/commonMain/moko-resources/base/strings.xml
-index 0568022..3e63ef3 100644
+index 1e68283..ea66570 100644
 --- a/i18n/src/commonMain/moko-resources/base/strings.xml
 +++ b/i18n/src/commonMain/moko-resources/base/strings.xml
-@@ -530,6 +530,7 @@
-     <string name="split_tall_images_summary">Improves reader performance</string>
+@@ -557,6 +557,7 @@
+     <string name="harmony_download_leftover_delete_failed">Could not remove the leftover \'%1$s\' from an earlier download</string>
      <string name="pref_harmony_keep_alive">Keep running in the background (HarmonyOS)</string>
      <string name="pref_harmony_keep_alive_summary">Plays a silent audio track while downloading or updating the library so that 卓易通 does not suspend the app. Other apps' audio is not affected.</string>
 +    <string name="download_notifier_speed_progress">Download: %1$s/s · %2$d%%</string>
@@ -330,11 +290,11 @@ index 3cf07ba..a11d1e5 100644
 +    </plurals>
  </resources>
 diff --git a/i18n/src/commonMain/moko-resources/zh-rCN/strings.xml b/i18n/src/commonMain/moko-resources/zh-rCN/strings.xml
-index c92b47b..b6d4117 100644
+index d5326e7..007139d 100644
 --- a/i18n/src/commonMain/moko-resources/zh-rCN/strings.xml
 +++ b/i18n/src/commonMain/moko-resources/zh-rCN/strings.xml
-@@ -578,6 +578,7 @@
-     <string name="split_tall_images_summary">可以改善阅读器的性能</string>
+@@ -577,6 +577,7 @@
+     <string name="harmony_download_leftover_delete_failed">无法删除上次下载残留的「%1$s」</string>
      <string name="pref_harmony_keep_alive">后台保持运行（鸿蒙）</string>
      <string name="pref_harmony_keep_alive_summary">下载或更新书架时播放一段静音音轨，防止卓易通冻结应用；不影响其他应用的声音。</string>
 +    <string name="download_notifier_speed_progress">下载：%1$s/s · %2$d%%</string>
@@ -355,11 +315,11 @@ index 746d51d..4ff355f 100644
 +    </plurals>
  </resources>
 diff --git a/i18n/src/commonMain/moko-resources/zh-rTW/strings.xml b/i18n/src/commonMain/moko-resources/zh-rTW/strings.xml
-index 8441d9e..6f0c11e 100644
+index b8dba4f..ed73d52 100644
 --- a/i18n/src/commonMain/moko-resources/zh-rTW/strings.xml
 +++ b/i18n/src/commonMain/moko-resources/zh-rTW/strings.xml
-@@ -576,6 +576,7 @@
-     <string name="split_tall_images_summary">用以改善閱讀器效能</string>
+@@ -578,6 +578,7 @@
+     <string name="harmony_download_leftover_delete_failed">無法刪除上次下載殘留的「%1$s」</string>
      <string name="pref_harmony_keep_alive">在背景保持執行（HarmonyOS）</string>
      <string name="pref_harmony_keep_alive_summary">下載或更新書庫時播放一段靜音音軌，避免卓易通凍結應用程式；不影響其他應用程式的聲音。</string>
 +    <string name="download_notifier_speed_progress">下載：%1$s/s · %2$d%%</string>

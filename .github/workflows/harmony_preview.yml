@@ -1,8 +1,8 @@
 name: Harmony Preview
 
 # 每天检查 Mihon 官方最新稳定版; 若本仓库还没有对应的 <tag>-harmony-preview.<N> Release,
-# 就拉取官方源码、套用 patches/ 下的补丁、编译签名 preview 构建 (包名 app.mihon.debug,
-# 带 Private 扩展安装器) 并发布. 也可手动触发指定版本, 或只编译不发布 (dry_run).
+# 就拉取官方源码、套用 patches/ 下的补丁、编译签名 nightly 构建 (官方 v0.21.0 起的叫法, 之前叫 preview;
+# 包名 app.mihon.debug, 带 Private 扩展安装器) 并发布. 也可手动触发指定版本, 或只编译不发布 (dry_run).
 
 on:
   schedule:
@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
     inputs:
       upstream_tag:
-        description: 'Mihon 官方 tag (如 v0.20.4); 留空则取最新稳定版'
+        description: 'Mihon 官方 tag (如 v0.21.0); 留空则取最新稳定版'
         required: false
         type: string
       patch_number:
@@ -113,7 +113,7 @@ jobs:
           UPSTREAM_TAG: ${{ steps.version.outputs.upstream_tag }}
         run: |
           set -euo pipefail
-          # 完整历史 (单分支): preview 构建的 versionNameSuffix / BuildConfig.COMMIT_COUNT 用 `git rev-list --count HEAD`.
+          # 完整历史 (单分支): nightly 构建的 versionNameSuffix / BuildConfig.COMMIT_COUNT 用 `git rev-list --count HEAD`.
           git clone --branch "$UPSTREAM_TAG" --single-branch "https://github.com/$UPSTREAM_REPO.git" "$RUNNER_TEMP/mihon"
           echo "java_version=$(tr -d '[:space:]' < "$RUNNER_TEMP/mihon/.github/.java-version")" >> "$GITHUB_OUTPUT"
 
@@ -136,32 +136,56 @@ jobs:
         if: steps.existing.outputs.skip != 'true'
         uses: gradle/actions/setup-gradle@v4
 
-      - name: Build signed preview APKs
+      - name: Decode signing keystore
+        if: steps.existing.outputs.skip != 'true'
+        env:
+          SIGNING_KEY: ${{ secrets.SIGNING_KEY }}
+        # 官方 v0.21.0 起 app/build.gradle.kts 读 storeFile (文件路径), 不再自己解码 storeFileBase64.
+        run: echo "$SIGNING_KEY" | base64 -d > "$RUNNER_TEMP/harmony.keystore"
+
+      - name: Resolve build type
+        id: build_type
+        if: steps.existing.outputs.skip != 'true'
+        working-directory: ${{ runner.temp }}/mihon
+        run: |
+          set -euo pipefail
+          # 官方 v0.21.0 把 preview 构建类型改名为 nightly (包名后缀仍是 .debug); 按源码树实际有的来.
+          if grep -q 'create("nightly")' app/build.gradle.kts; then
+            echo "name=nightly" >> "$GITHUB_OUTPUT"
+          else
+            echo "name=preview" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build signed APKs
         if: steps.existing.outputs.skip != 'true'
         working-directory: ${{ runner.temp }}/mihon
         env:
-          # app/build.gradle.kts 在 MIHON_GITHUB_RELEASE=true 时从这四个变量读取签名密钥.
+          # app/build.gradle.kts 在 MIHON_GITHUB_RELEASE=true 时从这些变量读取签名密钥
+          # (v0.21.0+ 读 storeFile, 更早的版本读 storeFileBase64; 两个都给).
           MIHON_GITHUB_RELEASE: true
+          storeFile: ${{ runner.temp }}/harmony.keystore
           storeFileBase64: ${{ secrets.SIGNING_KEY }}
           storePassword: ${{ secrets.KEY_STORE_PASSWORD }}
           keyAlias: ${{ secrets.ALIAS }}
           keyPassword: ${{ secrets.KEY_PASSWORD }}
+          BUILD_TYPE: ${{ steps.build_type.outputs.name }}
         # -Penable-updater 打开 BuildConfig.UPDATER_ENABLED, 否则 App 不会检查更新.
-        run: ./gradlew assemblePreview -Penable-updater --stacktrace
+        run: ./gradlew "assemble${BUILD_TYPE^}" -Penable-updater --stacktrace
 
       - name: Collect release files
         if: steps.existing.outputs.skip != 'true'
         env:
           RELEASE_TAG: ${{ steps.version.outputs.release_tag }}
+          BUILD_TYPE: ${{ steps.build_type.outputs.name }}
         run: |
           set -euo pipefail
-          apk_dir="$RUNNER_TEMP/mihon/app/build/outputs/apk/preview"
+          apk_dir="$RUNNER_TEMP/mihon/app/build/outputs/apk/$BUILD_TYPE"
           ls -la "$apk_dir"
           mkdir -p release-files
           # 文件名必须保留 -arm64-v8a / -universal 片段, 更新器靠它挑选 APK;
           # 不要再上传其它名字里含这些片段的文件 (例如 .sha1), 否则会覆盖下载链接.
-          cp "$apk_dir/app-arm64-v8a-preview.apk" "release-files/mihon-${RELEASE_TAG}-arm64-v8a.apk"
-          cp "$apk_dir/app-universal-preview.apk" "release-files/mihon-${RELEASE_TAG}-universal.apk"
+          cp "$apk_dir/app-arm64-v8a-$BUILD_TYPE.apk" "release-files/mihon-${RELEASE_TAG}-arm64-v8a.apk"
+          cp "$apk_dir/app-universal-$BUILD_TYPE.apk" "release-files/mihon-${RELEASE_TAG}-universal.apk"
           (cd release-files && sha256sum *.apk > "$RUNNER_TEMP/checksums.txt")
           cat "$RUNNER_TEMP/checksums.txt"
 
@@ -177,10 +201,11 @@ jobs:
         env:
           UPSTREAM_TAG: ${{ steps.version.outputs.upstream_tag }}
           RELEASE_TAG: ${{ steps.version.outputs.release_tag }}
+          BUILD_TYPE: ${{ steps.build_type.outputs.name }}
         run: |
           set -euo pipefail
           {
-            echo "基于 [Mihon $UPSTREAM_TAG](https://github.com/$UPSTREAM_REPO/releases/tag/$UPSTREAM_TAG) 的非官方 HarmonyOS / 卓易通 兼容构建 (preview 构建类型)。"
+            echo "基于 [Mihon $UPSTREAM_TAG](https://github.com/$UPSTREAM_REPO/releases/tag/$UPSTREAM_TAG) 的非官方 HarmonyOS / 卓易通 兼容构建 ($BUILD_TYPE 构建类型)。"
             echo
             echo "## 本构建包含的补丁"
             echo

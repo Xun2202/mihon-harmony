@@ -1,9 +1,9 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Xun2202 <98207886+Xun2202@users.noreply.github.com>
 Date: Mon, 12 Oct 2026 04:57:29 +0000
-Subject: [PATCH] =?UTF-8?q?crash=20log:=20filter=20=E5=8D=93=E6=98=93?=
- =?UTF-8?q?=E9=80=9A=20graphics=20noise=20and=20keep=20the=20app's=20own?=
- =?UTF-8?q?=20log=20lines?=
+Subject: [PATCH] =?UTF-8?q?crash=20log:=20filter=20=E5=8D=93?=
+ =?UTF-8?q?=E6=98=93=E9=80=9A=20graphics=20noise=20and=20keep=20the=20app'?=
+ =?UTF-8?q?s=20own=20log=20lines?=
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
@@ -32,10 +32,10 @@ Same change for Anikku in anikku-harmony 0019.
  create mode 100644 app/src/main/java/eu/kanade/tachiyomi/util/system/HarmonyLogBuffer.kt
 
 diff --git a/app/src/main/java/eu/kanade/tachiyomi/App.kt b/app/src/main/java/eu/kanade/tachiyomi/App.kt
-index 605dbcd..68eaa01 100644
+index e6260cf..b46eb51 100644
 --- a/app/src/main/java/eu/kanade/tachiyomi/App.kt
 +++ b/app/src/main/java/eu/kanade/tachiyomi/App.kt
-@@ -43,6 +43,7 @@ import eu.kanade.tachiyomi.network.NetworkPreferences
+@@ -47,6 +47,7 @@ import eu.kanade.tachiyomi.network.NetworkPreferences
  import eu.kanade.tachiyomi.ui.base.delegate.SecureActivityDelegate
  import eu.kanade.tachiyomi.util.system.DeviceUtil
  import eu.kanade.tachiyomi.util.system.GLUtil
@@ -43,7 +43,7 @@ index 605dbcd..68eaa01 100644
  import eu.kanade.tachiyomi.util.system.WebViewUtil
  import eu.kanade.tachiyomi.util.system.animatorDurationScale
  import eu.kanade.tachiyomi.util.system.cancelNotification
-@@ -174,6 +175,8 @@ class App : Application(), DefaultLifecycleObserver, SingletonImageLoader.Factor
+@@ -216,6 +217,8 @@ class App : Application(), DefaultLifecycleObserver, SingletonImageLoader.Factor
              }
              LogcatLogger.install()
              LogcatLogger.loggers += AndroidLogcatLogger(minLogPriority)
@@ -53,18 +53,18 @@ index 605dbcd..68eaa01 100644
  
          initializeMigrator()
 diff --git a/app/src/main/java/eu/kanade/tachiyomi/util/CrashLogUtil.kt b/app/src/main/java/eu/kanade/tachiyomi/util/CrashLogUtil.kt
-index 038444c..af5adff 100644
+index 48b93e1..7598507 100644
 --- a/app/src/main/java/eu/kanade/tachiyomi/util/CrashLogUtil.kt
 +++ b/app/src/main/java/eu/kanade/tachiyomi/util/CrashLogUtil.kt
-@@ -7,6 +7,7 @@ import eu.kanade.tachiyomi.BuildConfig
- import eu.kanade.tachiyomi.extension.ExtensionManager
+@@ -9,6 +9,7 @@ import eu.kanade.tachiyomi.extension.ExtensionManager
+ import eu.kanade.tachiyomi.extension.model.Extension
  import eu.kanade.tachiyomi.network.NetworkPreferences
  import eu.kanade.tachiyomi.util.storage.getUriCompat
 +import eu.kanade.tachiyomi.util.system.HarmonyLogBuffer
  import eu.kanade.tachiyomi.util.system.WebViewUtil
  import eu.kanade.tachiyomi.util.system.createFileInCacheDir
  import eu.kanade.tachiyomi.util.system.toShareIntent
-@@ -36,7 +37,20 @@ class CrashLogUtil(
+@@ -37,7 +38,20 @@ class CrashLogUtil(
              exception?.let { file.appendText("$it\n\n") }
  
              val logPriority = if (networkPreferences.verboseLogging.get()) "V" else "E"
@@ -85,8 +85,8 @@ index 038444c..af5adff 100644
 +            file.appendText(appLines.joinToString("\n", postfix = "\n"))
  
              val uri = file.getUriCompat(context)
-             context.startActivity(uri.toShareIntent(context, "text/plain"))
-@@ -45,6 +59,31 @@ class CrashLogUtil(
+             withContext(Dispatchers.Main) { context.startActivity(uri.toShareIntent(context, "text/plain")) }
+@@ -46,6 +60,31 @@ class CrashLogUtil(
          }
      }
  
@@ -118,7 +118,7 @@ index 038444c..af5adff 100644
      fun getDebugInfo(): String {
          val now = Clock.System.now()
          val tz = TimeZone.currentSystemDefault()
-@@ -87,4 +126,20 @@ class CrashLogUtil(
+@@ -107,6 +146,22 @@ class CrashLogUtil(
              null
          }
      }
@@ -139,6 +139,8 @@ index 038444c..af5adff 100644
 +        )
 +    }
  }
+ 
+ private val Extension.NotLoaded.Reason.description: String
 diff --git a/app/src/main/java/eu/kanade/tachiyomi/util/system/HarmonyLogBuffer.kt b/app/src/main/java/eu/kanade/tachiyomi/util/system/HarmonyLogBuffer.kt
 new file mode 100644
 index 0000000..c98b2c4

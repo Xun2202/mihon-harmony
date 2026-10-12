@@ -24,7 +24,7 @@
 | 项目 | 内容 |
 | --- | --- |
 | 产物 | 每个官方稳定版对应一个 Release，tag `v<官方版本>-harmony-preview.<N>` |
-| 包名 | `app.mihon.debug`（preview 构建类型自带后缀，可与官方 `app.mihon` 并存） |
+| 包名 | `app.mihon.debug`（nightly 构建类型自带后缀——官方 v0.21.0 把 preview 改名为 nightly，可与官方 `app.mihon` 并存） |
 | 推荐安装文件 | `mihon-<tag>-arm64-v8a.apk` |
 | 构建方式 | GitHub Actions `.github/workflows/harmony_preview.yml` |
 | 触发 | 每天 UTC 04:17 定时 + 手动 `workflow_dispatch`（支持 `dry_run`） |
@@ -96,7 +96,7 @@ LICENSE                        # Apache-2.0 (沿用上游)
    `release_tag = <upstream_tag>-harmony-preview.<N>`。
 2. **跳过已存在的 Release**（`dry_run` 时不跳过）。这是定时任务不重复编译的关键。
 3. **校验四个签名 Secrets 非空**。
-4. **拉官方源码**：`git clone --branch <tag> --single-branch`（完整历史，约 80 MB、几秒钟）。preview 构建的
+4. **拉官方源码**：`git clone --branch <tag> --single-branch`（完整历史，约 80 MB、几秒钟）。nightly 构建的
    `versionNameSuffix` 和 `BuildConfig.COMMIT_COUNT` 来自 `git rev-list --count HEAD`，浅克隆会让它变成个位数。
    同时读出官方 `.github/.java-version` 作为 JDK 版本。
 5. **`scripts/prepare-source.sh <src> <tag> <N>`**：
@@ -104,11 +104,14 @@ LICENSE                        # Apache-2.0 (沿用上游)
    - `FORK_REPO` 环境变量（workflow 传 `github.repository`）与默认值 `Xun2202/mihon-harmony` 不同时，
      把更新器指向的仓库改掉——方便别人 fork 本仓库后直接用。
    - `versionCode = 官方 versionCode × 100 + N`，`versionName = "<官方版本>-harmony.<N>"`，提交。
-6. **编译**：`./gradlew assemblePreview -Penable-updater`
-   - `assemblePreview`：preview 构建类型 → Private 安装器可见，包名 `app.mihon.debug`。
-   - `-Penable-updater`：`BuildConfig.UPDATER_ENABLED = true`，否则 App 不检查更新。
-   - 签名：`MIHON_GITHUB_RELEASE=true` 时 `app/build.gradle.kts` 从 `storeFileBase64 / storePassword / keyAlias / keyPassword`
-     读取密钥（由 Secrets 注入）。
+6. **编译**：`./gradlew assembleNightly -Penable-updater`（源码树里有 `create("nightly")` 时；v0.20.4 及更早是 `assemblePreview`，
+   workflow 的 `Resolve build type` 步骤按 `app/build.gradle.kts` 自动选）
+   - `assembleNightly`：nightly 构建类型（官方 v0.21.0 起的名字，之前叫 preview）→ Private 安装器可见，包名 `app.mihon.debug`，
+     产物在 `app/build/outputs/apk/nightly/app-{arm64-v8a,universal}-nightly.apk`。
+   - `-Penable-updater`：`BuildConfig.UPDATER_ENABLED = true`，否则 App 不检查更新（0.21 的 `Config.enableUpdater` 仍读这个 flag；
+     不传 `-Pdist` 即 LOCAL 发行，不含 Firebase 遥测）。
+   - 签名：先把 `SIGNING_KEY` base64 解码到 `$RUNNER_TEMP/harmony.keystore`；`MIHON_GITHUB_RELEASE=true` 时 `app/build.gradle.kts`
+     从 `storeFile`（v0.21.0 起，文件路径）/ `storeFileBase64`（v0.20.4 及更早）+ `storePassword / keyAlias / keyPassword` 读取密钥，两种变量都注入。
 7. **发布**：APK 重命名为 `mihon-<tag>-{arm64-v8a,universal}.apk`，上传 artifact；非 `dry_run` 时
    `gh release create <tag> --target $GITHUB_SHA`，说明里列出补丁 Subject 和 SHA-256。
    - **不推送 tag 到源码**。默认 `GITHUB_TOKEN` 无权推送含 workflow 文件改动的提交，所以让 `gh release create` 直接在 `main` 当前提交上建 tag。
@@ -142,24 +145,29 @@ git format-patch -o /path/to/mihon-harmony/patches v0.21.0..HEAD
 # 5. 提交推送到本仓库, check_patches 会自动验证; 然后手动触发 harmony_preview (可先 dry_run)
 ```
 
-每个补丁的意图写在它的 commit message 里，解决冲突前先读一遍。补丁 0001 和 0003 都改 `Downloader.kt`，
-上游重构下载器时两者通常要一起重做。补丁 0004 是上游 `38e93086c8`（2026-09-30）的回移：下一个官方稳定版
-大概率已自带这段配置（上游已把它移到 `data/.../DatabaseBindings.kt` 并换成 Metro DI），届时直接从 `series` 删掉 0004 即可。
-补丁 0005 触及 `DownloadJob.kt` / `LibraryUpdateJob.kt` 的 `setForegroundSafely()` 之后一行、`getForegroundInfo()` 的服务类型、
-`DownloadPreferences.kt`、`SettingsDownloadScreen.kt`、manifest 和三份 strings.xml；新文件 `BackgroundKeepAlive.kt` 独立无依赖，
-rebase 时通常只需重新定位那几行插入点。
-补丁 0006 改 `DownloadNotifier.onProgressChange()`（整段重写，签名多了 `remaining: Int`）和 `Downloader.kt` 三处
-（`launchDownloaderJob()` 开头的 1 Hz 定时器、每页完成的调用点、`downloadImage()` 里 `countingInto(DownloadSpeedMeter)`），
-加 `remainingDownloads()` 辅助函数、三份 `strings.xml` / `plurals.xml`；新文件 `DownloadSpeedMeter.kt` 与 anikku-harmony 0010 的
-同名文件逐字节相同，改其中一份要同步另一份。上游若重写通知器，按 README 补丁表里的统一格式重做即可。
-补丁 0007 只有两处：`AppUpdateDownloadJob` companion 里的 `deleteInstalledApk()`（与 anikku-harmony 0011 逐字相同）和 `App.onCreate`
-里 `WidgetManager` 之后的 `scope.launch(Dispatchers.IO) { ... }`。上游若自己加了清理逻辑，整个补丁可以删掉。
+每个补丁的意图写在它的 commit message 里，解决冲突前先读一遍。**当前 series 基于官方 v0.21.0**（2026-10-12 rebase；每张补丁正文末尾
+的「Rebased from the v0.20.4 series」段写了与 0.20.4 版的差别）。0.21 的大改动：Metro DI 取代 Injekt（`@Inject` 构造注入 / Worker 里 `graph.inject(this)` 字段注入）、
+`preview` 构建类型改名 `nightly`、`DownloadJob` / `LibraryUpdateJob` → `DownloadWorker` / `LibraryUpdateWorker`、`AppUpdateDownloadJob` 删除、
+`Downloader.queueChapters()` 改 `suspend` 且启动 Worker 的职责挪到 `DownloadManager.downloadChapters()`。
+补丁 0001 和 0003 都改 `Downloader.kt`，上游重构下载器时两者通常要一起重做。
+~~补丁 0004~~ 已随 v0.21.0 删除（上游 `DatabaseBindings.kt` 自带 `busy_timeout = 3000` + WAL）；编号不复用。
+补丁 0005 触及 `DownloadWorker.kt` / `LibraryUpdateWorker.kt` 的 `setForegroundSafely()` 之后一行、`DownloadWorker.getForegroundInfo()` 的服务类型、
+`DownloadPreferences.kt`、`SettingsDownloadScreen.kt`、manifest 和三份 strings.xml；`LibraryUpdateWorker` 多一个 `@Inject lateinit var downloadPreferences`
+（0.21 用 Metro 字段注入，不再 `Injekt.get()`）；新文件 `BackgroundKeepAlive.kt` 独立无依赖，rebase 时通常只需重新定位那几行插入点。
+补丁 0006 改 `DownloadNotifier.onProgressChange()`（正文重写，签名多了 `remaining: Int`；限流沿用 0.21 自带的 500 ms `@Synchronized` 版本，
+0.20.4 系列里自带的 700 ms 限流已去掉；暂停通知是 0.21 的独立通知 `ID_DOWNLOAD_CHAPTER_PAUSED`，不动）和 `Downloader.kt` 三处
+（`launchDownloaderJob()` 里 `previousJob?.join()` 之后的 1 Hz 定时器、每页完成后的 `notifier.onProgressChange(download, remainingDownloads())`、
+`downloadImage()` 里 `countingInto(DownloadSpeedMeter)`），加 `remainingDownloads()` 辅助函数、三份 `strings.xml` / `plurals.xml`；新文件 `DownloadSpeedMeter.kt` 与 anikku-harmony 0010 的
+同名文件逐字节相同，改其中一份要同步另一份。上游若再重写通知器，按 README 补丁表里的统一格式重做即可。
+补丁 0007 三处：新文件 `data/updater/AppUpdateApkCleaner.kt`（`updateApk(context)` + `deleteInstalledApk(context)`，清理逻辑与 anikku-harmony 0011 逐字相同；
+0.20.4 系列时它在 `AppUpdateDownloadJob` companion 里，0.21 删了那个类）、`App.onCreate` 里 `widgetManager.init(scope)` 之后的 `scope.launch(Dispatchers.IO) { ... }`、
+`ui/more/NewUpdateScreenModel.kt` 的 `apkFile` 改为 `AppUpdateApkCleaner.updateApk(context)`（上游只在下载失败时删它）。上游若自己加了启动清理，整个补丁可以删掉。
 补丁 0008 只改 `ReleaseServiceImpl`：新增 `listReleases(repository)`（镜像 URL `https://raw.githubusercontent.com/$repository/repo/releases.json`，
 `networkService.client.newBuilder()` 三个超时都 10 秒；`CancellationException` 直接抛，其他异常 `logcat(WARN)` 后退回原来的 API URL），`latest()` 改调它。
 镜像文件必须保持是接口原样返回，`GithubRelease` 的字段（`tag_name` / `body` / `html_url` / `assets[].name` / `assets[].browser_download_url`）一个都不能少。
 与 anikku-harmony 0014 的 `listReleases()` 除 API URL 的 `?per_page=30` 外逐字相同，改一处要同步另一处。
-补丁 0009 只改 `gradle/libs.versions.toml` 两行（版本 `5.1.0`、坐标 `eu.davidea:flexible-adapter`）。`prepare-source.sh` 现在会先 `git apply --check --reverse`，
-能干净反向套用的补丁视为上游已包含而跳过，所以下个稳定版带了这行时不用动 `series`（`check_patches` 对 `main` 的试套也不会被它打红）。
+~~补丁 0009~~ 已随 v0.21.0 删除（上游已用 Maven Central 的 `eu.davidea:flexible-adapter:5.1.0`）；编号不复用。`prepare-source.sh` 仍保留「能干净反向套用即视为上游已包含而跳过」的逻辑，
+以后回移上游提交的补丁都可以靠它自然退役。
 补丁 0010 改五处：`core/common/.../UniFileExtensions.kt`（整文件重写，与 anikku-harmony 0016 的同名文件**逐字节相同**，改一处同步另一处；
 对应单元测试 `UniFileExtensionsTest` 8 个用例，上游若动 UniFile 封装先跑 `:core:common:testDebugUnitTest`）、`Downloader.kt`
 （`stop()` 用 `fail(reason ?: harmony_download_interrupted)`；`downloadChapter()` 三处 `status = ERROR` 改 `fail(message)`，
@@ -168,14 +176,18 @@ rebase 时通常只需重新定位那几行插入点。
 `ui/download/DownloadHolder.kt`（`notifyDownloadedPages()` 在 ERROR 时右侧显示「Error」、章节名下追加「出错：…」且 `maxLines = 3`；`bind()` 总是调用它）
 与 `DownloadQueueViewModel.onStatusChange` 的 ERROR 分支多调一次 `onUpdateDownloadedPages`；四条字符串 `harmony_download_*` 在 `i18n` base / zh-rCN / zh-rTW。
 CBZ 模式（0003 的 `finalizeArchive`）没有动：它本来就是单文件复制。
-补丁 0011 改 `Downloader.kt`（`queueChapters()` 返回新增的 `data class QueueResult(queued, alreadyDownloaded, alreadyQueued, sourceUnavailable)`，
-「已下载」改用 `cache.isChapterDownloaded(…, skipCache = false)`，`alreadyQueued` 用 id 集合判断；`downloadChapter()` 把临时目录的创建挪到 `try` 里、页列表之后，
+补丁 0011 改 `Downloader.kt`（`queueChapters()` 保持 0.21 的 `suspend`，返回新增的 `data class QueueResult(queued, alreadyDownloaded, alreadyQueued, sourceUnavailable, startDownloader)`——
+0.21 原本返回 Boolean 让 `DownloadManager` 决定要不要 `startDownloads()`，这个布尔值现在装在 `startDownloader` 里；
+「已下载」改用 `withContext(Dispatchers.IO) { cache.isChapterDownloaded(…) }`（0.21 去掉了 `skipCache` 参数，默认即走缓存），不再用上游新加的 `provider.findDownloadedChapterIds()` 磁盘探测；
+`alreadyQueued` 用 id 集合判断；`downloadChapter()` **删掉**上游 0.21 新加的「`mangaDir.findFile(<章节>.cbz / <章节>)` 存在就直接 `cache.addChapter` + DOWNLOADED」早退（它不查完整性），
+把临时目录的创建挪到 `try` 里、页列表之后，
 先调新函数 `reuseOrRemoveExistingChapter(download, mangaDir, chapterDirname, pageCount)`：`provider.getValidChapterDirNames(...)` 逐个 `mangaDir.findFile`，
 `countChapterImages()` 数目录文件或用 `archiveReader(context).useEntries` 数 `.cbz` 条目（规则抽成 `isCountedPageFile()`，与 `isDownloadSuccessful()` 共用），
 ≥ 页数 → `createNoMediaFile` + `cache.addChapter(name.removeSuffix(".cbz"), …)` + 删 `_tmp` / 私有缓存残留 + 返回 true；否则 `existing.delete()`，删不掉抛 `harmony_download_leftover_delete_failed`）、
-`DownloadManager.downloadChapters()`（透传返回值）、`MangaViewModel.downloadChapters()`（改 `suspend`，`result.skipped > 0` 时拼 Snackbar）、
-五条字符串 `harmony_download_skipped*` / `harmony_download_leftover_delete_failed`（base / zh-rCN / zh-rTW）。`LibraryUpdateJob` / `LibraryViewModel` / `UpdatesViewModel` / `ReaderViewModel` / `NotificationReceiver` 忽略返回值。
-注意 `launchNonCancellable` 本身就在 IO 调度器上，排队并不在主线程；「按钮卡一下」只是因为什么都没入队、状态没变。
+`DownloadManager.downloadChapters()`（`result.startDownloader` 为真时 `startDownloads()`，再把 `QueueResult` 返回）、`MangaViewModel.downloadChapters()`（0.21 已是 `suspend`，
+`result.skipped > 0` 时拼 Snackbar；因为 0.21 把入队放在 `appScope.launch { … }.join()` 里、之后才弹「加入书架」提示，Snackbar 改在 `viewModelScope.launch` 里弹以免阻塞；
+`toggleAllSelection(false)` 0.21 已挪到调用方，补丁里不再调）、
+五条字符串 `harmony_download_skipped*` / `harmony_download_leftover_delete_failed`（base / zh-rCN / zh-rTW）。`LibraryUpdateWorker` / `LibraryViewModel` / `UpdatesViewModel` / `ReaderViewModel` / `NotificationReceiver` 忽略返回值。
 补丁 0012 改 `CrashLogUtil.kt`（`Runtime.exec(arrayOf("logcat", "*:$priority", "-d", "-v", "year", "-v", "zone"))` 读 stdout，`filterNoise()` 按 `HARMONY_NOISE_MARKERS`
 六个子串过滤并计数，`logcatHeader()` 写「--- Logcat (N 卓易通 graphics-layer lines filtered: …) ---」，末尾追加「--- App log (last N lines …) ---」+ `HarmonyLogBuffer.snapshot()`）、
 新文件 `util/system/HarmonyLogBuffer.kt`（`object : LogcatLogger`，`ArrayDeque` 600 行，`isLoggable(priority) = priority >= DEBUG`；与 anikku-harmony 0019 的同名文件**逐字节相同**）、
@@ -232,12 +244,13 @@ gh release list --repo Xun2202/mihon-harmony
 | --- | --- |
 | `prepare-source.sh` 报 `Patch 000X ... does not apply` | 官方新版改动了补丁触及的代码。按 §5.1 rebase。先看 zsyou 仓库的 `.github/patches/harmony.patch` 是否已更新，可作参考 |
 | 编译报错在 `AppUpdateChecker.kt` / `ReleaseServiceImpl.kt` / `GetApplicationRelease.kt` | 官方改了这几个文件的接口（补丁 0002 是基于 v0.20.4 的近乎整文件改写）。取官方新版文件重新套用 0002 的意图 |
-| 编译报错在 `Downloader.kt` | 补丁 0001 / 0003 的改动点被上游重构。参考两个补丁的 commit message 重做 |
+| 编译报错在 `Downloader.kt` | 补丁 0001 / 0003 / 0006 / 0010 / 0011 / 0013 都改它。参考各补丁 commit message 重做；v0.21.0 的 rebase 记录见 §9 2026-10-12 |
 | 点「下载」按钮没反应、队列为空也没提示 | 0011 之前的行为：磁盘上已有同名章节目录（收尾被打断的残留）但下载缓存不知道。0011 起会弹「未加入下载队列：…」，残留目录完整则直接登记为已下载，不完整则删掉重下。若仍无提示，看 crash log 末尾的「App log」小节有没有 `Removing incomplete leftover` / `already on disk` |
 | 导出的崩溃日志几乎全是 `BLASTBufferQueue` / `SurfaceDelegator` | 卓易通图形层噪音。0012 起会被过滤并在「--- Logcat (N … filtered) ---」里计数；应用自己的日志看末尾「App log」小节。出现新的刷屏 tag 就往 `CrashLogUtil.HARMONY_NOISE_MARKERS` 加子串 |
-| `check_patches`「Apply to latest stable」红、每日定时构建失败在 `prepare-source.sh` | 官方已发 v0.21.0（2026-10-11），12 张补丁里只有 0012 能直接套上。需要整体 rebase（§5.1）；在此之前手动发版要指定 `upstream_tag=v0.20.4` |
-| 编译报错在 `AppModule.kt`（`AndroidxSqliteConnectionFactory` / `SqliteJournalMode` 找不到） | 上游换了 sqldelight-androidx-driver 版本或已自带等价配置。先看官方新版的数据库驱动初始化处是否已有 `busy_timeout`；有则删掉 0004，没有则按新驱动 API 重做 |
-| 闪退 `SQLException: Error code: 5, message: database is locked` | 数据库写入撞锁且无 busy timeout。补丁 0004 已修（preview.4 起）；若再现，确认 0004 仍在 `series` 里且驱动版本未回退 |
+| `check_patches`「Apply to latest stable」红、每日定时构建失败在 `prepare-source.sh` | 官方出了新稳定版、补丁套不上。需要整体 rebase（§5.1）；在此之前手动发版要指定旧的 `upstream_tag`（例：2026-10-11 v0.21.0 发布后到 10-12 rebase 完成之间，`upstream_tag=v0.20.4`） |
+| 闪退 `SQLException: Error code: 5, message: database is locked` | 数据库写入撞锁且无 busy timeout。v0.20.4 系列靠补丁 0004（preview.4 起），v0.21.0 起上游 `DatabaseBindings.kt` 自带；若再现，看上游是否把 `PRAGMA busy_timeout` 去掉了 |
+| 升到 v0.21.0 系列后 Release 构建报 `storeFile` 相关错误 / 未签名 | 0.21 的 `app/build.gradle.kts` 读 `storeFile`（文件路径）而不是 `storeFileBase64`。workflow 的 `Decode signing keystore` 步骤负责解码到 `$RUNNER_TEMP/harmony.keystore`，两个变量都注入 |
+| `assembleNightly` 找不到 / 产物目录不对 | 构建类型名随上游版本变：v0.21.0+ 是 `nightly`，更早是 `preview`。workflow 的 `Resolve build type` 按 `create("nightly")` 是否存在自动选，产物路径与文件名都带这个名字 |
 | 闪退 `ForegroundServiceDidNotStopInTimeException ... type dataSync` | Android 15+ 平台规则：dataSync 前台服务后台累计 6 小时 / 24 小时后系统要求停止。实际触发路径是卓易通把后台进程冻结，下载不走、前台服务却一直挂着，把额度白白耗光。补丁 0005（preview.5 起）用静音音轨 + 唤醒锁阻止冻结，并把下载服务改为 `mediaPlayback` 类型（无时限）；书架更新仍是 dataSync，但不再空转。若用户关闭了「后台保持运行（鸿蒙）」开关则回到官方行为：隔几小时切回前台重置额度 |
 | 后台下载停住 / 切回 App 才继续 | 卓易通冻结后台进程。确认 设置 → 下载 →「后台保持运行（鸿蒙）」开着（preview.5 起默认开）；logcat 里应有 `Background keep-alive started`。若鸿蒙后续版本连静音音频也拦，只能等上游 / 系统变化 |
 | 下载时其他 App 的音乐被暂停 / 变小声 | 不应发生：keep-alive 不请求音频焦点。若出现，检查 `BackgroundKeepAlive.kt` 是否被改成了 `requestAudioFocus` |

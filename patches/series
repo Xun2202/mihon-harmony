@@ -1,13 +1,12 @@
 # Applied in order by scripts/prepare-source.sh
+# Base: Mihon v0.21.0 (series rebased 2026-10-12; 0004 / 0009 dropped because upstream contains them)
 0001-downloads-rename-fallback-for-saf-without-renamedocument.patch
 0002-updater-use-harmony-fork-releases.patch
 0003-downloads-cbz-temp-in-private-cache.patch
-0004-database-busy-timeout-and-room-like-connection-setup.patch
 0005-downloads-background-keep-alive-silent-audio.patch
 0006-downloads-notification-speed-and-progress.patch
 0007-updater-delete-installed-apk.patch
 0008-updater-release-mirror.patch
-0009-build-flexible-adapter-from-maven-central.patch
 0010-downloads-finalize-with-fewer-saf-copies-and-error-reasons.patch
 0011-downloads-never-skip-silently-reuse-or-replace-leftover-folders.patch
 0012-crash-log-filter-harmony-noise-and-keep-app-log.patch

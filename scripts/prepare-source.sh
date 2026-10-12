@@ -10,7 +10,7 @@
 set -euo pipefail
 
 src_dir="${1:?mihon source dir}"
-upstream_tag="${2:?upstream tag, e.g. v0.20.4}"
+upstream_tag="${2:?upstream tag, e.g. v0.21.0}"
 patch_number="${3:?patch number, e.g. 1}"
 fork_repo="${FORK_REPO:-Xun2202/mihon-harmony}"
 

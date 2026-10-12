@@ -26,12 +26,12 @@ Add BackgroundKeepAlive: a ref-counted helper that, while at least one job
 holds it, loops a silent PCM buffer through an AudioTrack in MODE_STATIC
 (written once, looped by the audio HAL, no CPU) and holds a partial wake
 lock. No audio focus is requested, so other apps' playback is not ducked or
-paused. DownloadJob and LibraryUpdateJob acquire it right after
+paused. DownloadWorker and LibraryUpdateWorker acquire it right after
 setForeground(); the token is released when the worker's coroutine
 completes, fails or is cancelled.
 
 Because the download service now really is playing audio for its whole
-lifetime, DownloadJob declares FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK instead
+lifetime, DownloadWorker declares FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK instead
 of DATA_SYNC (manifest: dataSync|mediaPlayback + the matching permission).
 mediaPlayback has no time limit on Android 15+, so a long queue no longer
 hits the 6-hour cut-off. The library update keeps dataSync.
@@ -39,21 +39,26 @@ hits the 6-hour cut-off. The library update keeps dataSync.
 Everything is behind a new switch, Settings → Downloads → "Keep running in
 the background (HarmonyOS)", on by default; turning it off restores the
 upstream dataSync-only behaviour.
+
+Rebased from the v0.20.4 series (0005): the workers were renamed
+DownloadJob -> DownloadWorker and LibraryUpdateJob -> LibraryUpdateWorker
+in v0.21.0 and use Metro field injection, so LibraryUpdateWorker gets
+DownloadPreferences injected instead of going through Injekt.
 ---
  app/src/main/AndroidManifest.xml              |   3 +-
  .../settings/screen/SettingsDownloadScreen.kt |   5 +
- .../tachiyomi/data/download/DownloadJob.kt    |  14 +-
- .../data/library/LibraryUpdateJob.kt          |   5 +
+ .../tachiyomi/data/download/DownloadWorker.kt |  14 +-
+ .../data/library/LibraryUpdateWorker.kt       |   7 +
  .../util/system/BackgroundKeepAlive.kt        | 124 ++++++++++++++++++
  .../download/service/DownloadPreferences.kt   |   6 +
- .../moko-resources/base/strings.xml           |   2 +
- .../moko-resources/zh-rCN/strings.xml         |   2 +
- .../moko-resources/zh-rTW/strings.xml         |   2 +
- 9 files changed, 158 insertions(+), 5 deletions(-)
+ .../moko-resources/base/strings.xml           |  11 ++
+ .../moko-resources/zh-rCN/strings.xml         |  11 ++
+ .../moko-resources/zh-rTW/strings.xml         |  11 ++
+ 9 files changed, 187 insertions(+), 5 deletions(-)
  create mode 100644 app/src/main/java/eu/kanade/tachiyomi/util/system/BackgroundKeepAlive.kt
 
 diff --git a/app/src/main/AndroidManifest.xml b/app/src/main/AndroidManifest.xml
-index a36b86e..e668155 100644
+index 8f62976..70073a8 100644
 --- a/app/src/main/AndroidManifest.xml
 +++ b/app/src/main/AndroidManifest.xml
 @@ -32,6 +32,7 @@
@@ -64,7 +69,7 @@ index a36b86e..e668155 100644
  
      <application
          android:name=".App"
-@@ -220,7 +221,7 @@
+@@ -231,7 +232,7 @@
  
          <service
              android:name="androidx.work.impl.foreground.SystemForegroundService"
@@ -74,10 +79,10 @@ index a36b86e..e668155 100644
  
          <provider
 diff --git a/app/src/main/java/eu/kanade/presentation/more/settings/screen/SettingsDownloadScreen.kt b/app/src/main/java/eu/kanade/presentation/more/settings/screen/SettingsDownloadScreen.kt
-index 3a5328f..ec42dd8 100644
+index 7dfbd60..137d2e5 100644
 --- a/app/src/main/java/eu/kanade/presentation/more/settings/screen/SettingsDownloadScreen.kt
 +++ b/app/src/main/java/eu/kanade/presentation/more/settings/screen/SettingsDownloadScreen.kt
-@@ -50,6 +50,11 @@ object SettingsDownloadScreen : SearchableSettings {
+@@ -48,6 +48,11 @@ object SettingsDownloadScreen : SearchableSettings {
                  title = stringResource(MR.strings.split_tall_images),
                  subtitle = stringResource(MR.strings.split_tall_images_summary),
              ),
@@ -87,21 +92,21 @@ index 3a5328f..ec42dd8 100644
 +                subtitle = stringResource(MR.strings.pref_harmony_keep_alive_summary),
 +            ),
              Preference.PreferenceItem.SliderPreference(
-                 value = parallelSourceLimit,
+                 preference = downloadPreferences.parallelSourceLimit,
                  valueRange = 1..10,
-diff --git a/app/src/main/java/eu/kanade/tachiyomi/data/download/DownloadJob.kt b/app/src/main/java/eu/kanade/tachiyomi/data/download/DownloadJob.kt
-index b503629..f4c017d 100644
---- a/app/src/main/java/eu/kanade/tachiyomi/data/download/DownloadJob.kt
-+++ b/app/src/main/java/eu/kanade/tachiyomi/data/download/DownloadJob.kt
+diff --git a/app/src/main/java/eu/kanade/tachiyomi/data/download/DownloadWorker.kt b/app/src/main/java/eu/kanade/tachiyomi/data/download/DownloadWorker.kt
+index d7c65ee..0b6196a 100644
+--- a/app/src/main/java/eu/kanade/tachiyomi/data/download/DownloadWorker.kt
++++ b/app/src/main/java/eu/kanade/tachiyomi/data/download/DownloadWorker.kt
 @@ -13,6 +13,7 @@ import androidx.work.WorkManager
  import androidx.work.WorkerParameters
- import eu.kanade.tachiyomi.R
+ import dev.zacsweers.metro.Inject
  import eu.kanade.tachiyomi.data.notification.Notifications
 +import eu.kanade.tachiyomi.util.system.BackgroundKeepAlive
- import eu.kanade.tachiyomi.util.system.NetworkState
  import eu.kanade.tachiyomi.util.system.activeNetworkState
- import eu.kanade.tachiyomi.util.system.networkStateFlow
-@@ -45,10 +46,12 @@ class DownloadJob(context: Context, workerParams: WorkerParameters) : CoroutineW
+ import eu.kanade.tachiyomi.util.system.notificationBuilder
+ import eu.kanade.tachiyomi.util.system.setForegroundSafely
+@@ -51,10 +52,12 @@ class DownloadWorker(context: Context, workerParams: WorkerParameters) : Corouti
          return ForegroundInfo(
              Notifications.ID_DOWNLOAD_CHAPTER_PROGRESS,
              notification,
@@ -118,21 +123,21 @@ index b503629..f4c017d 100644
              },
          )
      }
-@@ -65,6 +68,9 @@ class DownloadJob(context: Context, workerParams: WorkerParameters) : CoroutineW
-         }
+@@ -70,6 +73,9 @@ class DownloadWorker(context: Context, workerParams: WorkerParameters) : Corouti
  
-         setForegroundSafely()
-+        if (downloadPreferences.keepAliveInBackground.get()) {
-+            BackgroundKeepAlive.acquireForCurrentJob(applicationContext)
-+        }
+         try {
+             setForegroundSafely()
++            if (downloadPreferences.keepAliveInBackground.get()) {
++                BackgroundKeepAlive.acquireForCurrentJob(applicationContext)
++            }
  
-         coroutineScope {
-             combineTransform(
-diff --git a/app/src/main/java/eu/kanade/tachiyomi/data/library/LibraryUpdateJob.kt b/app/src/main/java/eu/kanade/tachiyomi/data/library/LibraryUpdateJob.kt
-index f208966..9229e1e 100644
---- a/app/src/main/java/eu/kanade/tachiyomi/data/library/LibraryUpdateJob.kt
-+++ b/app/src/main/java/eu/kanade/tachiyomi/data/library/LibraryUpdateJob.kt
-@@ -23,6 +23,7 @@ import eu.kanade.tachiyomi.data.notification.Notifications
+             while (networkIssue == null && downloader.isRunning) {
+                 delay(1.seconds)
+diff --git a/app/src/main/java/eu/kanade/tachiyomi/data/library/LibraryUpdateWorker.kt b/app/src/main/java/eu/kanade/tachiyomi/data/library/LibraryUpdateWorker.kt
+index 8e2d9f4..54e1231 100644
+--- a/app/src/main/java/eu/kanade/tachiyomi/data/library/LibraryUpdateWorker.kt
++++ b/app/src/main/java/eu/kanade/tachiyomi/data/library/LibraryUpdateWorker.kt
+@@ -25,6 +25,7 @@ import eu.kanade.tachiyomi.data.notification.Notifications
  import eu.kanade.tachiyomi.source.model.SManga
  import eu.kanade.tachiyomi.source.model.UpdateStrategy
  import eu.kanade.tachiyomi.util.storage.getUriCompat
@@ -140,7 +145,7 @@ index f208966..9229e1e 100644
  import eu.kanade.tachiyomi.util.system.createFileInCacheDir
  import eu.kanade.tachiyomi.util.system.isConnectedToWifi
  import eu.kanade.tachiyomi.util.system.isRunning
-@@ -47,6 +48,7 @@ import tachiyomi.core.common.util.system.logcat
+@@ -54,6 +55,7 @@ import tachiyomi.core.common.util.system.logcat
  import tachiyomi.domain.category.model.Category
  import tachiyomi.domain.chapter.model.Chapter
  import tachiyomi.domain.chapter.model.NoChaptersException
@@ -148,11 +153,20 @@ index f208966..9229e1e 100644
  import tachiyomi.domain.library.model.LibraryManga
  import tachiyomi.domain.library.service.LibraryPreferences
  import tachiyomi.domain.library.service.LibraryPreferences.Companion.DEVICE_CHARGING
-@@ -108,6 +110,9 @@ class LibraryUpdateJob(private val context: Context, workerParams: WorkerParamet
+@@ -104,6 +106,8 @@ class LibraryUpdateWorker(private val context: Context, workerParams: WorkerPara
+ 
+     @Inject private lateinit var notifier: LibraryUpdateNotifier
+ 
++    @Inject private lateinit var downloadPreferences: DownloadPreferences
++
+     private var mangaToUpdate: List<LibraryManga> = mutableListOf()
+ 
+     override suspend fun doWork(): Result {
+@@ -124,6 +128,9 @@ class LibraryUpdateWorker(private val context: Context, workerParams: WorkerPara
          }
  
          setForegroundSafely()
-+        if (Injekt.get<DownloadPreferences>().keepAliveInBackground.get()) {
++        if (downloadPreferences.keepAliveInBackground.get()) {
 +            BackgroundKeepAlive.acquireForCurrentJob(context)
 +        }
  
@@ -289,10 +303,10 @@ index 0000000..3df906d
 +    private const val BYTES_PER_FRAME = 2
 +}
 diff --git a/domain/src/main/java/tachiyomi/domain/download/service/DownloadPreferences.kt b/domain/src/main/java/tachiyomi/domain/download/service/DownloadPreferences.kt
-index bf5b84f..b08131d 100644
+index 5795dc8..b85311c 100644
 --- a/domain/src/main/java/tachiyomi/domain/download/service/DownloadPreferences.kt
 +++ b/domain/src/main/java/tachiyomi/domain/download/service/DownloadPreferences.kt
-@@ -16,6 +16,12 @@ class DownloadPreferences(
+@@ -21,6 +21,12 @@ class DownloadPreferences(
  
      val splitTallImages: Preference<Boolean> = preferenceStore.getBoolean("split_tall_images", true)
  
@@ -306,39 +320,66 @@ index bf5b84f..b08131d 100644
  
      val removeAfterReadSlots: Preference<Int> = preferenceStore.getInt("remove_after_read_slots", -1)
 diff --git a/i18n/src/commonMain/moko-resources/base/strings.xml b/i18n/src/commonMain/moko-resources/base/strings.xml
-index ccba4a4..0568022 100644
+index dbbbca5..1e68283 100644
 --- a/i18n/src/commonMain/moko-resources/base/strings.xml
 +++ b/i18n/src/commonMain/moko-resources/base/strings.xml
-@@ -528,6 +528,8 @@
+@@ -546,6 +546,17 @@
      <string name="save_chapter_as_cbz">Save as CBZ archive</string>
      <string name="split_tall_images">Split tall images</string>
      <string name="split_tall_images_summary">Improves reader performance</string>
++    <string name="harmony_download_unexpected_files">Download folder has unexpected contents: %1$s</string>
++    <string name="harmony_download_pages_failed">%1$d page(s) failed to download, e.g. page %2$d: %3$s</string>
++    <string name="harmony_download_error_prefix">Error: %1$s</string>
++    <string name="harmony_download_interrupted">Interrupted (network lost or downloader stopped); tap the chapter to download again</string>
++    <string name="harmony_download_skipped">Not queued: %1$s</string>
++    <string name="harmony_download_skipped_downloaded">%1$d already downloaded</string>
++    <string name="harmony_download_skipped_queued">%1$d already in the queue</string>
++    <string name="harmony_download_skipped_no_source">%1$d from a source that is not installed</string>
++    <string name="harmony_download_leftover_delete_failed">Could not remove the leftover \'%1$s\' from an earlier download</string>
 +    <string name="pref_harmony_keep_alive">Keep running in the background (HarmonyOS)</string>
 +    <string name="pref_harmony_keep_alive_summary">Plays a silent audio track while downloading or updating the library so that 卓易通 does not suspend the app. Other apps' audio is not affected.</string>
      <string name="pref_download_concurrent_sources">Concurrent source downloads</string>
      <string name="pref_download_concurrent_pages">Concurrent page downloads</string>
      <string name="pref_download_concurrent_pages_summary">Pages downloaded simultaneously per source</string>
 diff --git a/i18n/src/commonMain/moko-resources/zh-rCN/strings.xml b/i18n/src/commonMain/moko-resources/zh-rCN/strings.xml
-index ebf56e8..c92b47b 100644
+index a711580..d5326e7 100644
 --- a/i18n/src/commonMain/moko-resources/zh-rCN/strings.xml
 +++ b/i18n/src/commonMain/moko-resources/zh-rCN/strings.xml
-@@ -576,6 +576,8 @@
+@@ -566,6 +566,17 @@
      <string name="action_sort_last_manga_update">检查更新时间</string>
      <string name="action_sort_unread_count">未读章数</string>
      <string name="split_tall_images_summary">可以改善阅读器的性能</string>
++    <string name="harmony_download_unexpected_files">下载目录内容异常：%1$s</string>
++    <string name="harmony_download_pages_failed">%1$d 页下载失败，例如第 %2$d 页：%3$s</string>
++    <string name="harmony_download_error_prefix">出错：%1$s</string>
++    <string name="harmony_download_interrupted">下载被中断（网络断开或下载服务被停止），点一下该章节重新下载</string>
++    <string name="harmony_download_skipped">未加入下载队列：%1$s</string>
++    <string name="harmony_download_skipped_downloaded">%1$d 章已下载</string>
++    <string name="harmony_download_skipped_queued">%1$d 章已在队列中</string>
++    <string name="harmony_download_skipped_no_source">%1$d 章的图源未安装</string>
++    <string name="harmony_download_leftover_delete_failed">无法删除上次下载残留的「%1$s」</string>
 +    <string name="pref_harmony_keep_alive">后台保持运行（鸿蒙）</string>
 +    <string name="pref_harmony_keep_alive_summary">下载或更新书架时播放一段静音音轨，防止卓易通冻结应用；不影响其他应用的声音。</string>
      <string name="download_notifier_split_page_not_found">分割时未找到第 %d 页</string>
      <string name="download_notifier_split_page_path_not_found">未找到第 %d 页的文件路径</string>
      <string name="pref_reset_viewer_flags">重置各作品阅读器独立设置</string>
 diff --git a/i18n/src/commonMain/moko-resources/zh-rTW/strings.xml b/i18n/src/commonMain/moko-resources/zh-rTW/strings.xml
-index a05bb78..8441d9e 100644
+index 4d19496..b8dba4f 100644
 --- a/i18n/src/commonMain/moko-resources/zh-rTW/strings.xml
 +++ b/i18n/src/commonMain/moko-resources/zh-rTW/strings.xml
-@@ -574,6 +574,8 @@
+@@ -567,6 +567,17 @@
      <string name="action_sort_unread_count">未讀章數</string>
      <string name="download_notifier_split_page_not_found">分割時找不到第 %d 頁</string>
      <string name="split_tall_images_summary">用以改善閱讀器效能</string>
++    <string name="harmony_download_unexpected_files">下載目錄內容異常：%1$s</string>
++    <string name="harmony_download_pages_failed">%1$d 頁下載失敗，例如第 %2$d 頁：%3$s</string>
++    <string name="harmony_download_error_prefix">錯誤：%1$s</string>
++    <string name="harmony_download_interrupted">下載已中斷（網路斷線或下載服務被停止），點一下該章節重新下載</string>
++    <string name="harmony_download_skipped">未加入下載佇列：%1$s</string>
++    <string name="harmony_download_skipped_downloaded">%1$d 章已下載</string>
++    <string name="harmony_download_skipped_queued">%1$d 章已在佇列中</string>
++    <string name="harmony_download_skipped_no_source">%1$d 章的圖源未安裝</string>
++    <string name="harmony_download_leftover_delete_failed">無法刪除上次下載殘留的「%1$s」</string>
 +    <string name="pref_harmony_keep_alive">在背景保持執行（HarmonyOS）</string>
 +    <string name="pref_harmony_keep_alive_summary">下載或更新書庫時播放一段靜音音軌，避免卓易通凍結應用程式；不影響其他應用程式的聲音。</string>
      <string name="download_notifier_split_page_path_not_found">找不到第 %d 頁的檔案路徑</string>

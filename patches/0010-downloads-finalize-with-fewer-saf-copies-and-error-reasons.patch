@@ -1,8 +1,8 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Xun2202 <98207886+Xun2202@users.noreply.github.com>
 Date: Sun, 11 Oct 2026 12:36:58 +0000
-Subject: [PATCH] downloads: finish chapters with fewer SAF copies and show why
- a download failed
+Subject: [PATCH] downloads: finish chapters with fewer SAF copies and
+ show why a download failed
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
@@ -41,16 +41,13 @@ the response, and pages are small. Animeko is not affected (no SAF).
  .../ui/download/DownloadQueueViewModel.kt     |   5 +-
  .../core/common/storage/UniFileExtensions.kt  | 118 ++++++++++++------
  .../common/storage/UniFileExtensionsTest.kt   |  53 +++++++-
- .../moko-resources/base/strings.xml           |   4 +
- .../moko-resources/zh-rCN/strings.xml         |   4 +
- .../moko-resources/zh-rTW/strings.xml         |   4 +
- 9 files changed, 232 insertions(+), 56 deletions(-)
+ 6 files changed, 220 insertions(+), 56 deletions(-)
 
 diff --git a/app/src/main/java/eu/kanade/tachiyomi/data/download/Downloader.kt b/app/src/main/java/eu/kanade/tachiyomi/data/download/Downloader.kt
-index cd854b5..8f405e4 100644
+index d5ad647..7c7ee0d 100644
 --- a/app/src/main/java/eu/kanade/tachiyomi/data/download/Downloader.kt
 +++ b/app/src/main/java/eu/kanade/tachiyomi/data/download/Downloader.kt
-@@ -150,7 +150,7 @@ class Downloader(
+@@ -185,7 +185,7 @@ class Downloader(
          cancelDownloaderJob()
          queueState.value
              .filter { it.status == Download.State.DOWNLOADING }
@@ -59,9 +56,9 @@ index cd854b5..8f405e4 100644
  
          if (reason != null) {
              notifier.onWarning(reason)
-@@ -338,20 +338,16 @@ class Downloader(
+@@ -425,20 +425,16 @@ class Downloader(
       */
-     private suspend fun downloadChapter(download: Download) {
+     private suspend fun downloadChapter(download: Download, slots: Semaphore, pagesStarted: CompletableDeferred<Unit>) {
          val mangaDir = provider.getMangaDir(download.manga.title, download.source).getOrElse { e ->
 -            download.status = Download.State.ERROR
 +            download.fail(e.message)
@@ -84,7 +81,7 @@ index cd854b5..8f405e4 100644
              return
          }
  
-@@ -416,7 +412,30 @@ class Downloader(
+@@ -513,7 +509,30 @@ class Downloader(
              // Do after download completes
  
              if (!isDownloadSuccessful(download, tmpDir)) {
@@ -116,7 +113,7 @@ index cd854b5..8f405e4 100644
                  return
              }
  
-@@ -431,7 +450,11 @@ class Downloader(
+@@ -528,7 +547,11 @@ class Downloader(
              if (downloadPreferences.saveChaptersAsCBZ.get()) {
                  archiveChapter(mangaDir, chapterDirname, tmpDir)
              } else {
@@ -129,7 +126,7 @@ index cd854b5..8f405e4 100644
                  DiskUtil.createNoMediaFile(chapterDir, context)
              }
              cache.addChapter(chapterDirname, mangaDir, download.manga)
-@@ -440,11 +463,26 @@ class Downloader(
+@@ -537,11 +560,26 @@ class Downloader(
              if (error is CancellationException) throw error
              // If the page list threw, it will resume here
              logcat(LogPriority.ERROR, error)
@@ -158,10 +155,10 @@ index cd854b5..8f405e4 100644
       * Gets the image from the filesystem if it exists or downloads it otherwise.
       *
 diff --git a/app/src/main/java/eu/kanade/tachiyomi/data/download/model/Download.kt b/app/src/main/java/eu/kanade/tachiyomi/data/download/model/Download.kt
-index de59138..f0681ea 100644
+index 30201c1..03f69ef 100644
 --- a/app/src/main/java/eu/kanade/tachiyomi/data/download/model/Download.kt
 +++ b/app/src/main/java/eu/kanade/tachiyomi/data/download/model/Download.kt
-@@ -40,9 +40,22 @@ data class Download(
+@@ -43,9 +43,22 @@ data class Download(
      var status: State
          get() = _statusFlow.value
          set(status) {
@@ -182,8 +179,8 @@ index de59138..f0681ea 100644
 +    }
 +
      @Transient
-     val progressFlow = flow {
-         if (pages == null) {
+     val progressFlow = _pagesFlow
+         .flatMapLatest { pages ->
 diff --git a/app/src/main/java/eu/kanade/tachiyomi/ui/download/DownloadHolder.kt b/app/src/main/java/eu/kanade/tachiyomi/ui/download/DownloadHolder.kt
 index 514357d..fa81b6f 100644
 --- a/app/src/main/java/eu/kanade/tachiyomi/ui/download/DownloadHolder.kt
@@ -243,10 +240,10 @@ index 514357d..fa81b6f 100644
  
      override fun onItemReleased(position: Int) {
 diff --git a/app/src/main/java/eu/kanade/tachiyomi/ui/download/DownloadQueueViewModel.kt b/app/src/main/java/eu/kanade/tachiyomi/ui/download/DownloadQueueViewModel.kt
-index 5601ae0..5af9ca8 100644
+index 4dd9394..5223993 100644
 --- a/app/src/main/java/eu/kanade/tachiyomi/ui/download/DownloadQueueViewModel.kt
 +++ b/app/src/main/java/eu/kanade/tachiyomi/ui/download/DownloadQueueViewModel.kt
-@@ -198,7 +198,10 @@ class DownloadQueueViewModel(
+@@ -200,7 +200,10 @@ class DownloadQueueViewModel(
                  onUpdateProgress(download)
                  onUpdateDownloadedPages(download)
              }
@@ -502,48 +499,3 @@ index eaa9f82..c588277 100644
      }
  
      private fun mockDirectory(): UniFile = mockk {
-diff --git a/i18n/src/commonMain/moko-resources/base/strings.xml b/i18n/src/commonMain/moko-resources/base/strings.xml
-index 3e63ef3..b3edb3e 100644
---- a/i18n/src/commonMain/moko-resources/base/strings.xml
-+++ b/i18n/src/commonMain/moko-resources/base/strings.xml
-@@ -530,6 +530,10 @@
-     <string name="split_tall_images_summary">Improves reader performance</string>
-     <string name="pref_harmony_keep_alive">Keep running in the background (HarmonyOS)</string>
-     <string name="pref_harmony_keep_alive_summary">Plays a silent audio track while downloading or updating the library so that 卓易通 does not suspend the app. Other apps' audio is not affected.</string>
-+    <string name="harmony_download_unexpected_files">Download folder has unexpected contents: %1$s</string>
-+    <string name="harmony_download_pages_failed">%1$d page(s) failed to download, e.g. page %2$d: %3$s</string>
-+    <string name="harmony_download_error_prefix">Error: %1$s</string>
-+    <string name="harmony_download_interrupted">Interrupted (network lost or downloader stopped); tap the chapter to download again</string>
-     <string name="download_notifier_speed_progress">Download: %1$s/s · %2$d%%</string>
-     <string name="pref_download_concurrent_sources">Concurrent source downloads</string>
-     <string name="pref_download_concurrent_pages">Concurrent page downloads</string>
-diff --git a/i18n/src/commonMain/moko-resources/zh-rCN/strings.xml b/i18n/src/commonMain/moko-resources/zh-rCN/strings.xml
-index b6d4117..029de7e 100644
---- a/i18n/src/commonMain/moko-resources/zh-rCN/strings.xml
-+++ b/i18n/src/commonMain/moko-resources/zh-rCN/strings.xml
-@@ -578,6 +578,10 @@
-     <string name="split_tall_images_summary">可以改善阅读器的性能</string>
-     <string name="pref_harmony_keep_alive">后台保持运行（鸿蒙）</string>
-     <string name="pref_harmony_keep_alive_summary">下载或更新书架时播放一段静音音轨，防止卓易通冻结应用；不影响其他应用的声音。</string>
-+    <string name="harmony_download_unexpected_files">下载目录内容异常：%1$s</string>
-+    <string name="harmony_download_pages_failed">%1$d 页下载失败，例如第 %2$d 页：%3$s</string>
-+    <string name="harmony_download_error_prefix">出错：%1$s</string>
-+    <string name="harmony_download_interrupted">下载被中断（网络断开或下载服务被停止），点一下该章节重新下载</string>
-     <string name="download_notifier_speed_progress">下载：%1$s/s · %2$d%%</string>
-     <string name="download_notifier_split_page_not_found">分割时未找到第 %d 页</string>
-     <string name="download_notifier_split_page_path_not_found">未找到第 %d 页的文件路径</string>
-diff --git a/i18n/src/commonMain/moko-resources/zh-rTW/strings.xml b/i18n/src/commonMain/moko-resources/zh-rTW/strings.xml
-index 6f0c11e..40b2b8b 100644
---- a/i18n/src/commonMain/moko-resources/zh-rTW/strings.xml
-+++ b/i18n/src/commonMain/moko-resources/zh-rTW/strings.xml
-@@ -576,6 +576,10 @@
-     <string name="split_tall_images_summary">用以改善閱讀器效能</string>
-     <string name="pref_harmony_keep_alive">在背景保持執行（HarmonyOS）</string>
-     <string name="pref_harmony_keep_alive_summary">下載或更新書庫時播放一段靜音音軌，避免卓易通凍結應用程式；不影響其他應用程式的聲音。</string>
-+    <string name="harmony_download_unexpected_files">下載目錄內容異常：%1$s</string>
-+    <string name="harmony_download_pages_failed">%1$d 頁下載失敗，例如第 %2$d 頁：%3$s</string>
-+    <string name="harmony_download_error_prefix">錯誤：%1$s</string>
-+    <string name="harmony_download_interrupted">下載已中斷（網路斷線或下載服務被停止），點一下該章節重新下載</string>
-     <string name="download_notifier_speed_progress">下載：%1$s/s · %2$d%%</string>
-     <string name="download_notifier_split_page_path_not_found">找不到第 %d 頁的檔案路徑</string>
-     <string name="pref_reset_viewer_flags">重設個別閱讀器設定</string>

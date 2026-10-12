@@ -1,29 +1,31 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Xun2202 <98207886+Xun2202@users.noreply.github.com>
-Date: Tue, 6 Oct 2026 18:29:08 +0000
-Subject: [PATCH] updater: read the release list from the repo-branch mirror
- first
+Date: Mon, 12 Oct 2026 06:38:42 +0000
+Subject: [PATCH] updater: read the release list from the repo-branch
+ mirror first
 
 Checking for updates listed the fork's releases through api.github.com,
 whose anonymous quota is 60 requests per hour per IP address. Phones
 behind carrier NAT or a shared proxy exhaust it within minutes and the
 check fails with "HTTP error 403".
 
-The fork's CI now mirrors the "list releases" response to the `repo`
-branch of the release repository (releases.json). Read it from
+The fork's CI mirrors the "list releases" response to the `repo` branch of
+the release repository (releases.json). Read it from
 raw.githubusercontent.com first (a plain CDN, no such quota), with short
 timeouts, and fall back to the API when the mirror is unreachable.
+
+Rebased from the v0.20.4 series (0008) without functional changes.
 ---
- .../data/release/ReleaseServiceImpl.kt        | 49 ++++++++++++++++---
- 1 file changed, 43 insertions(+), 6 deletions(-)
+ .../data/release/ReleaseServiceImpl.kt        | 51 ++++++++++++++++---
+ 1 file changed, 43 insertions(+), 8 deletions(-)
 
 diff --git a/data/src/main/java/tachiyomi/data/release/ReleaseServiceImpl.kt b/data/src/main/java/tachiyomi/data/release/ReleaseServiceImpl.kt
-index 67e4330..4f07af5 100644
+index 4df0e71..8562faf 100644
 --- a/data/src/main/java/tachiyomi/data/release/ReleaseServiceImpl.kt
 +++ b/data/src/main/java/tachiyomi/data/release/ReleaseServiceImpl.kt
-@@ -6,9 +6,13 @@ import eu.kanade.tachiyomi.network.NetworkHelper
- import eu.kanade.tachiyomi.network.awaitSuccess
- import eu.kanade.tachiyomi.network.parseAs
+@@ -12,9 +12,13 @@ import eu.kanade.tachiyomi.network.parseAs
+ import kotlinx.coroutines.Dispatchers
+ import kotlinx.coroutines.withContext
  import kotlinx.serialization.json.Json
 +import logcat.LogPriority
 +import tachiyomi.core.common.util.system.logcat
@@ -33,23 +35,25 @@ index 67e4330..4f07af5 100644
 +import java.util.concurrent.TimeUnit
 +import kotlin.coroutines.cancellation.CancellationException
  
- class ReleaseServiceImpl(
-     private val networkService: NetworkHelper,
-@@ -18,12 +22,7 @@ class ReleaseServiceImpl(
+ @Inject
+ @SingleIn(AppScope::class)
+@@ -27,14 +31,7 @@ class ReleaseServiceImpl(
      override suspend fun latest(arguments: GetApplicationRelease.Arguments): Release? {
          // Mihon Harmony fork: stable and preview builds share one repository, so
          // list recent releases and pick the newest one that belongs to our channel.
--        val releases = with(json) {
--            networkService.client
--                .newCall(GET("https://api.github.com/repos/${arguments.repository}/releases?per_page=30"))
--                .awaitSuccess()
--                .parseAs<List<GithubRelease>>()
+-        val releases = withContext(Dispatchers.IO) {
+-            with(json) {
+-                networkService.client
+-                    .newCall(GET("https://api.github.com/repos/${arguments.repository}/releases?per_page=30"))
+-                    .awaitSuccess()
+-                    .parseAs<List<GithubRelease>>()
+-            }
 -        }
-+        val releases = listReleases(arguments.repository)
++        val releases = withContext(Dispatchers.IO) { listReleases(arguments.repository) }
  
          val release = releases.firstOrNull { candidate ->
              val isPreviewTag = PREVIEW_TAG_MARKER in candidate.version
-@@ -42,6 +41,41 @@ class ReleaseServiceImpl(
+@@ -53,6 +50,41 @@ class ReleaseServiceImpl(
          )
      }
  
@@ -91,7 +95,7 @@ index 67e4330..4f07af5 100644
      private fun getDownloadLink(release: GithubRelease, isFoss: Boolean): String? {
          val map = release.assets.associate { asset ->
              BUILD_TYPES.find { "-$it" in asset.name } to asset.downloadLink
-@@ -61,6 +95,9 @@ class ReleaseServiceImpl(
+@@ -72,6 +104,9 @@ class ReleaseServiceImpl(
          private const val PREVIEW_TAG_MARKER = "-harmony-preview."
          private const val STABLE_TAG_MARKER = "-harmony."
  
