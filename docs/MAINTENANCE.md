@@ -55,6 +55,9 @@
 - `v0.20.4-harmony-preview.9` —— 2026-10-11，加入补丁 0009（FlexibleAdapter 改从 Maven Central 取，构建修复）和 0010（移植 anikku-harmony 0016：
   目录改名 `moveDocument` / 合并 / 校验 / 重试，下载队列显示失败原因）。起因是 Anikku 用户的「下载 100% 后变 !」；Mihon 的 0001 是同一份
   `renameToOrCopy`，按跨 App 规则一起改（versionCode 2909）。
+- `v0.20.4-harmony-preview.10` —— 2026-10-12，加入补丁 0011（点「下载」被静默跳过的修复：按下载缓存判断已下载、磁盘残留目录完整则登记 / 不完整则删掉重下、
+  漫画页面 Snackbar 说明没入队的原因）和 0012（崩溃日志过滤卓易通图形层噪音 + 附应用自己的最近 600 行日志）。起因是用户上报「有个资源点了下载按钮卡了一下但没开始」，
+  导出的 crash log 里 701 行有 690 行是卓易通噪音、Mihon 自己只剩 3 行（versionCode 2910）。
 
 ## 3. 仓库结构
 
@@ -70,6 +73,8 @@ patches/0007-*.patch
 patches/0008-*.patch
 patches/0009-*.patch           # 依赖回迁, 上游稳定版自带后 prepare-source.sh 自动跳过
 patches/0010-*.patch
+patches/0011-*.patch
+patches/0012-*.patch
 scripts/prepare-source.sh      # 官方源码 → 套补丁 → 改版本号, 每步一个 commit
 scripts/write-release-index.sh # Releases 接口返回 → repo 分支的 releases.json / latest.json
 .github/workflows/harmony_preview.yml   # 每日构建发布, 最后写 Release 索引
@@ -161,6 +166,19 @@ rebase 时通常只需重新定位那几行插入点。
 `ui/download/DownloadHolder.kt`（`notifyDownloadedPages()` 在 ERROR 时右侧显示「Error」、章节名下追加「出错：…」且 `maxLines = 3`；`bind()` 总是调用它）
 与 `DownloadQueueViewModel.onStatusChange` 的 ERROR 分支多调一次 `onUpdateDownloadedPages`；四条字符串 `harmony_download_*` 在 `i18n` base / zh-rCN / zh-rTW。
 CBZ 模式（0003 的 `finalizeArchive`）没有动：它本来就是单文件复制。
+补丁 0011 改 `Downloader.kt`（`queueChapters()` 返回新增的 `data class QueueResult(queued, alreadyDownloaded, alreadyQueued, sourceUnavailable)`，
+「已下载」改用 `cache.isChapterDownloaded(…, skipCache = false)`，`alreadyQueued` 用 id 集合判断；`downloadChapter()` 把临时目录的创建挪到 `try` 里、页列表之后，
+先调新函数 `reuseOrRemoveExistingChapter(download, mangaDir, chapterDirname, pageCount)`：`provider.getValidChapterDirNames(...)` 逐个 `mangaDir.findFile`，
+`countChapterImages()` 数目录文件或用 `archiveReader(context).useEntries` 数 `.cbz` 条目（规则抽成 `isCountedPageFile()`，与 `isDownloadSuccessful()` 共用），
+≥ 页数 → `createNoMediaFile` + `cache.addChapter(name.removeSuffix(".cbz"), …)` + 删 `_tmp` / 私有缓存残留 + 返回 true；否则 `existing.delete()`，删不掉抛 `harmony_download_leftover_delete_failed`）、
+`DownloadManager.downloadChapters()`（透传返回值）、`MangaViewModel.downloadChapters()`（改 `suspend`，`result.skipped > 0` 时拼 Snackbar）、
+五条字符串 `harmony_download_skipped*` / `harmony_download_leftover_delete_failed`（base / zh-rCN / zh-rTW）。`LibraryUpdateJob` / `LibraryViewModel` / `UpdatesViewModel` / `ReaderViewModel` / `NotificationReceiver` 忽略返回值。
+注意 `launchNonCancellable` 本身就在 IO 调度器上，排队并不在主线程；「按钮卡一下」只是因为什么都没入队、状态没变。
+补丁 0012 改 `CrashLogUtil.kt`（`Runtime.exec(arrayOf("logcat", "*:$priority", "-d", "-v", "year", "-v", "zone"))` 读 stdout，`filterNoise()` 按 `HARMONY_NOISE_MARKERS`
+六个子串过滤并计数，`logcatHeader()` 写「--- Logcat (N 卓易通 graphics-layer lines filtered: …) ---」，末尾追加「--- App log (last N lines …) ---」+ `HarmonyLogBuffer.snapshot()`）、
+新文件 `util/system/HarmonyLogBuffer.kt`（`object : LogcatLogger`，`ArrayDeque` 600 行，`isLoggable(priority) = priority >= DEBUG`；与 anikku-harmony 0019 的同名文件**逐字节相同**）、
+`App.kt`（`LogcatLogger.loggers += HarmonyLogBuffer`）。上游若把 `CrashLogUtil.dumpLogs` 的 logcat 命令改掉，只需保留 `filterNoise` 这段管道即可。
+噪音特征取自用户 2026-10-12 的导出（HOP-AL10，701 行里 513 行 `BLASTBufferQueue`、82 行 tag 为包名的 `SurfaceDelegator` / `client is nullptr`、44 行 `HwAssetManagerEx`、38 行 `HwViewRootImpl`、6 行 `Display`）；再出现别的刷屏 tag 往 `HARMONY_NOISE_MARKERS` 里加一行即可。
 
 ### 5.2 加新补丁
 
@@ -212,6 +230,9 @@ gh release list --repo Xun2202/mihon-harmony
 | `prepare-source.sh` 报 `Patch 000X ... does not apply` | 官方新版改动了补丁触及的代码。按 §5.1 rebase。先看 zsyou 仓库的 `.github/patches/harmony.patch` 是否已更新，可作参考 |
 | 编译报错在 `AppUpdateChecker.kt` / `ReleaseServiceImpl.kt` / `GetApplicationRelease.kt` | 官方改了这几个文件的接口（补丁 0002 是基于 v0.20.4 的近乎整文件改写）。取官方新版文件重新套用 0002 的意图 |
 | 编译报错在 `Downloader.kt` | 补丁 0001 / 0003 的改动点被上游重构。参考两个补丁的 commit message 重做 |
+| 点「下载」按钮没反应、队列为空也没提示 | 0011 之前的行为：磁盘上已有同名章节目录（收尾被打断的残留）但下载缓存不知道。0011 起会弹「未加入下载队列：…」，残留目录完整则直接登记为已下载，不完整则删掉重下。若仍无提示，看 crash log 末尾的「App log」小节有没有 `Removing incomplete leftover` / `already on disk` |
+| 导出的崩溃日志几乎全是 `BLASTBufferQueue` / `SurfaceDelegator` | 卓易通图形层噪音。0012 起会被过滤并在「--- Logcat (N … filtered) ---」里计数；应用自己的日志看末尾「App log」小节。出现新的刷屏 tag 就往 `CrashLogUtil.HARMONY_NOISE_MARKERS` 加子串 |
+| `check_patches`「Apply to latest stable」红、每日定时构建失败在 `prepare-source.sh` | 官方已发 v0.21.0（2026-10-11），12 张补丁里只有 0012 能直接套上。需要整体 rebase（§5.1）；在此之前手动发版要指定 `upstream_tag=v0.20.4` |
 | 编译报错在 `AppModule.kt`（`AndroidxSqliteConnectionFactory` / `SqliteJournalMode` 找不到） | 上游换了 sqldelight-androidx-driver 版本或已自带等价配置。先看官方新版的数据库驱动初始化处是否已有 `busy_timeout`；有则删掉 0004，没有则按新驱动 API 重做 |
 | 闪退 `SQLException: Error code: 5, message: database is locked` | 数据库写入撞锁且无 busy timeout。补丁 0004 已修（preview.4 起）；若再现，确认 0004 仍在 `series` 里且驱动版本未回退 |
 | 闪退 `ForegroundServiceDidNotStopInTimeException ... type dataSync` | Android 15+ 平台规则：dataSync 前台服务后台累计 6 小时 / 24 小时后系统要求停止。实际触发路径是卓易通把后台进程冻结，下载不走、前台服务却一直挂着，把额度白白耗光。补丁 0005（preview.5 起）用静音音轨 + 唤醒锁阻止冻结，并把下载服务改为 `mediaPlayback` 类型（无时限）；书架更新仍是 dataSync，但不再空转。若用户关闭了「后台保持运行（鸿蒙）」开关则回到官方行为：隔几小时切回前台重置额度 |
@@ -263,3 +284,7 @@ gh release list --repo Xun2202/mihon-harmony
   本机 `:core:common:testDebugUnitTest`（8 个用例）与 `:app:assemblePreview` 通过，10 张补丁在干净 v0.20.4 上套用一致；`check_patches` run 38140034698 绿 →
   正式发版 run 38140180515 → `v0.20.4-harmony-preview.9`（versionCode 2909，versionName `0.20.4-harmony.9-7883`，签名 `4bd90284…ea8a`，`repo` 分支 `bb04007`）。
   没跑 `dry_run`（本地整包编译代替）；模拟器（TCG，无 KVM）上 Mihon 走到了 SAF 文件夹 + 下载一章，但界面级的「出错：…」截图没来得及截，用户要求改为真机验证。
+- 2026-10-12 用户上报「有个资源点了下载后按钮卡了一下但没开始下载」并附 crash log。日志 701 行只覆盖 5 分钟、690 行是卓易通图形层噪音，Mihon 自己只有 3 行 `PagerPageHolder: JobCancellationException`（正常），
+  没有任何 `Downloader` 记录。从代码定位到 `queueChapters()` 对磁盘已有目录的静默过滤（见 §5.1 补丁 0011），用户要求「错误噪音」和下载问题一起修。
+  新增补丁 0011 / 0012，本机 `:app:compilePreviewKotlin` 通过，12 张补丁在干净 v0.20.4 上套用后与开发树一致；同一时刻 Mihon 官方发布了 **v0.21.0**（2026-10-11 20:51 UTC，273 个提交），
+  `check_patches` 对「最新稳定版」的试套从这次 push 起变红（0001 起就套不上，只有 0012 能套），每日定时构建也会因此失败直到补丁 rebase 到 v0.21.0；preview.10 仍手动指定 `upstream_tag=v0.20.4`。
