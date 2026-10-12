@@ -65,6 +65,8 @@
   流水线：解码密钥到文件给 `storeFile`、按源码树自动识别 nightly / preview 构建类型、`assembleNightly`。
   versionCode 3601（上游 36 × 100 + 1），versionName `0.21.0-harmony.1-8157`，包名仍 `app.mihon.debug`，签名不变，可从 v0.20.4 系列直接覆盖（升级前先在 App 里备份，见 README）。
 - `v0.21.0-harmony-preview.2` —— 2026-10-12，加入补丁 0014：书架 / 浏览页新增显示模式「全景松散网格」（从 anikku-harmony 0015 + 0020 移植：横版封面按 3:2 画、瀑布流排布、自动列宽 168 dp）。versionCode 3602。
+- `v0.21.1-harmony-preview.1` —— 2026-10-12，**定时任务自动发布**：官方 v0.21.1（versionCode 37）出来后 14 张补丁直接套上。功能与 v0.21.0-preview.2 相同，versionCode 3701。用户的 App 没看到它——见下一条。
+- `v0.21.1-harmony-preview.2` —— 2026-10-12，加入补丁 0015（显示模式「全景紧凑网格」）、0016（瀑布流快速滚动条拇指不抽搐）、0017（更新器按版本号取最大，修「检查更新一直停在 v0.21.0-harmony-preview.2」）。versionCode 3702。装着 ≤ v0.21.1-preview.1 的用户这一次要手动装，之后更新检查就正常。
 
 ## 3. 仓库结构
 
@@ -352,3 +354,8 @@ gh release list --repo Xun2202/mihon-harmony
   12 张补丁在干净 v0.21.0 上套用后与开发树只差版本号行。推 `main` `f4d55a24f` → `check_patches` run 38270707846 绿 → `dry_run` run 38270706712 绿 → 正式 run 38271885997 → **`v0.21.0-harmony-preview.2`**（15:47 UTC，target `f4d55a24f`，非 draft / prerelease；
   `app.mihon.debug`，versionCode 3602，versionName `0.21.0-harmony.2-8158`，签名 `4bd90284…ea8a`，arm64 26,922,641 B，SHA-256 `0ae2b296…37cc`，universal 67,231,640 B；DEX 含 `ComfortableGridPanorama` / `COMFORTABLE_GRID_PANORAMA` / `VerticalStaggeredGridFastScroller` / `LazyLibraryStaggeredGrid` / `rememberCoverRatio` / `getColumnCount`，
   `resources.arsc` 含「Panorama comfortable grid」「全景松散网格」「全景鬆散格狀」；`repo` 分支 `df4609e`，`releases.json` 第一项即 preview.2，共 14 条）。同轮 Anikku 浏览页 / 相关作品页全景网格为 anikku-harmony 0021（`v0.2.0-harmony-preview.12`）。
+- 2026-10-12（深夜） 用户三件事：「能不能加个全景紧凑网络」「上下滑动全景网格时右侧竖列进度条好像会抽搐」「mihon 好像没正常拉到更新，看到最近的版本 12 日下午 8.00 的」。
+  第三件的根因：官方 v0.21.1 于 10-12 发布，定时任务 run 38246143227（`schedule`）自动发了 `v0.21.1-harmony-preview.1`（3701），但更新器 `latest()` 取本频道列表第一项，而镜像 `releases.json` 把 `v0.21.0-harmony-preview.2` 排在前面（GitHub `/releases` 顺序不保证按版本）→ 补丁 0017。
+  0015 / 0016 由子代理（grok-4.7-high-fast）在 `/tmp/mihon-021` `dev-021` 写成；主代理复核：0016 的「满行条目」判断从 `@Suppress("INVISIBLE_REFERENCE")` 强转内部 `LazyStaggeredGridMeasuredItem.span` 改为宽度启发式，并按 Compose 源码（`LazyStaggeredGridMeasure.kt`：`beforeContentPadding` 只在 `place()` 时加进 `contentOffset`）把 `scrollOffset` 里多加的顶部 padding 去掉，估算段与 Anikku 0023 `diff` 一致；0017 主代理自己写。`flock /tmp/gradle.lock ./gradlew :app:compileNightlyKotlin spotlessCheck :domain:test` 通过。
+  17 张补丁在干净 v0.21.1 上套用后与开发树只差上游 0.21.0 → 0.21.1 的改动和版本号行。推 `main` `93c8cbd63`（+ `940acfa51` 改 0016 提交说明）→ `dry_run` run 38280545014（14 张）/ 38283415443（17 张）绿 → 正式 run 38284349214 → **`v0.21.1-harmony-preview.2`**（17:33 UTC，target `940acfa51`，非 draft / prerelease；
+  `app.mihon.debug`，versionCode 3702，versionName `0.21.1-harmony.2-8176`，签名 `4bd90284…ea8a`，arm64 26,940,089 B，SHA-256 `85156a26…`，universal 67,249,088 B；DEX 含 `CompactGridPanorama` / `COMPACT_GRID_PANORAMA` / `StaggeredGridMeasurements`，`-harmony(?:-preview)?` 正则出现 2 次（domain + data），`resources.arsc` 含「Panorama compact grid」「全景紧凑网格」「全景密集格狀」；`repo` 分支 `releases.json` 第一项即 preview.2，共 15 条）。同轮 Anikku 0022 / 0023 / 0024 → `v0.2.0-harmony-preview.13`。
