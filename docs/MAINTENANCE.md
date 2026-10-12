@@ -84,6 +84,9 @@ patches/0011-*.patch
 patches/0012-*.patch
 patches/0013-*.patch           # 0011 的补充: 重试失败章节不算「已在队列」
 patches/0014-*.patch           # 显示模式「全景松散网格」(Anikku 0015 + 0020 的移植)
+patches/0015-*.patch           # 显示模式「全景紧凑网格」(与 Anikku 0022 同源)
+patches/0016-*.patch           # 瀑布流快速滚动条拇指不抽搐 (与 Anikku 0023 同源)
+patches/0017-*.patch           # 更新器按版本号取最大而不是列表第一项 (与 Anikku 0024 同源)
 scripts/prepare-source.sh      # 官方源码 → 套补丁 → 改版本号, 每步一个 commit
 scripts/write-release-index.sh # Releases 接口返回 → repo 分支的 releases.json / latest.json
 .github/workflows/harmony_preview.yml   # 每日构建发布, 最后写 Release 索引
@@ -209,6 +212,15 @@ CBZ 模式（0003 的 `finalizeArchive`）没有动：它本来就是单文件�
 浏览页：`BrowseSourceViewModel` 拆出 `getColumnCount(orientation)`（0 = 自动），`BrowseSourceContent` / `BrowseSourceScreen` / `MigrateSourceSearchScreen` 多传 `columnCount`，`BrowseSourceComfortableGrid` 全景模式用普通 `LazyVerticalStaggeredGrid`（上游浏览页本来没有快速滚动条，保持一致；Anikku 0021 的浏览页是带快速滚动条的，且列数用 `CountedGridCells` 传——两边实现不同、效果相同）。`BrowseSourceToolbar` 的显示模式菜单多一项，图标与松散网格相同。
 字符串 `action_display_comfortable_grid_panorama`：base「Panorama comfortable grid」/ zh-rCN「全景松散网格」/ zh-rTW「全景鬆散格狀」。此补丁由子代理（grok-4.7-high-fast）按 `/workspace/.cursor/rules/orchestration.mdc` 流程完成，主代理复核 diff 并独立重跑 `:app:compileNightlyKotlin spotlessCheck :domain:test`。
 
+补丁 0015「全景紧凑网格」是 0014 的姊妹：`LibraryDisplayMode.CompactGridPanorama`（序列化 `COMPACT_GRID_PANORAMA`，`values` 变 6 个，`LibraryFlagsTest` 断言改 6），`MangaCompactGridItem` 多 `usePanoramaCover` / `coverRatio`，`LibraryCompactGrid` 全景模式走 `LazyLibraryStaggeredGrid`（私有 `LibraryCompactGridItem` 把普通 / 瀑布流两条路径的格子画法合在一起），`BrowseSourceCompactGrid` 多 `usePanoramaCover` / `columnCount`、全景时用 `LazyVerticalStaggeredGrid`；菜单项 `action_display_grid_panorama`：base「Panorama compact grid」/ zh-rCN「全景紧凑网格」/ zh-rTW「全景密集格狀」（zh-rTW 的紧凑网格叫「密集格狀」，跟着上游）。与 anikku-harmony 0022 同源（Anikku 还多改 `RelatedMangasCompactGrid` 和 `BrowseSourceSimpleToolbar`，Mihon 没有这两个界面）。
+
+补丁 0016 只改 `presentation-core/.../VerticalFastScroller.kt` 的 `VerticalStaggeredGridFastScroller`：估算段换成 `StaggeredGridMeasurements`（按索引记高度的 `HashMap` + `heightSum` + 单调递增的 `laneCount`）+ `rememberStaggeredGridEstimate(state)`（`remember(state) { derivedStateOf { … } }`）。要点：
+① 满行条目（搜索栏、分区头）按**宽度**识别——比屏上最窄格子宽 1.5 倍以上就不计高度（`LazyStaggeredGridItemInfo` 不暴露 span；子代理最初用 `@Suppress("INVISIBLE_REFERENCE")` 强转 `LazyStaggeredGridMeasuredItem.span`，复核时改掉，内部 API 升级 Compose 就断）；
+② `visibleItemsInfo[i].offset.y` 是**相对内容起点**的（Compose `LazyStaggeredGridMeasure.kt` 里 `beforeContentPadding` 只在 `place()` 时加到 `contentOffset`），所以 `scrollOffset` 不加 `beforeContentPadding`、只在 `scrollRange` 里算两头 padding——0014 / Anikku 0020 原来的估算加了，静止时拇指不在最顶；
+③ 一次循环同时算 `beforeFirst` / `beforeAll`。`private class StaggeredGridEstimate(` 到 `// Harmony <--` 这一段与 anikku-harmony 0023 **逐字相同**（`diff` 校验过），改一处要同步另一处；两边仍只差拇指淡出那段（见 0014 说明）。
+
+补丁 0017 只改 `data/.../ReleaseServiceImpl.kt`：`latest()` 的 `releases.firstOrNull { 频道 }` 改成 `.filter { 频道 }.maxWithOrNull { a, b -> compareHarmonyVersions(a.version, b.version) }`，companion 里加与 `GetApplicationRelease` 同形的 `HARMONY_VERSION_REGEX` / `parseHarmonyVersion` / `compareHarmonyVersions`（解析不了的排最后）。没有把 domain 层的私有函数公开，是为了让这张补丁只碰一个文件、好重做；上游若把 `latest()` 的签名改了，保留「过滤频道 → 取最大」这两步即可。起因见 §9 2026-10-12：上游 v0.21.1 发布后定时任务自动发了 `v0.21.1-harmony-preview.1`，但镜像 `releases.json`（GitHub API 原样）把 `v0.21.0-harmony-preview.2` 排在它前面，用户的 App 只看得到后者。Anikku 的同病在 `GetApplicationRelease.getLatest()`（0024）；Animeko 0002 本来就是排序取最大。
+
 ### 5.2 加新补丁
 
 在套完现有补丁的源码树上直接改代码并 commit（message 写清楚为什么），`git format-patch -1` 导出，
@@ -257,7 +269,8 @@ gh release list --repo Xun2202/mihon-harmony
 | 现象 | 原因 / 处理 |
 | --- | --- |
 | `prepare-source.sh` 报 `Patch 000X ... does not apply` | 官方新版改动了补丁触及的代码。按 §5.1 rebase。先看 zsyou 仓库的 `.github/patches/harmony.patch` 是否已更新，可作参考 |
-| 编译报错在 `AppUpdateChecker.kt` / `ReleaseServiceImpl.kt` / `GetApplicationRelease.kt` | 官方改了这几个文件的接口（补丁 0002 是基于 v0.20.4 的近乎整文件改写）。取官方新版文件重新套用 0002 的意图 |
+| 编译报错在 `AppUpdateChecker.kt` / `ReleaseServiceImpl.kt` / `GetApplicationRelease.kt` | 官方改了这几个文件的接口（补丁 0002 是基于 v0.20.4 的近乎整文件改写）。取官方新版文件重新套用 0002 的意图；0008（镜像）/ 0017（取最大版本）也碰 `ReleaseServiceImpl.kt` |
+| 「检查更新」拿到的不是最新 tag | 0017 之前 `latest()` 取列表第一项，GitHub / 镜像的顺序不保证按版本。0017 起按 `(主, 次, 补丁, harmony 号)` 取最大；若再现，先 `curl` 镜像 `releases.json` 看 tag 是否符合 `v<x>.<y>.<z>-harmony(-preview).<n>`（不符合的排最后） |
 | 编译报错在 `Downloader.kt` | 补丁 0001 / 0003 / 0006 / 0010 / 0011 / 0013 都改它。参考各补丁 commit message 重做；v0.21.0 的 rebase 记录见 §9 2026-10-12 |
 | 点「下载」按钮没反应、队列为空也没提示 | 0011 之前的行为：磁盘上已有同名章节目录（收尾被打断的残留）但下载缓存不知道。0011 起会弹「未加入下载队列：…」，残留目录完整则直接登记为已下载，不完整则删掉重下。若仍无提示，看 crash log 末尾的「App log」小节有没有 `Removing incomplete leftover` / `already on disk` |
 | 导出的崩溃日志几乎全是 `BLASTBufferQueue` / `SurfaceDelegator` | 卓易通图形层噪音。0012 起会被过滤并在「--- Logcat (N … filtered) ---」里计数；应用自己的日志看末尾「App log」小节。出现新的刷屏 tag 就往 `CrashLogUtil.HARMONY_NOISE_MARKERS` 加子串 |

@@ -1,5 +1,5 @@
 # Applied in order by scripts/prepare-source.sh
-# Base: Mihon v0.21.0 (series rebased 2026-10-12; 0004 / 0009 dropped because upstream contains them)
+# Base: Mihon v0.21.1 (series rebased 2026-10-12 on v0.21.0; 0004 / 0009 dropped because upstream contains them; verified on v0.21.1)
 0001-downloads-rename-fallback-for-saf-without-renamedocument.patch
 0002-updater-use-harmony-fork-releases.patch
 0003-downloads-cbz-temp-in-private-cache.patch
@@ -12,3 +12,6 @@
 0012-crash-log-filter-harmony-noise-and-keep-app-log.patch
 0013-downloads-retried-failed-chapters-are-not-skipped.patch
 0014-library-panorama-comfortable-grid-display-mode.patch
+0015-library-panorama-compact-grid-display-mode.patch
+0016-presentation-staggered-fast-scroller-steady-thumb.patch
+0017-updater-pick-highest-harmony-version.patch

@@ -25,6 +25,8 @@
 - 已知限制：Android 15+ 规定「数据同步」类前台服务在后台累计只能跑 6 小时 / 24 小时，超时会被系统强制停止，在卓易通里表现为一次闪退（`ForegroundServiceDidNotStopInTimeException`）。preview.5 起下载服务改为声明「媒体播放」类（无时限），书架更新仍是数据同步类但不再会被冻结卡住；若关闭了上面的开关，就回到官方行为，大批量下载时建议隔几小时打开一次 App（切回前台会重置额度）。
 - 下载通知（preview.6 起）与 Animeko / Anikku 的鸿蒙版统一：标题「正在下载 N 个章节」，正文「下载：<速度>/s · <进度>%」+ 进度条，下拉展开显示当前的「漫画 - 章节」（开启「隐藏通知内容」时不显示）。
 - **下载到 100% 后变成「!」、队列里只写「Error」**（preview.8 及之前，目录模式下）：卓易通的文件夹不支持改名，章节收尾时 `<章节>_tmp/` → `<章节>/` 的改名回退是把每一页再抄一遍，任何一步失败都没有提示。preview.9 起：目录改名优先用系统的「移动文档」（不经 App 复制），都失败才复制，残留的旧目录会被合并而不是报「已存在」，复制后核对大小并自动重试两次；下载队列里出错的章节会在章节名下面直接显示原因（哪一页为什么失败 / 目录里多了什么 / 「下载被中断」），不用再导日志。与 anikku-harmony preview.8（补丁 0016）同一份代码。
+- **「检查更新」一直停在旧版本、没提示新的**（v0.21.1-harmony-preview.1 及之前）：更新器取的是 Release 列表里本频道的第一项，而 GitHub 的列表顺序不保证按版本，上游出补丁版（0.21.0 → 0.21.1）时旧系列的预览版会排在前面。v0.21.1-harmony-preview.2（补丁 0017）起按版本号比大小取最新。装着旧版的用户这一次需要手动到 [Releases](../../releases) 下载安装，之后的更新检查就正常了。
+- 书架 / 浏览页显示模式新增「**全景松散网格**」（v0.21.0-harmony-preview.2，补丁 0014）和「**全景紧凑网格**」（v0.21.1-harmony-preview.2，补丁 0015）：横版封面按 3:2 画、瀑布流排布、自动列宽 168 dp；右侧快速滚动条在瀑布流里不再抽搐（补丁 0016）。
 
 ## 包含的补丁
 
@@ -45,6 +47,9 @@
 | [`0012-crash-log-filter-harmony-noise-and-keep-app-log.patch`](./patches/0012-crash-log-filter-harmony-noise-and-keep-app-log.patch) | 崩溃日志去噪。卓易通会往应用自己的 logcat 里每分钟写几百条图形层错误（`BLASTBufferQueue` `Faking releaseBufferCallback`、`SurfaceDelegator client is nullptr`、`HwViewRootImpl`、`HwAssetManagerEx`、`Display : result is null`），几分钟就把缓冲区挤满，导出的日志里几乎看不到 Mihon 自己的任何一行。现在 `CrashLogUtil` 改为读 logcat 管道、按已知特征过滤并在小节标题写明过滤了多少条；新增 `HarmonyLogBuffer`（`LogcatLogger` 实现，内存里保留应用自己最近 600 行 `logcat {}` 输出，DEBUG 及以上、带时间戳），导出时作为「App log」小节附在末尾。与 anikku-harmony 0019 同一份文件。 |
 | [`0013-downloads-retried-failed-chapters-are-not-skipped.patch`](./patches/0013-downloads-retried-failed-chapters-are-not-skipped.patch) | 0011 的补充：点一个下载失败（「!」）的章节重试时走的是同一条入队路径，0011 把它算成「已在队列中」、每次重试都弹一次提示。现在队列里处于 ERROR 状态的章节记为 `retried`、不算跳过（真正的重启由调用方 `startDownloads()` 完成，行为不变）。anikku-harmony 0018 已把这一点合在里面。 |
 | [`0014-library-panorama-comfortable-grid-display-mode.patch`](./patches/0014-library-panorama-comfortable-grid-display-mode.patch) | 新增显示模式「全景松散网格」（书架的显示设置和浏览页的显示模式菜单里各多一项）。封面高宽比 ≤ 0.75 的横版封面按 3:2 的格子画、竖版仍按 2:3；格子用瀑布流（`LazyVerticalStaggeredGrid`）排，横竖混排时不留空；每行数量「自动」时列宽下限 168 dp（手机两列、约 530 dp 起三列），手动固定列数不变；封面横竖比按作品缓存到进程生命周期，滚回视野时不跳形状。从 anikku-harmony 0015 + 0020 移植（Anikku 的「全景封面」功能精简成一个显示模式）。Harmony 独有：上游 Mihon 没有这个功能，Animeko 没有这种网格。 |
+| [`0015-library-panorama-compact-grid-display-mode.patch`](./patches/0015-library-panorama-compact-grid-display-mode.patch) | 新增显示模式「全景紧凑网格」：标题压在封面上的紧凑网格，套用 0014 同一套全景规则（横版封面 3:2、瀑布流、自动列宽 168 dp、封面横竖比按作品缓存）。序列化 `COMPACT_GRID_PANORAMA`，排在紧凑网格之后；浏览页显示模式菜单同步多一项。与 anikku-harmony 0022 同源。 |
+| [`0016-presentation-staggered-fast-scroller-steady-thumb.patch`](./patches/0016-presentation-staggered-fast-scroller-steady-thumb.patch) | 修复全景网格上下滑动时右侧快速滚动条「抽搐」：0014 的瀑布流滚动条用当前屏上条目的平均高度估算位置，3:2 与 2:3 格子换进换出时平均值跟着变、拇指来回跳。现在按条目索引记住量过的高度（没见过的用累计平均），满行条目（搜索栏等，按比单格宽判断）不计入，列数取见过的最大值；`offset.y` 相对内容起点，顶部 padding 只算进总长度。与 anikku-harmony 0023 的估算段逐字相同。 |
+| [`0017-updater-pick-highest-harmony-version.patch`](./patches/0017-updater-pick-highest-harmony-version.patch) | 修复「检查更新」拉不到最新版：`ReleaseServiceImpl.latest()` 原来取本频道列表里的**第一项**，GitHub 的列表顺序并不保证按版本（镜像 `releases.json` 里 `v0.21.0-harmony-preview.2` 排在 `v0.21.1-harmony-preview.1` 前面），于是 App 一直提示旧版本。现在把本频道候选按 `(主, 次, 补丁, harmony 号)` 四元组比较取最大，解析不了的 tag 排最后。anikku-harmony 0024 同病同修；animeko-harmony 0002 本来就是排序取最大，不适用。 |
 
 补丁按 [`patches/series`](./patches/series) 的顺序套用。
 

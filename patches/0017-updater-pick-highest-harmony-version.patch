@@ -1,0 +1,74 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Xun2202 <98207886+Xun2202@users.noreply.github.com>
+Date: Mon, 12 Oct 2026 17:14:43 +0000
+Subject: [PATCH] updater: pick the highest harmony version instead of the
+ first listed
+
+ReleaseServiceImpl took the first release of the channel from the list. GitHub
+does not promise an order, and the mirror that CI writes to the repo branch is
+the API answer at the time it ran, so a preview of the last upstream version
+(v0.21.0-harmony-preview.2) could sit in front of the newer v0.21.1-harmony-preview.1
+and the app never offered the newer build.
+
+The candidates of the channel are now compared as (major, minor, patch, harmony)
+tuples, with the same shape GetApplicationRelease uses, and the greatest wins.
+Tags that do not parse sort last.
+
+Harmony-only: same bug in anikku-harmony (getLatest takes firstOrNull); Animeko
+0002 already sorts and takes the max.
+---
+ .../data/release/ReleaseServiceImpl.kt        | 34 ++++++++++++++++---
+ 1 file changed, 30 insertions(+), 4 deletions(-)
+
+diff --git a/data/src/main/java/tachiyomi/data/release/ReleaseServiceImpl.kt b/data/src/main/java/tachiyomi/data/release/ReleaseServiceImpl.kt
+index 8562faf..6f32255 100644
+--- a/data/src/main/java/tachiyomi/data/release/ReleaseServiceImpl.kt
++++ b/data/src/main/java/tachiyomi/data/release/ReleaseServiceImpl.kt
+@@ -33,10 +33,16 @@ class ReleaseServiceImpl(
+         // list recent releases and pick the newest one that belongs to our channel.
+         val releases = withContext(Dispatchers.IO) { listReleases(arguments.repository) }
+ 
+-        val release = releases.firstOrNull { candidate ->
+-            val isPreviewTag = PREVIEW_TAG_MARKER in candidate.version
+-            if (arguments.isNightly) isPreviewTag else !isPreviewTag && STABLE_TAG_MARKER in candidate.version
+-        } ?: return null
++        // GitHub does not guarantee the list order (a patch release of an older upstream
++        // version can be listed before a newer one), so compare the version tuples instead
++        // of trusting the first entry.
++        val release = releases
++            .filter { candidate ->
++                val isPreviewTag = PREVIEW_TAG_MARKER in candidate.version
++                if (arguments.isNightly) isPreviewTag else !isPreviewTag && STABLE_TAG_MARKER in candidate.version
++            }
++            .maxWithOrNull { a, b -> compareHarmonyVersions(a.version, b.version) }
++            ?: return null
+ 
+         val downloadLink = getDownloadLink(release = release, isFoss = arguments.isFoss) ?: return null
+ 
+@@ -104,6 +110,26 @@ class ReleaseServiceImpl(
+         private const val PREVIEW_TAG_MARKER = "-harmony-preview."
+         private const val STABLE_TAG_MARKER = "-harmony."
+ 
++        /** Same shape as the one in [GetApplicationRelease]: `v0.21.1-harmony-preview.2` -> `[0, 21, 1, 2]`. */
++        private val HARMONY_VERSION_REGEX = Regex("""(\d+)\.(\d+)\.(\d+)-harmony(?:-preview)?\.(\d+)""")
++
++        private fun parseHarmonyVersion(value: String): List<Int>? {
++            val match = HARMONY_VERSION_REGEX.find(value) ?: return null
++            return match.groupValues.drop(1).map { it.toInt() }
++        }
++
++        /** Tags that do not parse sort below every parsable tag. */
++        private fun compareHarmonyVersions(a: String, b: String): Int {
++            val x = parseHarmonyVersion(a)
++            val y = parseHarmonyVersion(b)
++            if (x == null || y == null) return compareValues(x != null, y != null)
++            for (index in x.indices) {
++                val diff = x[index].compareTo(y[index])
++                if (diff != 0) return diff
++            }
++            return 0
++        }
++
+         /** Short timeouts for the mirror: when it is blocked, fall back to the API without a long wait. */
+         private const val MIRROR_TIMEOUT_SECONDS = 10L
+ 

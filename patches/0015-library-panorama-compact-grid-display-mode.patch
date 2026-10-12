@@ -1,0 +1,529 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Xun2202 <98207886+Xun2202@users.noreply.github.com>
+Date: Mon, 12 Oct 2026 16:54:26 +0000
+Subject: [PATCH] library: add a panorama compact grid display mode
+
+Wide covers in the compact grid stretch every row to the tallest cell
+because the title is drawn on the cover. CompactGridPanorama keeps that
+overlay and, like the panorama comfortable grid, draws a cover as 3:2
+when its height/width is at most 0.75, in a staggered grid whose
+automatic columns are 168 dp. Cover orientation stays cached for the
+process lifetime so a cell keeps its shape after it scrolls away.
+
+The mode serializes as COMPACT_GRID_PANORAMA and has a branch at every
+LibraryDisplayMode site: the library pager, library settings (directly
+after the compact grid), browse content, and the browse toolbar (the
+same ViewCompact icon, with the menu item directly after compact grid).
+
+Harmony-only: paired with the same CompactGridPanorama mode being added on Anikku; Animeko has no such grid.
+---
+ .../presentation/browse/BrowseSourceScreen.kt |  13 ++
+ .../components/BrowseSourceCompactGrid.kt     |  53 ++++++++
+ .../browse/components/BrowseSourceToolbar.kt  |  12 ++
+ .../library/LibrarySettingsDialog.kt          |   3 +
+ .../library/components/CommonMangaItem.kt     |  42 ++++++-
+ .../library/components/LibraryCompactGrid.kt  | 117 +++++++++++++-----
+ .../library/components/LibraryPager.kt        |  17 +++
+ .../library/model/LibraryDisplayMode.kt       |  22 +++-
+ .../domain/library/model/LibraryFlagsTest.kt  |   2 +-
+ .../moko-resources/base/strings.xml           |   1 +
+ .../moko-resources/zh-rCN/strings.xml         |   1 +
+ .../moko-resources/zh-rTW/strings.xml         |   1 +
+ 12 files changed, 248 insertions(+), 36 deletions(-)
+
+diff --git a/app/src/main/java/eu/kanade/presentation/browse/BrowseSourceScreen.kt b/app/src/main/java/eu/kanade/presentation/browse/BrowseSourceScreen.kt
+index ac81717..3f1acdd 100644
+--- a/app/src/main/java/eu/kanade/presentation/browse/BrowseSourceScreen.kt
++++ b/app/src/main/java/eu/kanade/presentation/browse/BrowseSourceScreen.kt
+@@ -159,6 +159,19 @@ fun BrowseSourceContent(
+                 onMangaLongClick = onMangaLongClick,
+             )
+         }
++        // Harmony -->
++        LibraryDisplayMode.CompactGridPanorama -> {
++            BrowseSourceCompactGrid(
++                mangaList = mangaList,
++                columns = columns,
++                contentPadding = contentPadding,
++                onMangaClick = onMangaClick,
++                onMangaLongClick = onMangaLongClick,
++                usePanoramaCover = true,
++                columnCount = columnCount,
++            )
++        }
++        // Harmony <--
+     }
+ }
+ 
+diff --git a/app/src/main/java/eu/kanade/presentation/browse/components/BrowseSourceCompactGrid.kt b/app/src/main/java/eu/kanade/presentation/browse/components/BrowseSourceCompactGrid.kt
+index cc2da0b..e5d0be7 100644
+--- a/app/src/main/java/eu/kanade/presentation/browse/components/BrowseSourceCompactGrid.kt
++++ b/app/src/main/java/eu/kanade/presentation/browse/components/BrowseSourceCompactGrid.kt
+@@ -5,6 +5,9 @@ import androidx.compose.foundation.layout.PaddingValues
+ import androidx.compose.foundation.lazy.grid.GridCells
+ import androidx.compose.foundation.lazy.grid.GridItemSpan
+ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
++import androidx.compose.foundation.lazy.staggeredgrid.LazyVerticalStaggeredGrid
++import androidx.compose.foundation.lazy.staggeredgrid.StaggeredGridCells
++import androidx.compose.foundation.lazy.staggeredgrid.StaggeredGridItemSpan
+ import androidx.compose.runtime.Composable
+ import androidx.compose.runtime.collectAsState
+ import androidx.compose.runtime.getValue
+@@ -13,6 +16,8 @@ import androidx.paging.LoadState
+ import androidx.paging.compose.LazyPagingItems
+ import eu.kanade.presentation.library.components.CommonMangaItemDefaults
+ import eu.kanade.presentation.library.components.MangaCompactGridItem
++import eu.kanade.presentation.library.components.PanoramaGridMinColumnWidth
++import eu.kanade.presentation.library.components.rememberCoverRatio
+ import kotlinx.coroutines.flow.StateFlow
+ import tachiyomi.domain.manga.model.Manga
+ import tachiyomi.domain.manga.model.MangaCover
+@@ -25,7 +30,48 @@ fun BrowseSourceCompactGrid(
+     contentPadding: PaddingValues,
+     onMangaClick: (Manga) -> Unit,
+     onMangaLongClick: (Manga) -> Unit,
++    // Harmony -->
++    usePanoramaCover: Boolean = false,
++    columnCount: Int = 0,
++    // Harmony <--
+ ) {
++    // Harmony -->
++    if (usePanoramaCover) {
++        LazyVerticalStaggeredGrid(
++            columns = if (columnCount == 0) {
++                StaggeredGridCells.Adaptive(PanoramaGridMinColumnWidth)
++            } else {
++                StaggeredGridCells.Fixed(columnCount)
++            },
++            contentPadding = contentPadding + PaddingValues(8.dp),
++            verticalItemSpacing = CommonMangaItemDefaults.GridVerticalSpacer,
++            horizontalArrangement = Arrangement.spacedBy(CommonMangaItemDefaults.GridHorizontalSpacer),
++        ) {
++            if (mangaList.loadState.prepend is LoadState.Loading) {
++                item(span = StaggeredGridItemSpan.FullLine) {
++                    BrowseSourceLoadingItem()
++                }
++            }
++
++            items(count = mangaList.itemCount) { index ->
++                val manga by mangaList[index]?.collectAsState() ?: return@items
++                BrowseSourceCompactGridItem(
++                    manga = manga,
++                    onClick = { onMangaClick(manga) },
++                    onLongClick = { onMangaLongClick(manga) },
++                    usePanoramaCover = true,
++                )
++            }
++
++            if (mangaList.loadState.refresh is LoadState.Loading || mangaList.loadState.append is LoadState.Loading) {
++                item(span = StaggeredGridItemSpan.FullLine) {
++                    BrowseSourceLoadingItem()
++                }
++            }
++        }
++        return
++    }
++    // Harmony <--
+     LazyVerticalGrid(
+         columns = columns,
+         contentPadding = contentPadding + PaddingValues(8.dp),
+@@ -60,6 +106,9 @@ private fun BrowseSourceCompactGridItem(
+     manga: Manga,
+     onClick: () -> Unit = {},
+     onLongClick: () -> Unit = onClick,
++    // Harmony -->
++    usePanoramaCover: Boolean = false,
++    // Harmony <--
+ ) {
+     MangaCompactGridItem(
+         title = manga.title,
+@@ -76,5 +125,9 @@ private fun BrowseSourceCompactGridItem(
+         },
+         onLongClick = onLongClick,
+         onClick = onClick,
++        // Harmony -->
++        usePanoramaCover = usePanoramaCover,
++        coverRatio = rememberCoverRatio(manga.id, usePanoramaCover),
++        // Harmony <--
+     )
+ }
+diff --git a/app/src/main/java/eu/kanade/presentation/browse/components/BrowseSourceToolbar.kt b/app/src/main/java/eu/kanade/presentation/browse/components/BrowseSourceToolbar.kt
+index f5f348a..3ac4d5d 100644
+--- a/app/src/main/java/eu/kanade/presentation/browse/components/BrowseSourceToolbar.kt
++++ b/app/src/main/java/eu/kanade/presentation/browse/components/BrowseSourceToolbar.kt
+@@ -66,6 +66,9 @@ fun BrowseSourceToolbar(
+                                 // Harmony <--
+                                 -> MaterialSymbols.RoundedFilled.ViewModule
+                                 LibraryDisplayMode.CompactGrid,
++                                // Harmony -->
++                                LibraryDisplayMode.CompactGridPanorama,
++                                // Harmony <--
+                                 LibraryDisplayMode.CoverOnlyGrid,
+                                 -> MaterialSymbols.RoundedFilled.ViewCompact
+                             },
+@@ -125,6 +128,15 @@ fun BrowseSourceToolbar(
+                     selectingDisplayMode = false
+                     onDisplayModeChange(LibraryDisplayMode.CompactGrid)
+                 }
++                // Harmony -->
++                RadioMenuItem(
++                    text = { Text(text = stringResource(MR.strings.action_display_grid_panorama)) },
++                    isChecked = displayMode == LibraryDisplayMode.CompactGridPanorama,
++                ) {
++                    selectingDisplayMode = false
++                    onDisplayModeChange(LibraryDisplayMode.CompactGridPanorama)
++                }
++                // Harmony <--
+                 RadioMenuItem(
+                     text = { Text(text = stringResource(MR.strings.action_display_list)) },
+                     isChecked = displayMode == LibraryDisplayMode.List,
+diff --git a/app/src/main/java/eu/kanade/presentation/library/LibrarySettingsDialog.kt b/app/src/main/java/eu/kanade/presentation/library/LibrarySettingsDialog.kt
+index c4a6727..30164c5 100644
+--- a/app/src/main/java/eu/kanade/presentation/library/LibrarySettingsDialog.kt
++++ b/app/src/main/java/eu/kanade/presentation/library/LibrarySettingsDialog.kt
+@@ -219,6 +219,9 @@ private fun ColumnScope.SortPage(
+ 
+ private val displayModes = listOf(
+     MR.strings.action_display_grid to LibraryDisplayMode.CompactGrid,
++    // Harmony -->
++    MR.strings.action_display_grid_panorama to LibraryDisplayMode.CompactGridPanorama,
++    // Harmony <--
+     MR.strings.action_display_comfortable_grid to LibraryDisplayMode.ComfortableGrid,
+     // Harmony -->
+     MR.strings.action_display_comfortable_grid_panorama to LibraryDisplayMode.ComfortableGridPanorama,
+diff --git a/app/src/main/java/eu/kanade/presentation/library/components/CommonMangaItem.kt b/app/src/main/java/eu/kanade/presentation/library/components/CommonMangaItem.kt
+index 2a8067b..78332b1 100644
+--- a/app/src/main/java/eu/kanade/presentation/library/components/CommonMangaItem.kt
++++ b/app/src/main/java/eu/kanade/presentation/library/components/CommonMangaItem.kt
+@@ -86,20 +86,50 @@ fun MangaCompactGridItem(
+     coverAlpha: Float = 1f,
+     coverBadgeStart: @Composable (RowScope.() -> Unit)? = null,
+     coverBadgeEnd: @Composable (RowScope.() -> Unit)? = null,
++    // Harmony -->
++    usePanoramaCover: Boolean = false,
++    coverRatio: MutableFloatState = remember { mutableFloatStateOf(1f) },
++    // Harmony <--
+ ) {
++    // Harmony -->
++    val wideCover = usePanoramaCover && coverRatio.floatValue <= RATIO_SWITCH_TO_PANORAMA
++    val onCoverLoaded: ((AsyncImagePainter.State.Success) -> Unit)? = if (usePanoramaCover) {
++        { result ->
++            val image = result.result.image
++            coverRatio.floatValue = image.height.toFloat() / image.width
++        }
++    } else {
++        null
++    }
++    // Harmony <--
+     GridItemSelectable(
+         isSelected = isSelected,
+         onClick = onClick,
+         onLongClick = onLongClick,
+     ) {
+         MangaGridCover(
++            // Harmony -->
++            ratio = if (wideCover) MangaCover.Panorama.ratio else MangaCover.Book.ratio,
++            // Harmony <--
+             cover = {
+-                MangaCover.Book(
+-                    modifier = Modifier
+-                        .fillMaxWidth()
+-                        .alpha(if (isSelected) GRID_SELECTED_COVER_ALPHA else coverAlpha),
+-                    data = coverData,
+-                )
++                // Harmony -->
++                val coverModifier = Modifier
++                    .fillMaxWidth()
++                    .alpha(if (isSelected) GRID_SELECTED_COVER_ALPHA else coverAlpha)
++                if (wideCover) {
++                    MangaCover.Panorama(
++                        modifier = coverModifier,
++                        data = coverData,
++                        onCoverLoaded = onCoverLoaded,
++                    )
++                } else {
++                    MangaCover.Book(
++                        modifier = coverModifier,
++                        data = coverData,
++                        onCoverLoaded = onCoverLoaded,
++                    )
++                }
++                // Harmony <--
+             },
+             badgesStart = coverBadgeStart,
+             badgesEnd = coverBadgeEnd,
+diff --git a/app/src/main/java/eu/kanade/presentation/library/components/LibraryCompactGrid.kt b/app/src/main/java/eu/kanade/presentation/library/components/LibraryCompactGrid.kt
+index 5de0912..e08c0c1 100644
+--- a/app/src/main/java/eu/kanade/presentation/library/components/LibraryCompactGrid.kt
++++ b/app/src/main/java/eu/kanade/presentation/library/components/LibraryCompactGrid.kt
+@@ -3,6 +3,7 @@ package eu.kanade.presentation.library.components
+ import androidx.compose.foundation.layout.PaddingValues
+ import androidx.compose.foundation.layout.fillMaxSize
+ import androidx.compose.foundation.lazy.grid.items
++import androidx.compose.foundation.lazy.staggeredgrid.items
+ import androidx.compose.runtime.Composable
+ import androidx.compose.ui.Modifier
+ import eu.kanade.tachiyomi.ui.library.LibraryItem
+@@ -21,7 +22,42 @@ internal fun LibraryCompactGrid(
+     onClickContinueReading: ((LibraryManga) -> Unit)?,
+     searchQuery: String?,
+     onGlobalSearchClicked: () -> Unit,
++    // Harmony -->
++    usePanoramaCover: Boolean = false,
++    // Harmony <--
+ ) {
++    // Harmony -->
++    // Panorama mode mixes 3:2 and 2:3 cells. A regular grid makes every row as tall as its tallest
++    // cell, which leaves a big hole under each wide cover that shares a row with a book cover; a
++    // staggered grid lets each lane flow on its own. Wide covers also need wider auto columns than
++    // the 128 dp meant for book covers, otherwise they come out short and cramped.
++    if (usePanoramaCover) {
++        LazyLibraryStaggeredGrid(
++            modifier = Modifier.fillMaxSize(),
++            columns = columns,
++            minColumnWidth = PanoramaGridMinColumnWidth,
++            contentPadding = contentPadding,
++        ) {
++            globalSearchItem(searchQuery, onGlobalSearchClicked)
++
++            items(
++                items = items,
++                contentType = { "library_compact_grid_item" },
++            ) { libraryItem ->
++                LibraryCompactGridItem(
++                    libraryItem = libraryItem,
++                    showTitle = showTitle,
++                    isSelected = libraryItem.libraryManga.manga.id in selection,
++                    onClick = onClick,
++                    onLongClick = onLongClick,
++                    onClickContinueReading = onClickContinueReading,
++                    usePanoramaCover = true,
++                )
++            }
++        }
++        return
++    }
++    // Harmony <--
+     LazyLibraryGrid(
+         modifier = Modifier.fillMaxSize(),
+         columns = columns,
+@@ -33,35 +69,60 @@ internal fun LibraryCompactGrid(
+             items = items,
+             contentType = { "library_compact_grid_item" },
+         ) { libraryItem ->
+-            val manga = libraryItem.libraryManga.manga
+-            MangaCompactGridItem(
+-                isSelected = manga.id in selection,
+-                title = manga.title.takeIf { showTitle },
+-                coverData = MangaCover(
+-                    mangaId = manga.id,
+-                    sourceId = manga.source,
+-                    isMangaFavorite = manga.favorite,
+-                    url = manga.thumbnailUrl,
+-                    lastModified = manga.coverLastModified,
+-                ),
+-                coverBadgeStart = {
+-                    DownloadsBadge(count = libraryItem.badges.downloadCount)
+-                    UnreadBadge(count = libraryItem.badges.unreadCount)
+-                },
+-                coverBadgeEnd = {
+-                    LanguageBadge(
+-                        isLocal = libraryItem.badges.isLocal,
+-                        sourceLanguage = libraryItem.badges.sourceLanguage,
+-                    )
+-                },
+-                onLongClick = { onLongClick(libraryItem.libraryManga) },
+-                onClick = { onClick(libraryItem.libraryManga) },
+-                onClickContinueReading = if (onClickContinueReading != null && libraryItem.unreadCount > 0) {
+-                    { onClickContinueReading(libraryItem.libraryManga) }
+-                } else {
+-                    null
+-                },
++            LibraryCompactGridItem(
++                libraryItem = libraryItem,
++                showTitle = showTitle,
++                isSelected = libraryItem.libraryManga.manga.id in selection,
++                onClick = onClick,
++                onLongClick = onLongClick,
++                onClickContinueReading = onClickContinueReading,
++                usePanoramaCover = usePanoramaCover,
+             )
+         }
+     }
+ }
++
++@Composable
++private fun LibraryCompactGridItem(
++    libraryItem: LibraryItem,
++    showTitle: Boolean,
++    isSelected: Boolean,
++    onClick: (LibraryManga) -> Unit,
++    onLongClick: (LibraryManga) -> Unit,
++    onClickContinueReading: ((LibraryManga) -> Unit)?,
++    usePanoramaCover: Boolean,
++) {
++    val manga = libraryItem.libraryManga.manga
++    MangaCompactGridItem(
++        isSelected = isSelected,
++        title = manga.title.takeIf { showTitle },
++        coverData = MangaCover(
++            mangaId = manga.id,
++            sourceId = manga.source,
++            isMangaFavorite = manga.favorite,
++            url = manga.thumbnailUrl,
++            lastModified = manga.coverLastModified,
++        ),
++        coverBadgeStart = {
++            DownloadsBadge(count = libraryItem.badges.downloadCount)
++            UnreadBadge(count = libraryItem.badges.unreadCount)
++        },
++        coverBadgeEnd = {
++            LanguageBadge(
++                isLocal = libraryItem.badges.isLocal,
++                sourceLanguage = libraryItem.badges.sourceLanguage,
++            )
++        },
++        onLongClick = { onLongClick(libraryItem.libraryManga) },
++        onClick = { onClick(libraryItem.libraryManga) },
++        onClickContinueReading = if (onClickContinueReading != null && libraryItem.unreadCount > 0) {
++            { onClickContinueReading(libraryItem.libraryManga) }
++        } else {
++            null
++        },
++        // Harmony -->
++        usePanoramaCover = usePanoramaCover,
++        coverRatio = rememberCoverRatio(manga.id, usePanoramaCover),
++        // Harmony <--
++    )
++}
+diff --git a/app/src/main/java/eu/kanade/presentation/library/components/LibraryPager.kt b/app/src/main/java/eu/kanade/presentation/library/components/LibraryPager.kt
+index 7b11ed7..7d5cd2d 100644
+--- a/app/src/main/java/eu/kanade/presentation/library/components/LibraryPager.kt
++++ b/app/src/main/java/eu/kanade/presentation/library/components/LibraryPager.kt
+@@ -105,6 +105,23 @@ fun LibraryPager(
+                     onGlobalSearchClicked = onGlobalSearchClicked,
+                 )
+             }
++            // Harmony -->
++            LibraryDisplayMode.CompactGridPanorama -> {
++                LibraryCompactGrid(
++                    items = items,
++                    showTitle = true,
++                    columns = columns,
++                    contentPadding = contentPadding,
++                    selection = selection,
++                    onClick = onClickManga,
++                    onLongClick = onLongClickManga,
++                    onClickContinueReading = onClickContinueReading,
++                    searchQuery = searchQuery,
++                    onGlobalSearchClicked = onGlobalSearchClicked,
++                    usePanoramaCover = true,
++                )
++            }
++            // Harmony <--
+             LibraryDisplayMode.ComfortableGrid -> {
+                 LibraryComfortableGrid(
+                     items = items,
+diff --git a/domain/src/main/java/tachiyomi/domain/library/model/LibraryDisplayMode.kt b/domain/src/main/java/tachiyomi/domain/library/model/LibraryDisplayMode.kt
+index 6f64b06..cf59e7f 100644
+--- a/domain/src/main/java/tachiyomi/domain/library/model/LibraryDisplayMode.kt
++++ b/domain/src/main/java/tachiyomi/domain/library/model/LibraryDisplayMode.kt
+@@ -3,6 +3,11 @@ package tachiyomi.domain.library.model
+ sealed interface LibraryDisplayMode {
+ 
+     data object CompactGrid : LibraryDisplayMode
++
++    // Harmony -->
++    data object CompactGridPanorama : LibraryDisplayMode
++    // Harmony <--
++
+     data object ComfortableGrid : LibraryDisplayMode
+ 
+     // Harmony -->
+@@ -23,7 +28,16 @@ sealed interface LibraryDisplayMode {
+     }
+ 
+     companion object {
+-        val values by lazy { setOf(CompactGrid, ComfortableGrid, ComfortableGridPanorama, List, CoverOnlyGrid) }
++        val values by lazy {
++            setOf(
++                CompactGrid,
++                CompactGridPanorama,
++                ComfortableGrid,
++                ComfortableGridPanorama,
++                List,
++                CoverOnlyGrid,
++            )
++        }
+         val default = CompactGrid
+ 
+         fun deserialize(serialized: String): LibraryDisplayMode {
+@@ -33,6 +47,9 @@ sealed interface LibraryDisplayMode {
+                 "COMFORTABLE_GRID_PANORAMA" -> ComfortableGridPanorama
+                 // Harmony <--
+                 "COMPACT_GRID" -> CompactGrid
++                // Harmony -->
++                "COMPACT_GRID_PANORAMA" -> CompactGridPanorama
++                // Harmony <--
+                 "COVER_ONLY_GRID" -> CoverOnlyGrid
+                 "LIST" -> List
+                 else -> default
+@@ -47,6 +64,9 @@ sealed interface LibraryDisplayMode {
+             ComfortableGridPanorama -> "COMFORTABLE_GRID_PANORAMA"
+             // Harmony <--
+             CompactGrid -> "COMPACT_GRID"
++            // Harmony -->
++            CompactGridPanorama -> "COMPACT_GRID_PANORAMA"
++            // Harmony <--
+             CoverOnlyGrid -> "COVER_ONLY_GRID"
+             List -> "LIST"
+         }
+diff --git a/domain/src/test/java/tachiyomi/domain/library/model/LibraryFlagsTest.kt b/domain/src/test/java/tachiyomi/domain/library/model/LibraryFlagsTest.kt
+index 7e6c79c..95c7b0c 100644
+--- a/domain/src/test/java/tachiyomi/domain/library/model/LibraryFlagsTest.kt
++++ b/domain/src/test/java/tachiyomi/domain/library/model/LibraryFlagsTest.kt
+@@ -11,7 +11,7 @@ class LibraryFlagsTest {
+ 
+     @Test
+     fun `Check the amount of flags`() {
+-        LibraryDisplayMode.values.size shouldBe 5
++        LibraryDisplayMode.values.size shouldBe 6
+         LibrarySort.types.size shouldBe 10
+         LibrarySort.directions.size shouldBe 2
+     }
+diff --git a/i18n/src/commonMain/moko-resources/base/strings.xml b/i18n/src/commonMain/moko-resources/base/strings.xml
+index 8acbebc..4ae09fb 100644
+--- a/i18n/src/commonMain/moko-resources/base/strings.xml
++++ b/i18n/src/commonMain/moko-resources/base/strings.xml
+@@ -121,6 +121,7 @@
+     <string name="action_display_grid">Compact grid</string>
+     <string name="action_display_comfortable_grid">Comfortable grid</string>
+     <string name="action_display_comfortable_grid_panorama">Panorama comfortable grid</string>
++    <string name="action_display_grid_panorama">Panorama compact grid</string>
+     <string name="action_display_list">List</string>
+     <string name="action_display_cover_only_grid">Cover-only grid</string>
+     <string name="action_display_download_badge">Downloaded chapters</string>
+diff --git a/i18n/src/commonMain/moko-resources/zh-rCN/strings.xml b/i18n/src/commonMain/moko-resources/zh-rCN/strings.xml
+index 1da8228..1797276 100644
+--- a/i18n/src/commonMain/moko-resources/zh-rCN/strings.xml
++++ b/i18n/src/commonMain/moko-resources/zh-rCN/strings.xml
+@@ -369,6 +369,7 @@
+     <string name="action_migrate">迁移</string>
+     <string name="action_display_comfortable_grid">松散网格</string>
+     <string name="action_display_comfortable_grid_panorama">全景松散网格</string>
++    <string name="action_display_grid_panorama">全景紧凑网格</string>
+     <string name="tabs_header">标签</string>
+     <string name="action_display_show_tabs">显示分类标签</string>
+     <string name="page_list_empty_error">没有图片</string>
+diff --git a/i18n/src/commonMain/moko-resources/zh-rTW/strings.xml b/i18n/src/commonMain/moko-resources/zh-rTW/strings.xml
+index f9c47f4..2fd39e4 100644
+--- a/i18n/src/commonMain/moko-resources/zh-rTW/strings.xml
++++ b/i18n/src/commonMain/moko-resources/zh-rTW/strings.xml
+@@ -308,6 +308,7 @@
+     <string name="pref_category_display">檢視</string>
+     <string name="action_display_comfortable_grid">鬆散格狀</string>
+     <string name="action_display_comfortable_grid_panorama">全景鬆散格狀</string>
++    <string name="action_display_grid_panorama">全景密集格狀</string>
+     <string name="pref_category_for_this_series">套用於這部作品</string>
+     <string name="pref_category_reading">翻閱</string>
+     <string name="pref_category_library_update">全域更新</string>
