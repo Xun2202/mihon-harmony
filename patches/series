@@ -9,3 +9,5 @@
 0008-updater-release-mirror.patch
 0009-build-flexible-adapter-from-maven-central.patch
 0010-downloads-finalize-with-fewer-saf-copies-and-error-reasons.patch
+0011-downloads-never-skip-silently-reuse-or-replace-leftover-folders.patch
+0012-crash-log-filter-harmony-noise-and-keep-app-log.patch

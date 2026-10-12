@@ -1,0 +1,357 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Xun2202 <98207886+Xun2202@users.noreply.github.com>
+Date: Mon, 12 Oct 2026 04:57:29 +0000
+Subject: [PATCH] downloads: never drop a chapter silently; reuse or
+ replace folders left on disk
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Tapping "download" on a chapter did nothing when a folder (or .cbz) for it
+already existed on disk although the chapter list showed it as not
+downloaded: Downloader.queueChapters filtered such chapters out with a
+storage lookup and returned nothing, so the button flashed and the queue
+stayed empty. On 卓易通 this happens after an interrupted finalisation
+(process frozen or killed while the pages were being moved into the final
+folder) because the download cache only learns about folders on its hourly
+renewal.
+
+- queueChapters decides "already downloaded" from the download cache (the
+  same information the chapter list shows) and reports what happened:
+  queued / already downloaded / already in the queue / source not
+  installed.
+- downloadChapter checks the disk right after the page list is known: a
+  complete folder or archive (page count >= pages) is registered in the
+  cache as downloaded without re-downloading, an incomplete leftover is
+  removed and the download starts from scratch. Temporary directories are
+  only created afterwards.
+- The manga screen shows a snackbar when chapters were not queued, with
+  the reason.
+
+Shared helper isCountedPageFile() keeps the completeness rule in one place.
+Anikku has the same filter in queueEpisodes (anikku-harmony 0018).
+---
+ .../data/download/DownloadManager.kt          |   5 +-
+ .../tachiyomi/data/download/Downloader.kt     | 162 ++++++++++++++----
+ .../tachiyomi/ui/manga/MangaViewModel.kt      |  22 ++-
+ .../moko-resources/base/strings.xml           |   5 +
+ .../moko-resources/zh-rCN/strings.xml         |   5 +
+ .../moko-resources/zh-rTW/strings.xml         |   5 +
+ 6 files changed, 169 insertions(+), 35 deletions(-)
+
+diff --git a/app/src/main/java/eu/kanade/tachiyomi/data/download/DownloadManager.kt b/app/src/main/java/eu/kanade/tachiyomi/data/download/DownloadManager.kt
+index 8255b22..685f2e8 100644
+--- a/app/src/main/java/eu/kanade/tachiyomi/data/download/DownloadManager.kt
++++ b/app/src/main/java/eu/kanade/tachiyomi/data/download/DownloadManager.kt
+@@ -131,9 +131,10 @@ class DownloadManager(
+      * @param manga the manga of the chapters.
+      * @param chapters the list of chapters to enqueue.
+      * @param autoStart whether to start the downloader after enqueing the chapters.
++     * @return how many chapters were queued and how many were skipped, and why.
+      */
+-    fun downloadChapters(manga: Manga, chapters: List<Chapter>, autoStart: Boolean = true) {
+-        downloader.queueChapters(manga, chapters, autoStart)
++    fun downloadChapters(manga: Manga, chapters: List<Chapter>, autoStart: Boolean = true): Downloader.QueueResult {
++        return downloader.queueChapters(manga, chapters, autoStart)
+     }
+ 
+     /**
+diff --git a/app/src/main/java/eu/kanade/tachiyomi/data/download/Downloader.kt b/app/src/main/java/eu/kanade/tachiyomi/data/download/Downloader.kt
+index 8f405e4..d19cef1 100644
+--- a/app/src/main/java/eu/kanade/tachiyomi/data/download/Downloader.kt
++++ b/app/src/main/java/eu/kanade/tachiyomi/data/download/Downloader.kt
+@@ -41,6 +41,7 @@ import kotlinx.coroutines.launch
+ import kotlinx.coroutines.supervisorScope
+ import logcat.LogPriority
+ import mihon.core.archive.ZipWriter
++import mihon.core.archive.archiveReader
+ import nl.adaptivity.xmlutil.serialization.XML
+ import okhttp3.Response
+ import tachiyomi.core.common.i18n.stringResource
+@@ -286,21 +287,26 @@ class Downloader(
+      * @param chapters the list of chapters to download.
+      * @param autoStart whether to start the downloader after enqueing the chapters.
+      */
+-    fun queueChapters(manga: Manga, chapters: List<Chapter>, autoStart: Boolean) {
+-        if (chapters.isEmpty()) return
++    fun queueChapters(manga: Manga, chapters: List<Chapter>, autoStart: Boolean): QueueResult {
++        if (chapters.isEmpty()) return QueueResult()
+ 
+-        val source = sourceManager.get(manga.source) as? HttpSource ?: return
++        val source = sourceManager.get(manga.source) as? HttpSource
++            ?: return QueueResult(sourceUnavailable = chapters.size)
+         val wasEmpty = queueState.value.isEmpty()
+-        val chaptersToQueue = chapters.asSequence()
+-            // Filter out those already downloaded.
+-            .filter { provider.findChapterDir(it.name, it.scanlator, it.url, manga.title, source) == null }
++        // Harmony: decide "already downloaded" from the download cache (what the chapter
++        // list shows) instead of probing storage. A folder the cache does not know about
++        // (interrupted finalisation, stale cache) is handled by downloadChapter, which
++        // reuses it when complete and replaces it otherwise.
++        val (alreadyDownloaded, notDownloaded) = chapters.partition {
++            cache.isChapterDownloaded(it.name, it.scanlator, it.url, manga.title, manga.source, skipCache = false)
++        }
++        val queuedChapterIds = queueState.value.map { it.chapter.id }.toSet()
++        val (alreadyQueued, toQueue) = notDownloaded.partition { it.id in queuedChapterIds }
++        val chaptersToQueue = toQueue
+             // Add chapters to queue from the start.
+             .sortedByDescending { it.sourceOrder }
+-            // Filter out those already enqueued.
+-            .filter { chapter -> queueState.value.none { it.chapter.id == chapter.id } }
+             // Create a download for each one.
+             .map { Download(source, manga, it) }
+-            .toList()
+ 
+         if (chaptersToQueue.isNotEmpty()) {
+             addAllToQueue(chaptersToQueue)
+@@ -329,6 +335,25 @@ class Downloader(
+                 DownloadJob.start(context)
+             }
+         }
++        return QueueResult(
++            queued = chaptersToQueue.size,
++            alreadyDownloaded = alreadyDownloaded.size,
++            alreadyQueued = alreadyQueued.size,
++        )
++    }
++
++    /**
++     * Harmony: outcome of [queueChapters], so callers can tell the user why nothing
++     * started instead of silently dropping chapters.
++     */
++    data class QueueResult(
++        val queued: Int = 0,
++        val alreadyDownloaded: Int = 0,
++        val alreadyQueued: Int = 0,
++        val sourceUnavailable: Int = 0,
++    ) {
++        val skipped: Int
++            get() = alreadyDownloaded + alreadyQueued + sourceUnavailable
+     }
+ 
+     /**
+@@ -356,19 +381,6 @@ class Downloader(
+             download.chapter.scanlator,
+             download.chapter.url,
+         )
+-        // Harmony: in CBZ mode download pages into private app cache so the
+-        // HarmonyOS gallery (which ignores .nomedia) never sees loose images.
+-        val tmpDir = if (downloadPreferences.saveChaptersAsCBZ.get()) {
+-            val cacheTmpDir = File(
+-                context.cacheDir,
+-                "harmony_download_tmp/${download.manga.id}/$chapterDirname$TMP_DIR_SUFFIX",
+-            )
+-            cacheTmpDir.mkdirs()
+-            UniFile.fromFile(cacheTmpDir)!!
+-        } else {
+-            mangaDir.createDirectory(chapterDirname + TMP_DIR_SUFFIX)!!
+-        }
+-
+         try {
+             // If the page list already exists, start from the file
+             val pageList = download.pages ?: run {
+@@ -384,6 +396,28 @@ class Downloader(
+                 reIndexedPages
+             }
+ 
++            // Harmony: the chapter may already be on disk without the cache knowing
++            // (finalisation interrupted by a process kill, stale cache). Reuse a complete
++            // copy, remove an incomplete one; never skip silently.
++            if (reuseOrRemoveExistingChapter(download, mangaDir, chapterDirname, pageList.size)) {
++                download.status = Download.State.DOWNLOADED
++                return
++            }
++
++            // Harmony: in CBZ mode download pages into private app cache so the
++            // HarmonyOS gallery (which ignores .nomedia) never sees loose images.
++            val tmpDir = if (downloadPreferences.saveChaptersAsCBZ.get()) {
++                val cacheTmpDir = File(
++                    context.cacheDir,
++                    "harmony_download_tmp/${download.manga.id}/$chapterDirname$TMP_DIR_SUFFIX",
++                )
++                cacheTmpDir.mkdirs()
++                UniFile.fromFile(cacheTmpDir)!!
++            } else {
++                mangaDir.createDirectory(chapterDirname + TMP_DIR_SUFFIX)
++                    ?: throw IOException("Failed to create '$chapterDirname$TMP_DIR_SUFFIX'")
++            }
++
+             download.status = Download.State.DOWNLOADING
+ 
+             // Start downloading images, consider we can have downloaded images already
+@@ -645,17 +679,83 @@ class Downloader(
+         }
+ 
+         // Ensure that the chapter folder has all the pages
+-        val downloadedImagesCount = tmpDir.listFiles().orEmpty().count {
+-            val fileName = it.name.orEmpty()
+-            when {
+-                fileName in listOf(COMIC_INFO_FILE, NOMEDIA_FILE) -> false
+-                fileName.endsWith(".tmp") -> false
+-                // Only count the first split page and not the others
+-                fileName.contains("__") && !fileName.endsWith("__001.jpg") -> false
+-                else -> true
++        val downloadedImagesCount = tmpDir.listFiles().orEmpty().count { isCountedPageFile(it.name.orEmpty()) }
++        return downloadedImagesCount == downloadPageCount
++    }
++
++    /**
++     * Whether a file inside a chapter folder counts as one downloaded page.
++     */
++    private fun isCountedPageFile(fileName: String): Boolean = when {
++        fileName in listOf(COMIC_INFO_FILE, NOMEDIA_FILE) -> false
++        fileName.endsWith(".tmp") -> false
++        // Only count the first split page and not the others
++        fileName.contains("__") && !fileName.endsWith("__001.jpg") -> false
++        else -> true
++    }
++
++    /**
++     * Harmony: handles a chapter folder / archive that already exists on disk although the
++     * download cache did not list the chapter as downloaded.
++     *
++     * @return true when the existing copy holds every page and has been registered as
++     * downloaded; false when there was nothing on disk or the leftover was removed so the
++     * download can start from scratch.
++     */
++    private suspend fun reuseOrRemoveExistingChapter(
++        download: Download,
++        mangaDir: UniFile,
++        chapterDirname: String,
++        pageCount: Int,
++    ): Boolean {
++        val existing = provider
++            .getValidChapterDirNames(download.chapter.name, download.chapter.scanlator, download.chapter.url)
++            .firstNotNullOfOrNull { mangaDir.findFile(it) }
++            ?: return false
++        val name = existing.name ?: return false
++
++        val imageCount = countChapterImages(existing)
++        if (imageCount >= pageCount) {
++            logcat(LogPriority.INFO) {
++                "'${download.chapter.name}' already on disk as '$name' ($imageCount pages); registering it as downloaded"
++            }
++            if (existing.isDirectory) {
++                DiskUtil.createNoMediaFile(existing, context)
+             }
++            cache.addChapter(name.removeSuffix(".cbz"), mangaDir, download.manga)
++            // Whatever an earlier attempt left in the temporary directories is no longer needed.
++            mangaDir.findFile(chapterDirname + TMP_DIR_SUFFIX)?.delete()
++            File(context.cacheDir, "harmony_download_tmp/${download.manga.id}/$chapterDirname$TMP_DIR_SUFFIX")
++                .deleteRecursively()
++            return true
+         }
+-        return downloadedImagesCount == downloadPageCount
++
++        logcat(LogPriority.WARN) {
++            "Removing incomplete leftover '$name' of '${download.chapter.name}' ($imageCount/$pageCount pages)"
++        }
++        if (!existing.delete()) {
++            throw IOException(context.stringResource(MR.strings.harmony_download_leftover_delete_failed, name))
++        }
++        return false
++    }
++
++    /**
++     * Counts the page images inside a chapter folder or CBZ archive; 0 when it cannot be read.
++     */
++    private fun countChapterImages(file: UniFile): Int = try {
++        if (file.isDirectory) {
++            file.listFiles().orEmpty().count { isCountedPageFile(it.name.orEmpty()) }
++        } else {
++            file.archiveReader(context).use { reader ->
++                reader.useEntries { entries ->
++                    entries.count { it.isFile && isCountedPageFile(it.name.substringAfterLast('/')) }
++                }
++            }
++        }
++    } catch (e: Exception) {
++        if (e is CancellationException) throw e
++        logcat(LogPriority.WARN, e) { "Could not inspect existing chapter '${file.name}'" }
++        0
+     }
+ 
+     /**
+diff --git a/app/src/main/java/eu/kanade/tachiyomi/ui/manga/MangaViewModel.kt b/app/src/main/java/eu/kanade/tachiyomi/ui/manga/MangaViewModel.kt
+index be45bea..28339a5 100644
+--- a/app/src/main/java/eu/kanade/tachiyomi/ui/manga/MangaViewModel.kt
++++ b/app/src/main/java/eu/kanade/tachiyomi/ui/manga/MangaViewModel.kt
+@@ -797,10 +797,28 @@ class MangaViewModel(
+      * Downloads the given list of chapters with the manager.
+      * @param chapters the list of chapters to download.
+      */
+-    private fun downloadChapters(chapters: List<Chapter>) {
++    private suspend fun downloadChapters(chapters: List<Chapter>) {
+         val manga = successState?.manga ?: return
+-        downloadManager.downloadChapters(manga, chapters)
++        val result = downloadManager.downloadChapters(manga, chapters)
+         toggleAllSelection(false)
++        // Harmony: say why chapters were not queued instead of leaving the button idle.
++        if (result.skipped > 0) {
++            val reasons = buildList {
++                if (result.alreadyDownloaded > 0) {
++                    add(context.stringResource(MR.strings.harmony_download_skipped_downloaded, result.alreadyDownloaded))
++                }
++                if (result.alreadyQueued > 0) {
++                    add(context.stringResource(MR.strings.harmony_download_skipped_queued, result.alreadyQueued))
++                }
++                if (result.sourceUnavailable > 0) {
++                    add(context.stringResource(MR.strings.harmony_download_skipped_no_source, result.sourceUnavailable))
++                }
++            }
++            snackbarHostState.showSnackbar(
++                message = context.stringResource(MR.strings.harmony_download_skipped, reasons.joinToString(" · ")),
++                withDismissAction = true,
++            )
++        }
+     }
+ 
+     /**
+diff --git a/i18n/src/commonMain/moko-resources/base/strings.xml b/i18n/src/commonMain/moko-resources/base/strings.xml
+index b3edb3e..c408fdf 100644
+--- a/i18n/src/commonMain/moko-resources/base/strings.xml
++++ b/i18n/src/commonMain/moko-resources/base/strings.xml
+@@ -534,6 +534,11 @@
+     <string name="harmony_download_pages_failed">%1$d page(s) failed to download, e.g. page %2$d: %3$s</string>
+     <string name="harmony_download_error_prefix">Error: %1$s</string>
+     <string name="harmony_download_interrupted">Interrupted (network lost or downloader stopped); tap the chapter to download again</string>
++    <string name="harmony_download_skipped">Not queued: %1$s</string>
++    <string name="harmony_download_skipped_downloaded">%1$d already downloaded</string>
++    <string name="harmony_download_skipped_queued">%1$d already in the queue</string>
++    <string name="harmony_download_skipped_no_source">%1$d from a source that is not installed</string>
++    <string name="harmony_download_leftover_delete_failed">Could not remove the leftover \'%1$s\' from an earlier download</string>
+     <string name="download_notifier_speed_progress">Download: %1$s/s · %2$d%%</string>
+     <string name="pref_download_concurrent_sources">Concurrent source downloads</string>
+     <string name="pref_download_concurrent_pages">Concurrent page downloads</string>
+diff --git a/i18n/src/commonMain/moko-resources/zh-rCN/strings.xml b/i18n/src/commonMain/moko-resources/zh-rCN/strings.xml
+index 029de7e..5c12df0 100644
+--- a/i18n/src/commonMain/moko-resources/zh-rCN/strings.xml
++++ b/i18n/src/commonMain/moko-resources/zh-rCN/strings.xml
+@@ -582,6 +582,11 @@
+     <string name="harmony_download_pages_failed">%1$d 页下载失败，例如第 %2$d 页：%3$s</string>
+     <string name="harmony_download_error_prefix">出错：%1$s</string>
+     <string name="harmony_download_interrupted">下载被中断（网络断开或下载服务被停止），点一下该章节重新下载</string>
++    <string name="harmony_download_skipped">未加入下载队列：%1$s</string>
++    <string name="harmony_download_skipped_downloaded">%1$d 章已下载</string>
++    <string name="harmony_download_skipped_queued">%1$d 章已在队列中</string>
++    <string name="harmony_download_skipped_no_source">%1$d 章的图源未安装</string>
++    <string name="harmony_download_leftover_delete_failed">无法删除上次下载残留的「%1$s」</string>
+     <string name="download_notifier_speed_progress">下载：%1$s/s · %2$d%%</string>
+     <string name="download_notifier_split_page_not_found">分割时未找到第 %d 页</string>
+     <string name="download_notifier_split_page_path_not_found">未找到第 %d 页的文件路径</string>
+diff --git a/i18n/src/commonMain/moko-resources/zh-rTW/strings.xml b/i18n/src/commonMain/moko-resources/zh-rTW/strings.xml
+index 40b2b8b..b547a89 100644
+--- a/i18n/src/commonMain/moko-resources/zh-rTW/strings.xml
++++ b/i18n/src/commonMain/moko-resources/zh-rTW/strings.xml
+@@ -580,6 +580,11 @@
+     <string name="harmony_download_pages_failed">%1$d 頁下載失敗，例如第 %2$d 頁：%3$s</string>
+     <string name="harmony_download_error_prefix">錯誤：%1$s</string>
+     <string name="harmony_download_interrupted">下載已中斷（網路斷線或下載服務被停止），點一下該章節重新下載</string>
++    <string name="harmony_download_skipped">未加入下載佇列：%1$s</string>
++    <string name="harmony_download_skipped_downloaded">%1$d 章已下載</string>
++    <string name="harmony_download_skipped_queued">%1$d 章已在佇列中</string>
++    <string name="harmony_download_skipped_no_source">%1$d 章的圖源未安裝</string>
++    <string name="harmony_download_leftover_delete_failed">無法刪除上次下載殘留的「%1$s」</string>
+     <string name="download_notifier_speed_progress">下載：%1$s/s · %2$d%%</string>
+     <string name="download_notifier_split_page_path_not_found">找不到第 %d 頁的檔案路徑</string>
+     <string name="pref_reset_viewer_flags">重設個別閱讀器設定</string>
