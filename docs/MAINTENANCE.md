@@ -59,6 +59,11 @@
   漫画页面 Snackbar 说明没入队的原因）和 0012（崩溃日志过滤卓易通图形层噪音 + 附应用自己的最近 600 行日志）。起因是用户上报「有个资源点了下载按钮卡了一下但没开始」，
   导出的 crash log 里 701 行有 690 行是卓易通噪音、Mihon 自己只剩 3 行（versionCode 2910）。
 - `v0.20.4-harmony-preview.11` —— 2026-10-12，加入补丁 0013（重试失败章节不再弹「已在队列中」）。preview.10 发出后自查发现的，与 Anikku preview.10 同一轮（versionCode 2911）。
+- `v0.21.0-harmony-preview.1` —— 2026-10-12，**补丁系列 rebase 到官方 v0.21.0**（v0.20.4 之后 273 个提交：Metro DI、preview 构建类型改名 nightly、
+  `DownloadJob` / `LibraryUpdateJob` 改 Worker、`AppUpdateDownloadJob` 删除、`DownloadNotifier` 与下载队列 API 重写、签名改读 `storeFile`）。
+  功能与 preview.11 相同；0004（busy_timeout）/ 0009（FlexibleAdapter）因上游已含而删除，其余补丁号不变（§5.1 有逐张要点）。
+  流水线：解码密钥到文件给 `storeFile`、按源码树自动识别 nightly / preview 构建类型、`assembleNightly`。
+  versionCode 3601（上游 36 × 100 + 1），versionName `0.21.0-harmony.1-8157`，包名仍 `app.mihon.debug`，签名不变，可从 v0.20.4 系列直接覆盖（升级前先在 App 里备份，见 README）。
 
 ## 3. 仓库结构
 
@@ -264,6 +269,7 @@ gh release list --repo Xun2202/mihon-harmony
 | `repo` 分支的 `releases.json` 没更新 / 不存在 | 发版 workflow 的最后一步失败，或 Release 是手动改的而 `release_index.yml` 没跑。到 Actions 手动运行「Release index」；本地也可 `GH_TOKEN=... scripts/write-release-index.sh Xun2202/mihon-harmony` |
 | 卓易通里书架不自动更新 | 设置 → 书架 → 智能更新，取消全部限制选项 |
 | 通知栏不显示下载进度 | 卓易通通知兼容问题，无解，不影响功能 |
+| 本机 `./gradlew` 一直没有输出、`app/build` 不生成，jstack 里 worker 线程全在 `TaskPathProjectEvaluator.scheduleProjectsJustInTime` 等队列 | v0.21.0 起 `gradle.properties` 开了 `org.gradle.isolated-projects=true`，本机加 `--max-workers=2` 时并行配置阶段会空等（10-12 两次复现）。`./gradlew --stop` 后去掉 `--max-workers` 重跑即可；也不要再传 `-Dorg.gradle.jvmargs` 之类覆盖参数 |
 
 ## 8. 不要做的事
 
@@ -308,3 +314,14 @@ gh release list --repo Xun2202/mihon-harmony
   arm64 26,428,273 B，SHA-256 `8aaf3187…83fe`，`repo` 分支 `02e4861`）。发出后自查：点「!」重试失败章节会被 0011 算成「已在队列中」而弹提示 → 补丁 0013 →
   `dry_run` run 38207395009 绿 → 正式 run 38208441462 → `v0.20.4-harmony-preview.11`（05:38 UTC，versionCode 2911，versionName `0.20.4-harmony.11-7886`，
   arm64 26,428,273 B，SHA-256 `5f73702a…52a5`，签名一致，DEX 含 `HarmonyLogBuffer` / `already on disk as` / `Removing incomplete leftover`，`resources.arsc` 含三种语言的 `harmony_download_skipped*`，`repo` 分支 `0869f50`）。
+- 同日（上午） 用户点头「跟」官方 v0.21.0。在 `/tmp/mihon-021`（worktree，`79fc3a0` = v0.21.0）上逐张 `git am -3`：0012 直接套上；0004 / 0009 上游已含，删除；
+  0001 / 0003 / 0010 / 0011 / 0013 只改 `Downloader.kt` 的插入点（上游 `queueChapters` 改成 suspend + Boolean，我们改为返回 `QueueResult`，`DownloadManager.downloadChapters` 负责 `startDownloads()`；
+  `MangaViewModel.startDownload` 现在在 `appScope` 里 join 入队，Snackbar 改到 `viewModelScope` 里弹）；0002 / 0008 更新器按 Metro 构造注入 + `isNightlyBuildType` 重写；
+  0005 保活挂到 `DownloadWorker` / `LibraryUpdateWorker`（字段注入 `graph.inject(this)` 之后）；0006 保留上游 `DownloadNotifier` 自带的 500 ms `@Synchronized` 限流、只加速度 + 进度；
+  0007 因上游删了 `AppUpdateDownloadJob` 改成新文件 `AppUpdateApkCleaner`（`NewUpdateScreenModel` 共用其 `updateApk()`）。
+  本机验证：`:app:compileNightlyKotlin`、`spotlessCheck`（两处 ktlint 超长行各 fixup 进 0003 / 0010）、`:core:common:testDebugUnitTest` + `:domain:test` 共 104 个用例、`:app:assembleNightly -Penable-updater` 全过；
+  干净 v0.21.0 树套 11 张补丁后与开发树只差版本号行。本机 Gradle 9.8.1 + `isolated-projects` 下带 `--max-workers=2` 两次卡死在并行配置阶段（`TaskPathProjectEvaluator.scheduleProjectsJustInTime` 空等），去掉该参数即正常——见 §7。
+  推 `main` `9bcbd23f2` → `check_patches` run 38218165595 对最新稳定版（v0.21.0）转绿 → `dry_run` run 38218180863 绿（artifact 解析：`app.mihon.debug`、versionCode 3601、versionName `0.21.0-harmony.1-8157`、签名 `4bd90284…ea8a`、
+  manifest 前台服务类型 `0x3` + `0x800`，DEX 含 `HarmonyLogBuffer` / `DownloadSpeedMeter` / `BackgroundKeepAlive` / `renameToOrCopy` / `/repo/releases.json` / `update.apk`，`resources.arsc` 含「未加入下载队列」「正在下载 %1$d 个章节」「后台保持运行」）
+  → 正式 run 38219338765 → **`v0.21.0-harmony-preview.1`**（07:48 UTC，target `9bcbd23f2`，非 draft / prerelease；arm64 26,889,289 B，SHA-256 `94c147b4…4344`，universal 67,198,288 B，SHA-256 `88bae6cd…027b`；
+  重新下载的 Release 资产包名 / versionCode / 签名复核一致；`repo` 分支 `094ef55`，`releases.json` 第一项即 preview.1，共 12 条）。
