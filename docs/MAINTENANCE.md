@@ -68,7 +68,7 @@
 - `v0.21.1-harmony-preview.1` —— 2026-10-12，**定时任务自动发布**：官方 v0.21.1（versionCode 37）出来后 14 张补丁直接套上。功能与 v0.21.0-preview.2 相同，versionCode 3701。用户的 App 没看到它——见下一条。
 - `v0.21.1-harmony-preview.2` —— 2026-10-12，加入补丁 0015（显示模式「全景紧凑网格」）、0016（瀑布流快速滚动条拇指不抽搐）、0017（更新器按版本号取最大，修「检查更新一直停在 v0.21.0-harmony-preview.2」）。versionCode 3702。装着 ≤ v0.21.1-preview.1 的用户这一次要手动装，之后更新检查就正常。
 - `v0.21.1-harmony-preview.3` —— 2026-10-13，加入补丁 0018（全景格子形状持久化，滑动中不把新形状写进布局，封面横竖同一调用点）。versionCode 3703，versionName `0.21.1-harmony.3-8177`，签名与 preview.2 相同（`4bd90284…ea8a`）。模拟器（AVD harmony34，TCG）验过形状与落盘，掉帧要用户真机确认。
-- `v0.21.1-harmony-preview.4` —— 2026-10-13，加入补丁 0019（全景网格连续 300 ms 不滚动才算停下来；浏览页提前学已加载、还没上屏的封面形状）。versionCode 3704。**发版中**。本轮 Mihon 只编译，没上模拟器（`PanoramaCoverShapes.kt` 与 Anikku 已测的 0027 逐字节相同）。
+- `v0.21.1-harmony-preview.4` —— 2026-10-13，加入补丁 0019（全景网格连续 300 ms 不滚动才算停下来；浏览页提前学已加载、还没上屏的封面形状）。versionCode 3704，versionName `0.21.1-harmony.4-8178`，签名与 preview.3 相同（`4bd90284…ea8a`）。本轮 Mihon 只编译，没上模拟器（`PanoramaCoverShapes.kt` 与 Anikku 已测的 0027 逐字节相同）。
 
 ## 3. 仓库结构
 
@@ -316,7 +316,7 @@ gh release list --repo Xun2202/mihon-harmony
 | 通知栏不显示下载进度 | 卓易通通知兼容问题，无解，不影响功能 |
 | 本机 `./gradlew` 一直没有输出、`app/build` 不生成，jstack 里 worker 线程全在 `TaskPathProjectEvaluator.scheduleProjectsJustInTime` 等队列 | v0.21.0 起 `gradle.properties` 开了 `org.gradle.isolated-projects=true`，本机加 `--max-workers=2` 时并行配置阶段会空等（10-12 两次复现）。`./gradlew --stop` 后去掉 `--max-workers` 重跑即可；也不要再传 `-Dorg.gradle.jvmargs` 之类覆盖参数 |
 | 全景网格滑动时格子高度乱跳、感觉掉帧，滚动条还在抽一下 | preview.2 及之前：比例只在进程内，格子先按 3:2 排、解码完改 2:3，瀑布流整列重测；横竖切换还重建 `AsyncImage`。0018（v0.21.1-harmony-preview.3）起形状写在 `filesDir/harmony_panorama_cover_shapes.txt`，滑动中不把新形状写进布局（同侧立即写），封面单一调用点。0016 的滚动条代码没动，残余抽搐随格子高度稳定而消失。从没见过的封面仍会在停下时跳一次。拖滚动条的间隙和浏览页未上屏封面由 0019 补（下一行）。掉帧要真机确认（模拟器软件加速测不了帧率） |
-| 全景网格拖右侧滚动条、或连续甩两下时格子还会跳；浏览页新滑出来的格子第一次形状不对 | preview.3（0018）把「停下」定义成 `isScrollInProgress` 为假。拖拇指是一串 `scrollToItem`，中间为假就把新形状写进布局；浏览页要等上屏才学形状。0019（v0.21.1-harmony-preview.4，发版中）起连续 300 ms 不滚动才算停下，浏览页对已加载未上屏的封面按 128 px 提前学形状（`PanoramaCoverShapes.kt` 与 Anikku 0027 逐字节相同）。刚打开的第一屏在静止时仍可能翻一次；下载失败保持默认横版。真机确认拖拇指和滑动 |
+| 全景网格拖右侧滚动条、或连续甩两下时格子还会跳；浏览页新滑出来的格子第一次形状不对 | preview.3（0018）把「停下」定义成 `isScrollInProgress` 为假。拖拇指是一串 `scrollToItem`，中间为假就把新形状写进布局；浏览页要等上屏才学形状。0019（v0.21.1-harmony-preview.4）起连续 300 ms 不滚动才算停下，浏览页对已加载未上屏的封面按 128 px 提前学形状（`PanoramaCoverShapes.kt` 与 Anikku 0027 逐字节相同）。刚打开的第一屏在静止时仍可能翻一次；下载失败保持默认横版。真机确认拖拇指和滑动 |
 
 ## 8. 不要做的事
 
@@ -389,4 +389,4 @@ gh release list --repo Xun2202/mihon-harmony
   `app.mihon.debug`，versionCode 3703，versionName `0.21.1-harmony.3-8177`，签名 `4bd90284…ea8a`（与 preview.2 相同），arm64 26,940,089 B，SHA-256 `8b85d3f0…`，universal 67,249,088 B。**体积与 preview.2 逐字节相同**：APK 有对齐填充，连续几版大小都一样，分辨版本看 SHA-256 / versionCode，不看体积。DEX 含 `PanoramaCoverShapes`（`classes.dex` 1 处 + `classes2.dex` 8 处）；`repo` 分支 `releases.json` 第一项即 preview.3，共 16 条）。同轮 Anikku 0025 → `v0.2.0-harmony-preview.14`。Animeko 不适用。
 - 2026-10-13 用户先说 Anikku 全景紧凑仍卡（见 anikku-harmony 0026），接着「现在看 mihon 也会抖，是不是无解了？」。根因见 §5.1 补丁 0019：0018 的静止判断在 `scrollToItem` 的间隙当成已经停下；浏览页要等格子上屏才学形状。
   开发树 `/tmp/mihon-0211-clean` `dev-0211` 提交 `6606b27`。`:app:compileNightlyKotlin :app:spotlessCheck` 通过。导出 `patches/0019-library-panorama-settle-debounce-browse-prefetch.patch`（`PanoramaCoverShapes.kt` 与 Anikku 0027 逐字节相同）。干净 v0.21.1 树 `/tmp/mihon-verify19` 套 19 张成功（versionCode 3704），关键文件 `cmp` 与开发树一致。本轮没上模拟器（共享文件与 Anikku 已测的那份相同）。
-  推 `main` `6d70f6e8d` → `check_patches` run 38381657802 绿 → `dry_run` run 38381668615。计划发 **`v0.21.1-harmony-preview.4`**（versionCode 3704，发版中）。**APK 核对待补**（versionName 后缀、签名者、体积、SHA-256、正式 run、`repo` 索引）。同轮 Anikku 0026 / 0027 → `v0.2.0-harmony-preview.15`。Animeko 不适用。
+  推 `main` `6d70f6e8d` → `check_patches` run 38381657802 绿 → `dry_run` run 38381668615。计划发 **`v0.21.1-harmony-preview.4`**（versionCode 3704）。已发布并核对：正式 run 38382851640（10:28 UTC，target `6d70f6e8d`），`app.mihon.debug` versionCode 3704、versionName `0.21.1-harmony.4-8178`，签名 `4bd90284…ea8a` 不变，arm64 26,940,089 B（体积又与上一版相同，是对齐填充）、SHA-256 `b0c03b8f…`，DEX 含 `PrefetchPanoramaCoverShapes` / `rememberPanoramaGridSettled`；`repo` 分支 `releases.json` 第一项即 preview.4（共 17 条）。同轮 Anikku 0026 / 0027 → `v0.2.0-harmony-preview.15`。Animeko 不适用。
