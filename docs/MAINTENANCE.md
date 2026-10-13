@@ -69,6 +69,9 @@
 - `v0.21.1-harmony-preview.2` —— 2026-10-12，加入补丁 0015（显示模式「全景紧凑网格」）、0016（瀑布流快速滚动条拇指不抽搐）、0017（更新器按版本号取最大，修「检查更新一直停在 v0.21.0-harmony-preview.2」）。versionCode 3702。装着 ≤ v0.21.1-preview.1 的用户这一次要手动装，之后更新检查就正常。
 - `v0.21.1-harmony-preview.3` —— 2026-10-13，加入补丁 0018（全景格子形状持久化，滑动中不把新形状写进布局，封面横竖同一调用点）。versionCode 3703，versionName `0.21.1-harmony.3-8177`，签名与 preview.2 相同（`4bd90284…ea8a`）。模拟器（AVD harmony34，TCG）验过形状与落盘，掉帧要用户真机确认。
 - `v0.21.1-harmony-preview.4` —— 2026-10-13，加入补丁 0019（全景网格连续 300 ms 不滚动才算停下来；浏览页提前学已加载、还没上屏的封面形状）。versionCode 3704，versionName `0.21.1-harmony.4-8178`，签名与 preview.3 相同（`4bd90284…ea8a`）。本轮 Mihon 只编译，没上模拟器（`PanoramaCoverShapes.kt` 与 Anikku 已测的 0027 逐字节相同）。
+- `v0.21.1-harmony-preview.5` —— 2026-10-13，加入补丁 0020（瀑布流快速滚动条拇指不再大约每行回跳一下：位置跨帧累加，滚动中冻结总长度，停下后 150 ms 平滑）。versionCode 3705，versionName `0.21.1-harmony.5-8179`，签名与 preview.4 相同（`4bd90284…ea8a`）。正式 run 38424091586（15:47 UTC，target `3d89a0796`），arm64 26,940,093 B、SHA-256 `d9639da6…`；DEX 含新滚动条字段。发出时 `repo` 分支 `releases.json` 第一项是它（当时共 19 条）。**已发布但被 0.21.2 系取代，不要装**：3705 低于同日定时任务发出的 `v0.21.2-harmony-preview.1`（3801），手机提示版本过老拒装。Release 保留未删（更新器取最高版本，不会推给已在 0.21.2 的用户）。
+- `v0.21.2-harmony-preview.1` —— 2026-10-13，**定时任务自动发布**。上游 Mihon 2026-10-13 04:27 UTC 发了 v0.21.2；定时 run 38392710194（11:47 UTC，target `f32a21972`，含补丁 0001–0019）套上后发布。versionCode 3801。功能同当时的 v0.21.1-harmony-preview.4（还没有 0020）。用户手机升到了它。
+- `v0.21.2-harmony-preview.2` —— 2026-10-13，**当前版本**。同一套 20 张补丁（含 0020）在干净 v0.21.2 树 `/tmp/mihon-verify212` 套用成功（`prepare-source.sh … v0.21.2 2`，versionCode 3802）。跳过单独 dry_run：0.21.2 preview.1 已用前 19 张编过，0020 只改 `VerticalFastScroller.kt`，正式 run 编译失败不会发布。正式 run 38427442080（16:09 UTC，target `3d89a0796`）。`app.mihon.debug` versionCode 3802、versionName `0.21.2-harmony.2-8191`，签名 `4bd90284…ea8a` 不变，arm64 26,956,473 B、SHA-256 `1a9cd9d5…`，DEX 含新滚动条字段。`repo` 分支 `releases.json` 前三项 `v0.21.2-harmony-preview.2`、`v0.21.2-harmony-preview.1`、`v0.21.1-harmony-preview.5`（共 20 条）。拇指顺不顺要用户在这一版上真机确认。
 
 ## 3. 仓库结构
 
@@ -93,6 +96,7 @@ patches/0016-*.patch           # 瀑布流快速滚动条拇指不抽搐 (与 An
 patches/0017-*.patch           # 更新器按版本号取最大而不是列表第一项 (与 Anikku 0024 同源)
 patches/0018-*.patch           # 全景格子形状持久化 + 滑动中不改排版 (PanoramaCoverShapes.kt 与 Anikku 0025 逐字节相同)
 patches/0019-*.patch           # 全景网格静止判断加 300 ms + 浏览页提前学封面形状 (PanoramaCoverShapes.kt 与 Anikku 0027 逐字节相同)
+patches/0020-*.patch           # 瀑布流快速滚动条拇指不再每行回跳 (StaggeredGridEstimate 段与 Anikku 0028 逐字节相同)
 scripts/prepare-source.sh      # 官方源码 → 套补丁 → 改版本号, 每步一个 commit
 scripts/write-release-index.sh # Releases 接口返回 → repo 分支的 releases.json / latest.json
 .github/workflows/harmony_preview.yml   # 每日构建发布, 最后写 Release 索引
@@ -110,7 +114,7 @@ LICENSE                        # Apache-2.0 (沿用上游)
 
 1. **解析版本**：`upstream_tag`（为空则调 GitHub API 取 `mihonapp/mihon` 最新稳定版）、`patch_number`（默认 1）。
    `release_tag = <upstream_tag>-harmony-preview.<N>`。
-2. **跳过已存在的 Release**（`dry_run` 时不跳过）。这是定时任务不重复编译的关键。
+2. **跳过已存在的 Release**（`dry_run` 时不跳过）。这是定时任务不重复编译的关键。同一段「Resolve release version」里，非 `dry_run` 且目标 tag 还不存在时，取本仓所有 `vX.Y.Z-harmony-preview.N`，按「上游版本.N」做 `sort -V`，比已发布最高的旧就 `exit 1`，日志「installs would be a downgrade」。已存在的 tag 仍走原来的 skip，每天定时 run 不会因此变红。
 3. **校验四个签名 Secrets 非空**。
 4. **拉官方源码**：`git clone --branch <tag> --single-branch`（完整历史，约 80 MB、几秒钟）。nightly 构建的
    `versionNameSuffix` 和 `BuildConfig.COMMIT_COUNT` 来自 `git rev-list --count HEAD`，浅克隆会让它变成个位数。
@@ -244,6 +248,14 @@ CBZ 模式（0003 的 `finalizeArchive`）没有动：它本来就是单文件�
 
 已知局限：刚打开的浏览页第一屏，你还没滑、网格处于静止时，仍可能翻一次形状；下载失败的封面保持默认横版。额外网络：已加载、还没看见的那一页封面会比以前早一点下载（滑到时本来就要下）。本轮只跑了 `:app:compileNightlyKotlin :app:spotlessCheck`，没上模拟器；共享文件与 Anikku 在 AVD harmony34 上测过的那份逐字节相同。Animeko 不适用。
 
+补丁 0020 修全景网格往下滑时右侧快速滚动条拇指大约每行回跳一下（用户：「好像还是会抖，比如往下滑动的时候，右侧滑动块可能会有一小段丝滑下滑，然后突然抽动一下向上移动一丝，再移动回来，大概频率是每一行抽动一下，是不是没找到根因呢？」Mihon、Anikku 都是）。0019 修的是格子形状，不是这段。上游若重写 `VerticalStaggeredGridFastScroller` 要一起保住：
+
+根因：瀑布流（`LazyVerticalStaggeredGrid`）各列格子高度不同。旧估算以「屏幕上编号最小的可见格子」为锚、按行公式推位置；这个格子一移出屏幕就换成下一个，而公式对每个格子的偏差不一样，所以大约每行拇指往回跳一下；另外滚动中「总长度」的均值也在变。Python 模拟旧公式：100 行内 141 次往回跳，中位数 3.2 px，最大 9.3 px。
+
+做法：只改 `presentation-core/src/main/java/tachiyomi/presentation/core/components/VerticalFastScroller.kt`。位置改为跨帧累加——记住一个两帧之间都还在屏幕上的锚（可见项中间那个），用它的位移推进；第 0 项可见时用精确值；跳转（拖拇指 / `scrollToItem`）后锚不在了才回退行公式。滚动中（`isScrollInProgress`）冻结总长度，条目数变化时才刷新；停下后拇指用 150 ms 动画平滑移到新位置（`RANGE_SETTLE_MILLIS = 150`）；到底（`!canScrollForward`）时比例为 1。
+
+`private class StaggeredGridEstimate(` 到 `// Harmony <--` 这一段与 anikku-harmony 0028 **逐字节相同**，改一处要同步另一处。开发树 `/tmp/mihon-0211-clean` `dev-0211` 提交 `98ff730`。`:presentation-core:spotlessCheck :app:compileNightlyKotlin` 通过。拇指顺不顺模拟器（只有软件加速）测不了，要用户真机确认。Animeko 没有这套瀑布流快速滚动条，不适用。
+
 ### 5.2 加新补丁
 
 在套完现有补丁的源码树上直接改代码并 commit（message 写清楚为什么），`git format-patch -1` 导出，
@@ -257,7 +269,7 @@ Actions → Harmony Preview → Run workflow，勾选 `dry_run`。构建完成�
 ### 5.4 正式出新版
 
 Run workflow，`upstream_tag` 填官方 tag（留空取最新稳定版），`patch_number` 从 1 开始；同一官方版本改了补丁要重发就填 2、3……
-同名 Release 已存在会直接跳过。约 7–10 分钟。
+同名 Release 已存在会直接跳过。约 7–10 分钟。发版前确认最新上游 tag（定时 run 会自动跟进新上游）。目标 tag 还不存在、且按「上游版本.N」比已发布最高的旧时，workflow 会 `exit 1`（「installs would be a downgrade」），不会发出降级包。
 
 ### 5.5 命令行操作（给 AI 助手；token 只放环境变量，不要写进任何文件或 commit）
 
@@ -316,7 +328,9 @@ gh release list --repo Xun2202/mihon-harmony
 | 通知栏不显示下载进度 | 卓易通通知兼容问题，无解，不影响功能 |
 | 本机 `./gradlew` 一直没有输出、`app/build` 不生成，jstack 里 worker 线程全在 `TaskPathProjectEvaluator.scheduleProjectsJustInTime` 等队列 | v0.21.0 起 `gradle.properties` 开了 `org.gradle.isolated-projects=true`，本机加 `--max-workers=2` 时并行配置阶段会空等（10-12 两次复现）。`./gradlew --stop` 后去掉 `--max-workers` 重跑即可；也不要再传 `-Dorg.gradle.jvmargs` 之类覆盖参数 |
 | 全景网格滑动时格子高度乱跳、感觉掉帧，滚动条还在抽一下 | preview.2 及之前：比例只在进程内，格子先按 3:2 排、解码完改 2:3，瀑布流整列重测；横竖切换还重建 `AsyncImage`。0018（v0.21.1-harmony-preview.3）起形状写在 `filesDir/harmony_panorama_cover_shapes.txt`，滑动中不把新形状写进布局（同侧立即写），封面单一调用点。0016 的滚动条代码没动，残余抽搐随格子高度稳定而消失。从没见过的封面仍会在停下时跳一次。拖滚动条的间隙和浏览页未上屏封面由 0019 补（下一行）。掉帧要真机确认（模拟器软件加速测不了帧率） |
-| 全景网格拖右侧滚动条、或连续甩两下时格子还会跳；浏览页新滑出来的格子第一次形状不对 | preview.3（0018）把「停下」定义成 `isScrollInProgress` 为假。拖拇指是一串 `scrollToItem`，中间为假就把新形状写进布局；浏览页要等上屏才学形状。0019（v0.21.1-harmony-preview.4）起连续 300 ms 不滚动才算停下，浏览页对已加载未上屏的封面按 128 px 提前学形状（`PanoramaCoverShapes.kt` 与 Anikku 0027 逐字节相同）。刚打开的第一屏在静止时仍可能翻一次；下载失败保持默认横版。真机确认拖拇指和滑动 |
+| 全景网格拖右侧滚动条、或连续甩两下时格子还会跳；浏览页新滑出来的格子第一次形状不对 | preview.3（0018）把「停下」定义成 `isScrollInProgress` 为假。拖拇指是一串 `scrollToItem`，中间为假就把新形状写进布局；浏览页要等上屏才学形状。0019（v0.21.1-harmony-preview.4）起连续 300 ms 不滚动才算停下，浏览页对已加载未上屏的封面按 128 px 提前学形状（`PanoramaCoverShapes.kt` 与 Anikku 0027 逐字节相同）。刚打开的第一屏在静止时仍可能翻一次；下载失败保持默认横版。往下滑时拇指大约每行回跳由 0020 补（下一行） |
+| 全景网格往下滑时右侧滑动块大约每一行往回抽一下，再移回来 | preview.4（0019）修的是格子形状，滚动条估算没动。瀑布流各列高度不同，旧公式以「编号最小的可见格子」为锚，这个格子一换，公式偏差就变，大约每行回跳（模拟 100 行 141 次，中位数 3.2 px，最大 9.3 px）；滚动中总长度均值也在变。0020 起位置跨帧累加（可见项中间那个锚），第 0 项可见用精确值，跳转后锚不在才回退行公式；滚动中冻结总长度，停下后 150 ms 平滑；到底比例为 1。可装的是 `v0.21.2-harmony-preview.2`。`v0.21.1-harmony-preview.5` 含同一补丁，被 0.21.2 系取代、不要装。`StaggeredGridEstimate` 段与 Anikku 0028 逐字节相同。拇指顺不顺要真机确认（模拟器软件加速测不了） |
+| 手机提示版本过老 / 降级不给装 | 更新器按版本号取最大。官方 2026-10-13 04:27 UTC 出了 v0.21.2，定时 run 38392710194 自动发了 `v0.21.2-harmony-preview.1`（versionCode 3801）；随后在 0.21.1 上发的 `v0.21.1-harmony-preview.5`（3705）号更小，手机拒装。preview.5 保留未删，更新器不会把它推给已在 0.21.2 的用户。补救是在最新上游上重发：`v0.21.2-harmony-preview.2`（3802，正式 run 38427442080）。workflow「Resolve release version」（提交 `fd1835633`）：非 dry_run 且目标 tag 还不存在时，按「上游版本.N」`sort -V`，比已发布最高的旧就 `exit 1` 报「installs would be a downgrade」。已存在的 tag 仍 skip，定时 run 不会因此变红。发版前先看 Releases 上最新的上游底座。本地用真实 tag 列表测过：0.21.1 的 preview.6 拒绝，0.21.2 的 preview.3、0.21.3 的 preview.1、0.21.10 的 preview.1 放行。CI 上没实际触发过拒绝路径 |
 
 ## 8. 不要做的事
 
@@ -390,3 +404,8 @@ gh release list --repo Xun2202/mihon-harmony
 - 2026-10-13 用户先说 Anikku 全景紧凑仍卡（见 anikku-harmony 0026），接着「现在看 mihon 也会抖，是不是无解了？」。根因见 §5.1 补丁 0019：0018 的静止判断在 `scrollToItem` 的间隙当成已经停下；浏览页要等格子上屏才学形状。
   开发树 `/tmp/mihon-0211-clean` `dev-0211` 提交 `6606b27`。`:app:compileNightlyKotlin :app:spotlessCheck` 通过。导出 `patches/0019-library-panorama-settle-debounce-browse-prefetch.patch`（`PanoramaCoverShapes.kt` 与 Anikku 0027 逐字节相同）。干净 v0.21.1 树 `/tmp/mihon-verify19` 套 19 张成功（versionCode 3704），关键文件 `cmp` 与开发树一致。本轮没上模拟器（共享文件与 Anikku 已测的那份相同）。
   推 `main` `6d70f6e8d` → `check_patches` run 38381657802 绿 → `dry_run` run 38381668615。计划发 **`v0.21.1-harmony-preview.4`**（versionCode 3704）。已发布并核对：正式 run 38382851640（10:28 UTC，target `6d70f6e8d`），`app.mihon.debug` versionCode 3704、versionName `0.21.1-harmony.4-8178`，签名 `4bd90284…ea8a` 不变，arm64 26,940,089 B（体积又与上一版相同，是对齐填充）、SHA-256 `b0c03b8f…`，DEX 含 `PrefetchPanoramaCoverShapes` / `rememberPanoramaGridSettled`；`repo` 分支 `releases.json` 第一项即 preview.4（共 17 条）。同轮 Anikku 0026 / 0027 → `v0.2.0-harmony-preview.15`。Animeko 不适用。
+- 2026-10-13（再稍后）用户：「好像还是会抖，比如往下滑动的时候，右侧滑动块可能会有一小段丝滑下滑，然后突然抽动一下向上移动一丝，再移动回来，大概频率是每一行抽动一下，是不是没找到根因呢？mihon，anikku都是」。根因见 §5.1 补丁 0020：0019 修的是格子形状；旧滚动条以编号最小的可见格子为锚，换格时公式偏差变，大约每行回跳。
+  开发树 `/tmp/mihon-0211-clean` `dev-0211` 提交 `98ff730`。`:presentation-core:spotlessCheck :app:compileNightlyKotlin` 通过。导出 `patches/0020-presentation-staggered-scroller-stable-thumb.patch`（`private class StaggeredGridEstimate(` 到 `// Harmony <--` 与 Anikku 0028 逐字节相同）。干净 v0.21.1 树 `/tmp/mihon-verify20` 套 20 张（`prepare-source.sh … v0.21.1 5`）成功，关键文件 `cmp` 与开发树一致。拇指顺不顺模拟器（只有软件加速）测不了。
+  推 `main` `3d89a0796` → `check_patches` run 38421701462 绿 → `dry_run` run 38421777350 绿 → 正式 run 38424091586 → **`v0.21.1-harmony-preview.5`**（15:47 UTC，target `3d89a0796`），`app.mihon.debug` versionCode 3705、versionName `0.21.1-harmony.5-8179`，签名 `4bd90284…ea8a` 不变，arm64 26,940,093 B、SHA-256 `d9639da6…`，DEX 含新滚动条字段；发出时 `repo` 分支 `releases.json` 第一项即 preview.5（共 19 条）。同轮 Anikku 0028 / 0029 → `v0.2.0-harmony-preview.16`。Animeko 没有这套瀑布流快速滚动条，不适用。这一版随后被 0.21.2 系取代，见下一条。
+- 2026-10-13（16:09 UTC）用户：「为啥mihon没在0.21.2继续更新？现在手机提示装的0.21.2那个，0.21.1显示版本过老不给装了」。上游 Mihon 当天 04:27 UTC 发了 v0.21.2，定时 run 38392710194（11:47 UTC，target `f32a21972`，含 0001–0019）已自动发 **`v0.21.2-harmony-preview.1`**（versionCode 3801），用户手机升到了它。15:47 在 0.21.1 上发的 preview.5（3705）号更小，被当成降级。补救：同一套 20 张补丁在干净 v0.21.2 树 `/tmp/mihon-verify212` 套用成功（`prepare-source.sh … v0.21.2 2`，versionCode 3802），跳过单独 dry_run（preview.1 已用前 19 张编过，0020 只改 `VerticalFastScroller.kt`，正式 run 编译失败不会发布）。正式 run 38427442080 → **`v0.21.2-harmony-preview.2`**（16:09 UTC，target `3d89a0796`），versionCode 3802、versionName `0.21.2-harmony.2-8191`，签名 `4bd90284…ea8a` 不变，arm64 26,956,473 B、SHA-256 `1a9cd9d5…`，DEX 含新滚动条字段。`releases.json` 前三项为 preview.2、preview.1、`v0.21.1-harmony-preview.5`（共 20 条）。preview.5 保留未删。
+  防降级：`harmony_preview.yml`「Resolve release version」在非 dry_run 且目标 tag 还不存在时，按「上游版本.N」`sort -V`，比已发布最高的旧就 `exit 1`（「installs would be a downgrade」）。已存在的 tag 仍 skip。本地用真实 tag 列表测过（0.21.1 preview.6 拒绝；0.21.2 preview.3、0.21.3 preview.1、0.21.10 preview.1 放行）。CI 上没实际触发过拒绝路径。提交 `fd1835633`（已推 main）。这是发版时没先看最新上游底座的疏漏。
