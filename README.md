@@ -27,6 +27,7 @@
 - **下载到 100% 后变成「!」、队列里只写「Error」**（preview.8 及之前，目录模式下）：卓易通的文件夹不支持改名，章节收尾时 `<章节>_tmp/` → `<章节>/` 的改名回退是把每一页再抄一遍，任何一步失败都没有提示。preview.9 起：目录改名优先用系统的「移动文档」（不经 App 复制），都失败才复制，残留的旧目录会被合并而不是报「已存在」，复制后核对大小并自动重试两次；下载队列里出错的章节会在章节名下面直接显示原因（哪一页为什么失败 / 目录里多了什么 / 「下载被中断」），不用再导日志。与 anikku-harmony preview.8（补丁 0016）同一份代码。
 - **「检查更新」一直停在旧版本、没提示新的**（v0.21.1-harmony-preview.1 及之前）：更新器取的是 Release 列表里本频道的第一项，而 GitHub 的列表顺序不保证按版本，上游出补丁版（0.21.0 → 0.21.1）时旧系列的预览版会排在前面。v0.21.1-harmony-preview.2（补丁 0017）起按版本号比大小取最新。装着旧版的用户这一次需要手动到 [Releases](../../releases) 下载安装，之后的更新检查就正常了。
 - 书架 / 浏览页显示模式新增「**全景松散网格**」（v0.21.0-harmony-preview.2，补丁 0014）和「**全景紧凑网格**」（v0.21.1-harmony-preview.2，补丁 0015）：横版封面按 3:2 画、瀑布流排布、自动列宽 168 dp；右侧快速滚动条在瀑布流里不再抽搐（补丁 0016）。
+- **全景网格滑动时格子抽搐、有掉帧、滚动条还在跳一下**（v0.21.1-harmony-preview.2 及之前）：格子第一次出现时还不知道封面是横是竖，先按默认横版（3:2）排，图片解码完才改成竖版（2:3）。瀑布流里一个格子变高，会把这一列下面的全部推下去；快速滑动时每秒几十张图加载完，各触发一次整个瀑布流重新测量。横竖比例只记在内存里，重启 App 就忘了，于是每次打开都再抖一轮。横版和竖版封面还是两段不同的界面代码，一切换就把图片拆掉重新请求。滚动条用的是屏幕上看得见的格子高度，高度在滑的时候变，估算就跟着跳（补丁 0016 的滚动条算法本身没改）。v0.21.1-harmony-preview.3（补丁 0018）起：学到的高/宽写进 App 自己的文件，下次启动直接用；正在滑动时不把新学到的形状写进排版（已经能确定是横还是竖的，马上用）；横版和竖版走同一个封面组件，不再拆掉重建。从没见过的封面仍会在你手指停下的那一下改一次形状，改完就记住了。滑动还掉不掉帧，要在真机上滑一下确认。
 
 ## 包含的补丁
 
@@ -50,6 +51,7 @@
 | [`0015-library-panorama-compact-grid-display-mode.patch`](./patches/0015-library-panorama-compact-grid-display-mode.patch) | 新增显示模式「全景紧凑网格」：标题压在封面上的紧凑网格，套用 0014 同一套全景规则（横版封面 3:2、瀑布流、自动列宽 168 dp、封面横竖比按作品缓存）。序列化 `COMPACT_GRID_PANORAMA`，排在紧凑网格之后；浏览页显示模式菜单同步多一项。与 anikku-harmony 0022 同源。 |
 | [`0016-presentation-staggered-fast-scroller-steady-thumb.patch`](./patches/0016-presentation-staggered-fast-scroller-steady-thumb.patch) | 修复全景网格上下滑动时右侧快速滚动条「抽搐」：0014 的瀑布流滚动条用当前屏上条目的平均高度估算位置，3:2 与 2:3 格子换进换出时平均值跟着变、拇指来回跳。现在按条目索引记住量过的高度（没见过的用累计平均），满行条目（搜索栏等，按比单格宽判断）不计入，列数取见过的最大值；`offset.y` 相对内容起点，顶部 padding 只算进总长度。与 anikku-harmony 0023 的估算段逐字相同。 |
 | [`0017-updater-pick-highest-harmony-version.patch`](./patches/0017-updater-pick-highest-harmony-version.patch) | 修复「检查更新」拉不到最新版：`ReleaseServiceImpl.latest()` 原来取本频道列表里的**第一项**，GitHub 的列表顺序并不保证按版本（镜像 `releases.json` 里 `v0.21.0-harmony-preview.2` 排在 `v0.21.1-harmony-preview.1` 前面），于是 App 一直提示旧版本。现在把本频道候选按 `(主, 次, 补丁, harmony 号)` 四元组比较取最大，解析不了的 tag 排最后。anikku-harmony 0024 同病同修；animeko-harmony 0002 本来就是排序取最大，不适用。 |
+| [`0018-library-panorama-stable-cell-shapes.patch`](./patches/0018-library-panorama-stable-cell-shapes.patch) | 修复全景网格滑动时资源块排版抽搐、掉帧，以及滚动条的残余抽搐（0016 的滚动条代码没动，跳的是格子高度）。新文件 `PanoramaCoverShapes.kt`：学到的封面高/宽记在 `filesDir/harmony_panorama_cover_shapes.txt`（每行 `id ratio`，重启还在）；正在滑动时不把新形状写进瀑布流布局（横竖已经同侧则立即写）；封面横竖改成同一个 Compose 调用点，不再拆掉重建 `AsyncImage`。书架两种全景模式会在后台读封面缓存的宽高（不解码整张图）。与 anikku-harmony 0025 的 `PanoramaCoverShapes.kt` 逐字节相同。不改数据库、不加设置项。从没见过的封面仍会在滑动停下时改一次形状。Animeko 没有这套网格，不适用。 |
 
 补丁按 [`patches/series`](./patches/series) 的顺序套用。
 

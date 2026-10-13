@@ -67,6 +67,7 @@
 - `v0.21.0-harmony-preview.2` —— 2026-10-12，加入补丁 0014：书架 / 浏览页新增显示模式「全景松散网格」（从 anikku-harmony 0015 + 0020 移植：横版封面按 3:2 画、瀑布流排布、自动列宽 168 dp）。versionCode 3602。
 - `v0.21.1-harmony-preview.1` —— 2026-10-12，**定时任务自动发布**：官方 v0.21.1（versionCode 37）出来后 14 张补丁直接套上。功能与 v0.21.0-preview.2 相同，versionCode 3701。用户的 App 没看到它——见下一条。
 - `v0.21.1-harmony-preview.2` —— 2026-10-12，加入补丁 0015（显示模式「全景紧凑网格」）、0016（瀑布流快速滚动条拇指不抽搐）、0017（更新器按版本号取最大，修「检查更新一直停在 v0.21.0-harmony-preview.2」）。versionCode 3702。装着 ≤ v0.21.1-preview.1 的用户这一次要手动装，之后更新检查就正常。
+- `v0.21.1-harmony-preview.3` —— 2026-10-13，加入补丁 0018（全景格子形状持久化，滑动中不把新形状写进布局，封面横竖同一调用点）。versionCode 3703。`dry_run` 已触发，正式发版进行中；APK 的 versionName 后缀、签名、体积、`repo` 分支索引由发版后核对补记。模拟器（AVD harmony34，TCG）验过形状与落盘，掉帧要用户真机确认。
 
 ## 3. 仓库结构
 
@@ -89,6 +90,7 @@ patches/0014-*.patch           # 显示模式「全景松散网格」(Anikku 001
 patches/0015-*.patch           # 显示模式「全景紧凑网格」(与 Anikku 0022 同源)
 patches/0016-*.patch           # 瀑布流快速滚动条拇指不抽搐 (与 Anikku 0023 同源)
 patches/0017-*.patch           # 更新器按版本号取最大而不是列表第一项 (与 Anikku 0024 同源)
+patches/0018-*.patch           # 全景格子形状持久化 + 滑动中不改排版 (PanoramaCoverShapes.kt 与 Anikku 0025 逐字节相同)
 scripts/prepare-source.sh      # 官方源码 → 套补丁 → 改版本号, 每步一个 commit
 scripts/write-release-index.sh # Releases 接口返回 → repo 分支的 releases.json / latest.json
 .github/workflows/harmony_preview.yml   # 每日构建发布, 最后写 Release 索引
@@ -223,6 +225,15 @@ CBZ 模式（0003 的 `finalizeArchive`）没有动：它本来就是单文件�
 
 补丁 0017 只改 `data/.../ReleaseServiceImpl.kt`：`latest()` 的 `releases.firstOrNull { 频道 }` 改成 `.filter { 频道 }.maxWithOrNull { a, b -> compareHarmonyVersions(a.version, b.version) }`，companion 里加与 `GetApplicationRelease` 同形的 `HARMONY_VERSION_REGEX` / `parseHarmonyVersion` / `compareHarmonyVersions`（解析不了的排最后）。没有把 domain 层的私有函数公开，是为了让这张补丁只碰一个文件、好重做；上游若把 `latest()` 的签名改了，保留「过滤频道 → 取最大」这两步即可。起因见 §9 2026-10-12：上游 v0.21.1 发布后定时任务自动发了 `v0.21.1-harmony-preview.1`，但镜像 `releases.json`（GitHub API 原样）把 `v0.21.0-harmony-preview.2` 排在它前面，用户的 App 只看得到后者。Anikku 的同病在 `GetApplicationRelease.getLatest()`（0024）；Animeko 0002 本来就是排序取最大。
 
+补丁 0018 修全景网格滑动时资源块排版抽搐、掉帧，以及滚动条的残余抽搐。三条根因，上游若重写网格要一起保住：
+① 格子第一次出现时不知道封面横竖，先按默认横版（3:2）排，图片解码完才改成 2:3。瀑布流（`LazyVerticalStaggeredGrid`）一个格子变高会把该列下面全部推下去；快速滑动时每秒几十张图加载完，各触发一次整个瀑布流重测。0014 的比例缓存只在进程内，重启全部重来。
+② 横/竖切换时 `MangaCover.Panorama(...)` / `MangaCover.Book(...)` 是两个 Compose 调用点，`AsyncImage` 被销毁重建、图片重新请求、`onSuccess` 再触发一次形状变化。
+③ 滚动条残余抽搐是同一件事：可见格子高度在滑动中变，0016 的估算就跳。**0016 的滚动条代码这张补丁没动。**
+
+做法：新文件 `app/src/main/java/eu/kanade/presentation/library/components/PanoramaCoverShapes.kt`，与 anikku-harmony 0025 **逐字节相同**（`cmp` 校验过），改一处要同步另一处。`PanoramaCoverShapes` 用 `SnapshotStateMap` 存已学到的高/宽，持久化到 `filesDir/harmony_panorama_cover_shapes.txt`（每行 `id ratio`，3 位小数；写临时文件再 rename；2 秒防抖；上限 20000 条，超出丢最旧）。`App.onCreate` 里 `init` 异步加载。书架两种全景模式后台 `prefetch`：对未知 id 用 `BitmapFactory` `inJustDecodeBounds` 读封面缓存文件的尺寸，并行度 4，不阻塞列表，挂在 `LibraryViewModel`（Anikku 挂在 `LibraryScreenModel`，这是唯一的挂点差异）。`LocalPanoramaGridSettled` 由瀑布流包装层提供 `{ !state.isScrollInProgress }`，`rememberCoverRatio` 只在网格静止时才把新形状写进布局；横竖已经在同一侧（都 ≤ 0.75 或都 > 0.75）则立即写。`onCoverLoaded` 改为写 `PanoramaCoverShapes.put`。封面改成单一调用点：`val cover = if (wide) MangaCover.Panorama else MangaCover.Book; cover(...)`。浏览页 `BrowseSource*Grid` 同样注入静止判断，但没有文件预取（靠已持久化的形状，加上停下来之后学到的）。不改数据库、不加设置项。
+
+已知局限：从没见过的封面仍会在滑动停下时改一次形状（一次性，之后就在文件里）；浏览页第一次进全景没有预取。掉帧是否消失要用户真机确认——VM 模拟器只有软件加速，测不了帧率。模拟器（本地 `assembleNightly` 的 x86_64 包，AVD harmony34）上用 400 个本地源条目看过：切「全景紧凑网格」后横竖格子形状正确，滑动后文件落盘，`am force-stop` 重启后排版一致。Animeko 没有这套全景网格，不适用。
+
 ### 5.2 加新补丁
 
 在套完现有补丁的源码树上直接改代码并 commit（message 写清楚为什么），`git format-patch -1` 导出，
@@ -294,6 +305,7 @@ gh release list --repo Xun2202/mihon-harmony
 | 卓易通里书架不自动更新 | 设置 → 书架 → 智能更新，取消全部限制选项 |
 | 通知栏不显示下载进度 | 卓易通通知兼容问题，无解，不影响功能 |
 | 本机 `./gradlew` 一直没有输出、`app/build` 不生成，jstack 里 worker 线程全在 `TaskPathProjectEvaluator.scheduleProjectsJustInTime` 等队列 | v0.21.0 起 `gradle.properties` 开了 `org.gradle.isolated-projects=true`，本机加 `--max-workers=2` 时并行配置阶段会空等（10-12 两次复现）。`./gradlew --stop` 后去掉 `--max-workers` 重跑即可；也不要再传 `-Dorg.gradle.jvmargs` 之类覆盖参数 |
+| 全景网格滑动时格子高度乱跳、感觉掉帧，滚动条还在抽一下 | preview.2 及之前：比例只在进程内，格子先按 3:2 排、解码完改 2:3，瀑布流整列重测；横竖切换还重建 `AsyncImage`。0018（v0.21.1-harmony-preview.3）起形状写在 `filesDir/harmony_panorama_cover_shapes.txt`，滑动中不把新形状写进布局（同侧立即写），封面单一调用点。0016 的滚动条代码没动，残余抽搐随格子高度稳定而消失。从没见过的封面仍会在停下时跳一次。掉帧要真机确认（模拟器软件加速测不了帧率） |
 
 ## 8. 不要做的事
 
@@ -359,3 +371,7 @@ gh release list --repo Xun2202/mihon-harmony
   0015 / 0016 由子代理（grok-4.7-high-fast）在 `/tmp/mihon-021` `dev-021` 写成；主代理复核：0016 的「满行条目」判断从 `@Suppress("INVISIBLE_REFERENCE")` 强转内部 `LazyStaggeredGridMeasuredItem.span` 改为宽度启发式，并按 Compose 源码（`LazyStaggeredGridMeasure.kt`：`beforeContentPadding` 只在 `place()` 时加进 `contentOffset`）把 `scrollOffset` 里多加的顶部 padding 去掉，估算段与 Anikku 0023 `diff` 一致；0017 主代理自己写。`flock /tmp/gradle.lock ./gradlew :app:compileNightlyKotlin spotlessCheck :domain:test` 通过。
   17 张补丁在干净 v0.21.1 上套用后与开发树只差上游 0.21.0 → 0.21.1 的改动和版本号行。推 `main` `93c8cbd63`（+ `940acfa51` 改 0016 提交说明）→ `dry_run` run 38280545014（14 张）/ 38283415443（17 张）绿 → 正式 run 38284349214 → **`v0.21.1-harmony-preview.2`**（17:33 UTC，target `940acfa51`，非 draft / prerelease；
   `app.mihon.debug`，versionCode 3702，versionName `0.21.1-harmony.2-8176`，签名 `4bd90284…ea8a`，arm64 26,940,089 B，SHA-256 `85156a26…`，universal 67,249,088 B；DEX 含 `CompactGridPanorama` / `COMPACT_GRID_PANORAMA` / `StaggeredGridMeasurements`，`-harmony(?:-preview)?` 正则出现 2 次（domain + data），`resources.arsc` 含「Panorama compact grid」「全景紧凑网格」「全景密集格狀」；`repo` 分支 `releases.json` 第一项即 preview.2，共 15 条）。同轮 Anikku 0022 / 0023 / 0024 → `v0.2.0-harmony-preview.13`。
+- 2026-10-13 用户：「滚动条还是会有些抽搐，我有时候也发现上下滑动的时候，各个资源块的排版也会出现轻微抽搐」「全景下，滑动时也有比较明显的掉帧的感觉」。根因见 §5.1 补丁 0018（格子先按默认横版排、解码完改竖版，瀑布流整列重测；横竖两个 Compose 调用点拆掉重建图片；滚动条残余抽搐是同一件事，0016 没动）。
+  子代理（grok-4.7-high-fast）在开发树 `/tmp/mihon-0211-clean` `dev-0211`（v0.21.1 + 17 张）写成提交 `999bfa3`；主代理定根因与方案并复核。`:app:compileNightlyKotlin spotlessCheck :domain:test` 通过。导出 `patches/0018-library-panorama-stable-cell-shapes.patch`（`PanoramaCoverShapes.kt` 与 Anikku 0025 逐字节相同）。干净 v0.21.1 树 `/tmp/mihon-verify18` 套 18 张成功（versionCode 3703），4 个关键文件 `cmp` 一致。
+  模拟器（本地 `assembleNightly` 的 x86_64 包，AVD harmony34，TCG 软件加速）：本地源 400 个条目（每 3 个 1 竖 2 横，合成 PNG），浏览页切「全景紧凑网格」后横竖格子形状全部正确；滑动后 `files/harmony_panorama_cover_shapes.txt` 落盘（18 行，竖 `1.500` / 横 `0.563`）；`am force-stop` 重启后再进，排版一致。掉帧测不了（软件加速），要用户真机确认。
+  计划发 **`v0.21.1-harmony-preview.3`**（versionCode 3703）。`dry_run` 已触发，正式发版进行中；APK 解析（包名、versionName 后缀、签名、体积、SHA-256）和 `repo` 分支索引由发版后核对，不在这次文档提交里编造。同轮 Anikku 0025 → `v0.2.0-harmony-preview.14`。Animeko 不适用。
