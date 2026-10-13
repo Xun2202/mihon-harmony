@@ -71,7 +71,8 @@
 - `v0.21.1-harmony-preview.4` —— 2026-10-13，加入补丁 0019（全景网格连续 300 ms 不滚动才算停下来；浏览页提前学已加载、还没上屏的封面形状）。versionCode 3704，versionName `0.21.1-harmony.4-8178`，签名与 preview.3 相同（`4bd90284…ea8a`）。本轮 Mihon 只编译，没上模拟器（`PanoramaCoverShapes.kt` 与 Anikku 已测的 0027 逐字节相同）。
 - `v0.21.1-harmony-preview.5` —— 2026-10-13，加入补丁 0020（瀑布流快速滚动条拇指不再大约每行回跳一下：位置跨帧累加，滚动中冻结总长度，停下后 150 ms 平滑）。versionCode 3705，versionName `0.21.1-harmony.5-8179`，签名与 preview.4 相同（`4bd90284…ea8a`）。正式 run 38424091586（15:47 UTC，target `3d89a0796`），arm64 26,940,093 B、SHA-256 `d9639da6…`；DEX 含新滚动条字段。发出时 `repo` 分支 `releases.json` 第一项是它（当时共 19 条）。**已发布但被 0.21.2 系取代，不要装**：3705 低于同日定时任务发出的 `v0.21.2-harmony-preview.1`（3801），手机提示版本过老拒装。Release 保留未删（更新器取最高版本，不会推给已在 0.21.2 的用户）。
 - `v0.21.2-harmony-preview.1` —— 2026-10-13，**定时任务自动发布**。上游 Mihon 2026-10-13 04:27 UTC 发了 v0.21.2；定时 run 38392710194（11:47 UTC，target `f32a21972`，含补丁 0001–0019）套上后发布。versionCode 3801。功能同当时的 v0.21.1-harmony-preview.4（还没有 0020）。用户手机升到了它。
-- `v0.21.2-harmony-preview.2` —— 2026-10-13，**当前版本**。同一套 20 张补丁（含 0020）在干净 v0.21.2 树 `/tmp/mihon-verify212` 套用成功（`prepare-source.sh … v0.21.2 2`，versionCode 3802）。跳过单独 dry_run：0.21.2 preview.1 已用前 19 张编过，0020 只改 `VerticalFastScroller.kt`，正式 run 编译失败不会发布。正式 run 38427442080（16:09 UTC，target `3d89a0796`）。`app.mihon.debug` versionCode 3802、versionName `0.21.2-harmony.2-8191`，签名 `4bd90284…ea8a` 不变，arm64 26,956,473 B、SHA-256 `1a9cd9d5…`，DEX 含新滚动条字段。`repo` 分支 `releases.json` 前三项 `v0.21.2-harmony-preview.2`、`v0.21.2-harmony-preview.1`、`v0.21.1-harmony-preview.5`（共 20 条）。拇指顺不顺要用户在这一版上真机确认。
+- `v0.21.2-harmony-preview.2` —— 2026-10-13，含补丁 0020，已被 preview.3 取代。同一套 20 张补丁（含 0020）在干净 v0.21.2 树 `/tmp/mihon-verify212` 套用成功（`prepare-source.sh … v0.21.2 2`，versionCode 3802）。跳过单独 dry_run：0.21.2 preview.1 已用前 19 张编过，0020 只改 `VerticalFastScroller.kt`，正式 run 编译失败不会发布。正式 run 38427442080（16:09 UTC，target `3d89a0796`）。`app.mihon.debug` versionCode 3802、versionName `0.21.2-harmony.2-8191`，签名 `4bd90284…ea8a` 不变，arm64 26,956,473 B、SHA-256 `1a9cd9d5…`，DEX 含新滚动条字段。`repo` 分支 `releases.json` 前三项 `v0.21.2-harmony-preview.2`、`v0.21.2-harmony-preview.1`、`v0.21.1-harmony-preview.5`（共 20 条）。拇指顺不顺要用户在这一版上真机确认。0021 起这套估算已删除。
+- `v0.21.2-harmony-preview.3` —— 2026-10-13，**当前版本**。加入补丁 0021（自建全景瀑布流：末尾不再左空、列数变化当帧重排、滚动条用真实内容高度）。versionCode 3803，versionName `0.21.2-harmony.3-8192`，签名与 preview.2 相同（`4bd90284…ea8a`）。开发树 `/tmp/mihon-verify212` `dev-0021` 提交 `08bd109`（底座 v0.21.2 + 0001–0020），流水线 `e5c6c734e`。`:presentation-core:spotlessCheck` `:app:spotlessCheck` 通过，`:presentation-core:testDebugUnitTest` 16/16，`:app:compileNightlyKotlin` 通过。干净 v0.21.2 树套 21 张成功，12 个改动文件 `cmp` 一致。`check_patches` run 38453485932、`dry_run` run 38453484931、正式 run 38454541710 均成功。arm64 26,940,089 B（SHA-256 前缀 `58ea2694f782`），universal 67,249,088 B，DEX 含 `PanoramaMasonryLayout`。`repo` 分支 `releases.json` 第一条即此版，共 21 条。未上模拟器。与 anikku-harmony 0030 同源。
 
 ## 3. 仓库结构
 
@@ -96,7 +97,8 @@ patches/0016-*.patch           # 瀑布流快速滚动条拇指不抽搐 (与 An
 patches/0017-*.patch           # 更新器按版本号取最大而不是列表第一项 (与 Anikku 0024 同源)
 patches/0018-*.patch           # 全景格子形状持久化 + 滑动中不改排版 (PanoramaCoverShapes.kt 与 Anikku 0025 逐字节相同)
 patches/0019-*.patch           # 全景网格静止判断加 300 ms + 浏览页提前学封面形状 (PanoramaCoverShapes.kt 与 Anikku 0027 逐字节相同)
-patches/0020-*.patch           # 瀑布流快速滚动条拇指不再每行回跳 (StaggeredGridEstimate 段与 Anikku 0028 逐字节相同)
+patches/0020-*.patch           # 瀑布流快速滚动条拇指不再每行回跳 (StaggeredGridEstimate 段与 Anikku 0028 逐字节相同; 0021 起整段删除)
+patches/0021-*.patch           # 自建全景瀑布流: 阅读顺序容差 + 列数变化当帧重排 (PanoramaMasonry*.kt 与 Anikku 0030 逐字节相同)
 scripts/prepare-source.sh      # 官方源码 → 套补丁 → 改版本号, 每步一个 commit
 scripts/write-release-index.sh # Releases 接口返回 → repo 分支的 releases.json / latest.json
 .github/workflows/harmony_preview.yml   # 每日构建发布, 最后写 Release 索引
@@ -254,7 +256,36 @@ CBZ 模式（0003 的 `finalizeArchive`）没有动：它本来就是单文件�
 
 做法：只改 `presentation-core/src/main/java/tachiyomi/presentation/core/components/VerticalFastScroller.kt`。位置改为跨帧累加——记住一个两帧之间都还在屏幕上的锚（可见项中间那个），用它的位移推进；第 0 项可见时用精确值；跳转（拖拇指 / `scrollToItem`）后锚不在了才回退行公式。滚动中（`isScrollInProgress`）冻结总长度，条目数变化时才刷新；停下后拇指用 150 ms 动画平滑移到新位置（`RANGE_SETTLE_MILLIS = 150`）；到底（`!canScrollForward`）时比例为 1。
 
-`private class StaggeredGridEstimate(` 到 `// Harmony <--` 这一段与 anikku-harmony 0028 **逐字节相同**，改一处要同步另一处。开发树 `/tmp/mihon-0211-clean` `dev-0211` 提交 `98ff730`。`:presentation-core:spotlessCheck :app:compileNightlyKotlin` 通过。拇指顺不顺模拟器（只有软件加速）测不了，要用户真机确认。Animeko 没有这套瀑布流快速滚动条，不适用。
+`private class StaggeredGridEstimate(` 到 `// Harmony <--` 这一段与 anikku-harmony 0028 **逐字节相同**，改一处要同步另一处。开发树 `/tmp/mihon-0211-clean` `dev-0211` 提交 `98ff730`。`:presentation-core:spotlessCheck :app:compileNightlyKotlin` 通过。拇指顺不顺模拟器（只有软件加速）测不了，要用户真机确认。Animeko 没有这套瀑布流快速滚动条，不适用。0021 起 `StaggeredGridEstimate` 整段删除，滚动条改读真实内容高度，见下一条。
+
+补丁 0021 与 anikku-harmony 0030 同源，修两件（用户：「最后一个似乎倾向于高度不是最高的位置开始……左边看起来空出来一块」「折叠到打开时 anikku 从两列变成四列……希望在排布变化的那一刻就优化好」）。不是卓易通平台限制，是 Compose `LazyVerticalStaggeredGrid` 的行为，两边 foundation 版本不同、相关代码逐段相同。上游若重写全景网格，不要再换回 `LazyVerticalStaggeredGrid`，保住下面这套。
+
+根因两条：
+① 分列零容差。`LazyStaggeredGridMeasure.kt` 用 `indexOfMinValue`：每一项严格放进底边最小的列，并列取左边。右边只低一丝，下一项也挪过去，左边空出一块。列表中部同样生效，末尾最显眼。
+② 列数变化。lane 数一变就 `laneInfo.reset()`，把当前可见项当成新网格的起点，新列填入「最大下标 + 1」的连续项。只有滑动触发的 `misalignedStart` 才从第 0 项重排。停在列表顶部看不出，要先滚到中部再改宽度。没有可绕的公开 API：`StaggeredGridItemSpan` 只有 `FullLine` / `SingleLane`；目标已可见时 `scrollToItem` 只平移偏移，不会从头重排。
+
+做法：自建 `LazyLayout` 瀑布流（`presentation-core/.../components/PanoramaMasonry.kt`、`PanoramaMasonryLayout.kt`）。下一项高为 `H` 时，`limit = 最短列底边 + H × 0.5`，在底边 ≤ limit 的列里取最左一列。`FullLine` 不参与容差，放在所有列底边的最大值处，放完后各列对齐到它下面。列宽照抄 `StaggeredGridCells.Adaptive`，同宽度下列数和原来一致（0 = `Adaptive(168.dp)`）。重算前记下视口顶部那一项的 key（没有 key 用 index）和它顶边的偏移；新矩形算完后在同一次测量里设滚动位置，再夹到合法范围。
+
+格子高度不测量，布局和格子读同一份已提交形状：
+- 槽宽先减左右各 4dp。
+- 高/宽 ≤ 0.75（含未知，未知默认 9/16）为宽封面，封面高 = 列内宽 × 2/3；> 0.75 为高封面，封面高 = 列内宽 × 3/2。
+- 格子高 = 封面高 + 上下各 4dp。松散再加标题 4dp×2 + 2×18sp（`minLines = maxLines = 2`）。
+- 垂直间距 4dp。浏览加载行 72dp。Anikku 另有相关作品加载行 56dp，Mihon 没有相关作品页。
+- 上游若改了封面阈值或标题行数，同步 `panoramaCoverCellHeightPx`。
+
+与 0020 的关系：0020 的 `StaggeredGridEstimate` 是因为 `LazyVerticalStaggeredGrid` 不给出真实内容高度，只能估算拇指位置。0021 换成自建布局之后，快速滚动条直接读真实内容高度和偏移，估算段删除。Mihon 浏览页本来没有快速滚动条，保持没有。
+
+调用点 5 处：书架紧凑 / 松散的 `LazyLibraryGrid`、浏览紧凑 / 松散。Anikku 是 7 处（另加相关作品紧凑 / 松散）。
+
+共享文件：
+- `PanoramaMasonry.kt`、`PanoramaMasonryLayout.kt`、`presentation-core/src/test/.../PanoramaMasonryLayoutTest.kt` 与 Anikku 0030 **逐字节相同**，改一处要同步另一处。
+- `VerticalFastScroller.kt` 的 `// Harmony -->` 到 `// Harmony <--` 段相同。整文件不同：Anikku 保留原有不规则滚动条淡出。**行为差异**：Mihon 书架拇指停留从原来的 2 秒变为系统默认约 300 ms；Anikku 没有这一处。浏览页 Mihon 仍无快速滚动条。
+- `app/.../library/components/PanoramaCoverShapes.kt` 此前（0018 / 0019 对 0025 / 0027）逐字节相同。0021 起只差阈值常量名：本仓 `RATIO_SWITCH_TO_PANORAMA`，Anikku `RatioSwitchToPanorama` 加一行 import，各 App 原有命名，逻辑相同。重做时不要为了 `cmp` 把常量名改成对方的。
+- `presentation-core/build.gradle.kts` 只加了 JUnit（给 `PanoramaMasonryLayoutTest`）。
+
+开发树 `/tmp/mihon-verify212` 分支 `dev-0021` 提交 `08bd109`（底座 v0.21.2 + 0001–0020），流水线提交 `e5c6c734e`。本机 `:presentation-core:spotlessCheck` `:app:spotlessCheck` 通过，`:presentation-core:testDebugUnitTest` 16/16，`:app:compileNightlyKotlin` 通过。干净 v0.21.2 树套 21 张成功（versionCode 3803），12 个改动文件 `cmp` 一致。未上模拟器（Anikku 在 AVD harmony34 上测过同一份布局文件）。
+
+已知局限：没有 key 的书架过滤结果，锚点按 index；标题行高写死 18sp，系统字体更大时标题被裁（格子以算出的高度为准，超出裁切）；`scrollToItem(0, 0)` 不计开头 content padding。验收列数变化必须先滚到中部，再改宽度（360 dp 宽为 2 列，约 733 dp 宽为 4 列）。真折叠屏这轮只用 `wm size` 模拟，而且是在 Anikku 上。Animeko 没有这套全景网格，不适用。
 
 ### 5.2 加新补丁
 
@@ -329,7 +360,11 @@ gh release list --repo Xun2202/mihon-harmony
 | 本机 `./gradlew` 一直没有输出、`app/build` 不生成，jstack 里 worker 线程全在 `TaskPathProjectEvaluator.scheduleProjectsJustInTime` 等队列 | v0.21.0 起 `gradle.properties` 开了 `org.gradle.isolated-projects=true`，本机加 `--max-workers=2` 时并行配置阶段会空等（10-12 两次复现）。`./gradlew --stop` 后去掉 `--max-workers` 重跑即可；也不要再传 `-Dorg.gradle.jvmargs` 之类覆盖参数 |
 | 全景网格滑动时格子高度乱跳、感觉掉帧，滚动条还在抽一下 | preview.2 及之前：比例只在进程内，格子先按 3:2 排、解码完改 2:3，瀑布流整列重测；横竖切换还重建 `AsyncImage`。0018（v0.21.1-harmony-preview.3）起形状写在 `filesDir/harmony_panorama_cover_shapes.txt`，滑动中不把新形状写进布局（同侧立即写），封面单一调用点。0016 的滚动条代码没动，残余抽搐随格子高度稳定而消失。从没见过的封面仍会在停下时跳一次。拖滚动条的间隙和浏览页未上屏封面由 0019 补（下一行）。掉帧要真机确认（模拟器软件加速测不了帧率） |
 | 全景网格拖右侧滚动条、或连续甩两下时格子还会跳；浏览页新滑出来的格子第一次形状不对 | preview.3（0018）把「停下」定义成 `isScrollInProgress` 为假。拖拇指是一串 `scrollToItem`，中间为假就把新形状写进布局；浏览页要等上屏才学形状。0019（v0.21.1-harmony-preview.4）起连续 300 ms 不滚动才算停下，浏览页对已加载未上屏的封面按 128 px 提前学形状（`PanoramaCoverShapes.kt` 与 Anikku 0027 逐字节相同）。刚打开的第一屏在静止时仍可能翻一次；下载失败保持默认横版。往下滑时拇指大约每行回跳由 0020 补（下一行） |
-| 全景网格往下滑时右侧滑动块大约每一行往回抽一下，再移回来 | preview.4（0019）修的是格子形状，滚动条估算没动。瀑布流各列高度不同，旧公式以「编号最小的可见格子」为锚，这个格子一换，公式偏差就变，大约每行回跳（模拟 100 行 141 次，中位数 3.2 px，最大 9.3 px）；滚动中总长度均值也在变。0020 起位置跨帧累加（可见项中间那个锚），第 0 项可见用精确值，跳转后锚不在才回退行公式；滚动中冻结总长度，停下后 150 ms 平滑；到底比例为 1。可装的是 `v0.21.2-harmony-preview.2`。`v0.21.1-harmony-preview.5` 含同一补丁，被 0.21.2 系取代、不要装。`StaggeredGridEstimate` 段与 Anikku 0028 逐字节相同。拇指顺不顺要真机确认（模拟器软件加速测不了） |
+| 全景网格往下滑时右侧滑动块大约每一行往回抽一下，再移回来 | preview.4（0019）修的是格子形状，滚动条估算没动。瀑布流各列高度不同，旧公式以「编号最小的可见格子」为锚，这个格子一换，公式偏差就变，大约每行回跳（模拟 100 行 141 次，中位数 3.2 px，最大 9.3 px）；滚动中总长度均值也在变。0020 起位置跨帧累加（可见项中间那个锚），第 0 项可见用精确值，跳转后锚不在才回退行公式；滚动中冻结总长度，停下后 150 ms 平滑；到底比例为 1。可装的是 `v0.21.2-harmony-preview.2`。`v0.21.1-harmony-preview.5` 含同一补丁，被 0.21.2 系取代、不要装。`StaggeredGridEstimate` 段与 Anikku 0028 逐字节相同。0021 起这套估算已删除，滚动条改用真实内容高度（下一行） |
+| 全景网格末尾左边空一块；折叠屏展开后最后几项和前面空一格，滑一下才重排 | preview.2 及之前用 Compose `LazyVerticalStaggeredGrid`：零容差放进最短列；列数一变把可见项当新起点，只有再滑才从头排。0021（`v0.21.2-harmony-preview.3`）起自建 `PanoramaMasonryLayout`：放进底边 ≤ 最短列 + 本项高×0.5 的最左列；列数 / 宽度变化同一次测量里重算，用视口顶部项 key 钉住（没有 key 按 index）。快速滚动条用真实内容高度。本轮未上模拟器。与 Anikku 0030 同源。验收要先滚到中部再改宽度 |
+| 全景网格格子里的标题被裁掉 | 松散模式标题行高按 2×18sp 写死，另加上下各 4dp。系统字体调大时格子仍按这个高度排，多出来的字被裁。改行高就改 `panoramaCoverCellHeightPx` 里的 18sp，与 Anikku 一起改 |
+| 上游改了封面横竖阈值或标题行数，全景格子高矮不对 | 高度不测量、按公式算（`panoramaCoverCellHeightPx`）：槽宽先减左右各 4dp；宽封面 3/2、高封面 2/3；格子高 = 封面高 + 上下各 4dp；松散再加标题 4dp×2 + 2×18sp。阈值常量名本仓是 `RATIO_SWITCH_TO_PANORAMA`，Anikku 是 `RatioSwitchToPanorama`，逻辑相同，不要改成对方的名字 |
+| 全景网格右侧拇指松开后很快消失 | 0021 起书架拇指停留从原来的 2 秒改为系统默认约 300 ms。浏览页本来就没有这根滚动条。Anikku 仍是原来的不规则滚动条淡出，没有这一处 |
 | 手机提示版本过老 / 降级不给装 | 更新器按版本号取最大。官方 2026-10-13 04:27 UTC 出了 v0.21.2，定时 run 38392710194 自动发了 `v0.21.2-harmony-preview.1`（versionCode 3801）；随后在 0.21.1 上发的 `v0.21.1-harmony-preview.5`（3705）号更小，手机拒装。preview.5 保留未删，更新器不会把它推给已在 0.21.2 的用户。补救是在最新上游上重发：`v0.21.2-harmony-preview.2`（3802，正式 run 38427442080）。workflow「Resolve release version」（提交 `fd1835633`）：非 dry_run 且目标 tag 还不存在时，按「上游版本.N」`sort -V`，比已发布最高的旧就 `exit 1` 报「installs would be a downgrade」。已存在的 tag 仍 skip，定时 run 不会因此变红。发版前先看 Releases 上最新的上游底座。本地用真实 tag 列表测过：0.21.1 的 preview.6 拒绝，0.21.2 的 preview.3、0.21.3 的 preview.1、0.21.10 的 preview.1 放行。CI 上没实际触发过拒绝路径 |
 
 ## 8. 不要做的事
@@ -409,3 +444,6 @@ gh release list --repo Xun2202/mihon-harmony
   推 `main` `3d89a0796` → `check_patches` run 38421701462 绿 → `dry_run` run 38421777350 绿 → 正式 run 38424091586 → **`v0.21.1-harmony-preview.5`**（15:47 UTC，target `3d89a0796`），`app.mihon.debug` versionCode 3705、versionName `0.21.1-harmony.5-8179`，签名 `4bd90284…ea8a` 不变，arm64 26,940,093 B、SHA-256 `d9639da6…`，DEX 含新滚动条字段；发出时 `repo` 分支 `releases.json` 第一项即 preview.5（共 19 条）。同轮 Anikku 0028 / 0029 → `v0.2.0-harmony-preview.16`。Animeko 没有这套瀑布流快速滚动条，不适用。这一版随后被 0.21.2 系取代，见下一条。
 - 2026-10-13（16:09 UTC）用户：「为啥mihon没在0.21.2继续更新？现在手机提示装的0.21.2那个，0.21.1显示版本过老不给装了」。上游 Mihon 当天 04:27 UTC 发了 v0.21.2，定时 run 38392710194（11:47 UTC，target `f32a21972`，含 0001–0019）已自动发 **`v0.21.2-harmony-preview.1`**（versionCode 3801），用户手机升到了它。15:47 在 0.21.1 上发的 preview.5（3705）号更小，被当成降级。补救：同一套 20 张补丁在干净 v0.21.2 树 `/tmp/mihon-verify212` 套用成功（`prepare-source.sh … v0.21.2 2`，versionCode 3802），跳过单独 dry_run（preview.1 已用前 19 张编过，0020 只改 `VerticalFastScroller.kt`，正式 run 编译失败不会发布）。正式 run 38427442080 → **`v0.21.2-harmony-preview.2`**（16:09 UTC，target `3d89a0796`），versionCode 3802、versionName `0.21.2-harmony.2-8191`，签名 `4bd90284…ea8a` 不变，arm64 26,956,473 B、SHA-256 `1a9cd9d5…`，DEX 含新滚动条字段。`releases.json` 前三项为 preview.2、preview.1、`v0.21.1-harmony-preview.5`（共 20 条）。preview.5 保留未删。
   防降级：`harmony_preview.yml`「Resolve release version」在非 dry_run 且目标 tag 还不存在时，按「上游版本.N」`sort -V`，比已发布最高的旧就 `exit 1`（「installs would be a downgrade」）。已存在的 tag 仍 skip。本地用真实 tag 列表测过（0.21.1 preview.6 拒绝；0.21.2 preview.3、0.21.3 preview.1、0.21.10 preview.1 放行）。CI 上没实际触发过拒绝路径。提交 `fd1835633`（已推 main）。这是发版时没先看最新上游底座的疏漏。
+- 2026-10-13（发版）用户两件：① 全景网格末尾一项总进最短列，右边只短一丝也放右边，左边空一块；② 折叠屏展开从两列变四列，最后几项和前面空一格，滑一下才重排。根因见 §5.1 补丁 0021：Compose `LazyVerticalStaggeredGrid` 零容差最短列，列数变化 `laneInfo.reset()` 把可见项当新起点。做法：自建 LazyLayout，放进底边 ≤ 最短列 + 本项高×0.5 的最左列；列数 / 宽度变化同一次测量里重算并用视口顶部项 key 钉住；快速滚动条用真实内容高度，0020 的 `StaggeredGridEstimate` 删除。
+  开发树 `/tmp/mihon-verify212` `dev-0021` 提交 `08bd109`（底座 v0.21.2 + 0001–0020）。`:presentation-core:spotlessCheck` `:app:spotlessCheck` 通过，`:presentation-core:testDebugUnitTest` 16/16，`:app:compileNightlyKotlin` 通过。导出 `patches/0021-presentation-panorama-masonry-reading-order.patch`（`PanoramaMasonry.kt` / `PanoramaMasonryLayout.kt` / `PanoramaMasonryLayoutTest.kt` 与 Anikku 0030 逐字节相同；`PanoramaCoverShapes.kt` 起只差阈值常量名 `RATIO_SWITCH_TO_PANORAMA` / `RatioSwitchToPanorama`）。干净 v0.21.2 树套 21 张成功（versionCode 3803），12 个改动文件 `cmp` 一致。未上模拟器。
+  推 `main` `e5c6c734e` → `check_patches` run 38453485932 绿 → `dry_run` run 38453484931 绿 → 正式 run 38454541710 → **`v0.21.2-harmony-preview.3`**（target `e5c6c734e`），`app.mihon.debug` versionCode 3803、versionName `0.21.2-harmony.3-8192`，签名 `4bd90284…ea8a` 不变，arm64 26,940,089 B（SHA-256 前缀 `58ea2694f782`），universal 67,249,088 B，DEX 含 `PanoramaMasonryLayout`；`repo` 分支 `releases.json` 第一条即此版（共 21 条）。同轮 Anikku 0030 → `v0.2.0-harmony-preview.17`。Animeko 没有这套网格，不适用。行为差异：Mihon 浏览页仍无快速滚动条；Mihon 书架拇指停留从 2 秒变为系统默认约 300 ms。
