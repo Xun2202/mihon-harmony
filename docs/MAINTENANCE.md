@@ -67,7 +67,7 @@
 - `v0.21.0-harmony-preview.2` —— 2026-10-12，加入补丁 0014：书架 / 浏览页新增显示模式「全景松散网格」（从 anikku-harmony 0015 + 0020 移植：横版封面按 3:2 画、瀑布流排布、自动列宽 168 dp）。versionCode 3602。
 - `v0.21.1-harmony-preview.1` —— 2026-10-12，**定时任务自动发布**：官方 v0.21.1（versionCode 37）出来后 14 张补丁直接套上。功能与 v0.21.0-preview.2 相同，versionCode 3701。用户的 App 没看到它——见下一条。
 - `v0.21.1-harmony-preview.2` —— 2026-10-12，加入补丁 0015（显示模式「全景紧凑网格」）、0016（瀑布流快速滚动条拇指不抽搐）、0017（更新器按版本号取最大，修「检查更新一直停在 v0.21.0-harmony-preview.2」）。versionCode 3702。装着 ≤ v0.21.1-preview.1 的用户这一次要手动装，之后更新检查就正常。
-- `v0.21.1-harmony-preview.3` —— 2026-10-13，加入补丁 0018（全景格子形状持久化，滑动中不把新形状写进布局，封面横竖同一调用点）。versionCode 3703。`dry_run` 已触发，正式发版进行中；APK 的 versionName 后缀、签名、体积、`repo` 分支索引由发版后核对补记。模拟器（AVD harmony34，TCG）验过形状与落盘，掉帧要用户真机确认。
+- `v0.21.1-harmony-preview.3` —— 2026-10-13，加入补丁 0018（全景格子形状持久化，滑动中不把新形状写进布局，封面横竖同一调用点）。versionCode 3703，versionName `0.21.1-harmony.3-8177`，签名与 preview.2 相同（`4bd90284…ea8a`）。模拟器（AVD harmony34，TCG）验过形状与落盘，掉帧要用户真机确认。
 
 ## 3. 仓库结构
 
@@ -374,4 +374,5 @@ gh release list --repo Xun2202/mihon-harmony
 - 2026-10-13 用户：「滚动条还是会有些抽搐，我有时候也发现上下滑动的时候，各个资源块的排版也会出现轻微抽搐」「全景下，滑动时也有比较明显的掉帧的感觉」。根因见 §5.1 补丁 0018（格子先按默认横版排、解码完改竖版，瀑布流整列重测；横竖两个 Compose 调用点拆掉重建图片；滚动条残余抽搐是同一件事，0016 没动）。
   子代理（grok-4.7-high-fast）在开发树 `/tmp/mihon-0211-clean` `dev-0211`（v0.21.1 + 17 张）写成提交 `999bfa3`；主代理定根因与方案并复核。`:app:compileNightlyKotlin spotlessCheck :domain:test` 通过。导出 `patches/0018-library-panorama-stable-cell-shapes.patch`（`PanoramaCoverShapes.kt` 与 Anikku 0025 逐字节相同）。干净 v0.21.1 树 `/tmp/mihon-verify18` 套 18 张成功（versionCode 3703），4 个关键文件 `cmp` 一致。
   模拟器（本地 `assembleNightly` 的 x86_64 包，AVD harmony34，TCG 软件加速）：本地源 400 个条目（每 3 个 1 竖 2 横，合成 PNG），浏览页切「全景紧凑网格」后横竖格子形状全部正确；滑动后 `files/harmony_panorama_cover_shapes.txt` 落盘（18 行，竖 `1.500` / 横 `0.563`）；`am force-stop` 重启后再进，排版一致。掉帧测不了（软件加速），要用户真机确认。
-  计划发 **`v0.21.1-harmony-preview.3`**（versionCode 3703）。`dry_run` 已触发，正式发版进行中；APK 解析（包名、versionName 后缀、签名、体积、SHA-256）和 `repo` 分支索引由发版后核对，不在这次文档提交里编造。同轮 Anikku 0025 → `v0.2.0-harmony-preview.14`。Animeko 不适用。
+  推 `main` `fa0dc1020` → `dry_run` run 38369348892 绿 → 正式 run 38370403634 → **`v0.21.1-harmony-preview.3`**（08:41 UTC，target `fa0dc1020`，非 draft / prerelease；
+  `app.mihon.debug`，versionCode 3703，versionName `0.21.1-harmony.3-8177`，签名 `4bd90284…ea8a`（与 preview.2 相同），arm64 26,940,089 B，SHA-256 `8b85d3f0…`，universal 67,249,088 B。**体积与 preview.2 逐字节相同**：APK 有对齐填充，连续几版大小都一样，分辨版本看 SHA-256 / versionCode，不看体积。DEX 含 `PanoramaCoverShapes`（`classes.dex` 1 处 + `classes2.dex` 8 处）；`repo` 分支 `releases.json` 第一项即 preview.3，共 16 条）。同轮 Anikku 0025 → `v0.2.0-harmony-preview.14`。Animeko 不适用。
