@@ -79,7 +79,8 @@
 - `v0.21.2-harmony-preview.8` —— 2026-10-14 12:01 UTC，已被 preview.9 取代。加入补丁 0034（全景滚动没碰到两端时返回精确 delta），与 anikku-harmony 0042 同源。versionCode 3808，versionName `0.21.2-harmony.8-8205`，签名与 preview.7 相同（`4bd90284…ea8a`）。流水线 `00a9ff810`。`check_patches` run 38558901975、`dry_run` run 38558925925、正式 run 38559877474 均成功。这次 dry_run 成功后才触发正式 run，等待脚本已修好。`app.mihon.debug`，arm64 26,958,753 B（SHA-256 前缀 `79476a3a4758`），universal 67,267,752 B。体积与 preview.7 相同，是对齐填充，分辨版本看 SHA-256 / versionCode。manifest 无 ui-test。`repo` 分支 `releases.json` 26 条，第一条即此版。开发树 `dev-0023` 提交 `be7349e`。`:presentation-core:spotlessCheck :app:spotlessCheck :presentation-core:testDebugUnitTest :app:testDebugUnitTest :app:compileNightlyKotlin` 通过（presentation-core 55 个用例，0 失败，2 跳过；app 35 个）。干净树 `/tmp/mihon-verify216`（v0.21.2，N=8）套用成功，20 个改动文件与开发树 `cmp` 一致。`PanoramaMasonry.kt` 与 Anikku 0042 逐字节相同。0033 的诊断日志保留。series 32 张（0001–0034，0004 / 0009 已删）。
 - `v0.21.2-harmony-preview.7` —— 2026-10-14 11:15 UTC，已被 preview.8 取代。加入补丁 0033（全景网格滑动诊断，不改滚动行为），与 anikku-harmony 0041 同源。versionCode 3807，versionName `0.21.2-harmony.7-8204`，签名与 preview.6 相同（`4bd90284…ea8a`）。流水线 `15289c4df`。`check_patches` run 38553790858、`dry_run` run 38553801784、正式 run 38553912820 均成功。`app.mihon.debug`，arm64 26,958,753 B（SHA-256 前缀 `9f97e5d14716`），universal 67,267,752 B。体积与 preview.6 相同，是对齐填充，分辨版本看 SHA-256 / versionCode。DEX 含 `Panorama scroll trace`、`gapLastMove=`、`fling start v=`。manifest 无 ui-test。`repo` 分支 `releases.json` 25 条，第一条即此版。开发树 `dev-0023` 提交 `7b0bddc`。`:presentation-core:spotlessCheck :app:spotlessCheck :presentation-core:testDebugUnitTest :app:testDebugUnitTest :app:compileNightlyKotlin` 通过（presentation-core 54 个用例，0 失败，2 跳过；app 35 个）。干净树 `/tmp/mihon-verify215`（v0.21.2，N=7）套用成功，20 个改动文件与开发树 `cmp` 一致。`PanoramaScrollTrace.kt` / `PanoramaMasonry.kt` 与 Anikku 0041 逐字节相同。series 31 张（0001–0033，0004 / 0009 已删）。不改滑动手感。正式 run 在 dry_run 结束前就触发了（等待脚本把一次 API 报错当成完成）；正式 run 在同一并发组里排队，等 dry_run 成功后才执行，结果无影响。
 - `v0.21.2-harmony-preview.9` —— 2026-10-14 12:51 UTC，已被 preview.10 取代。加入补丁 0035（滚动条：按在画出来的拇指上立即抓；拇指旁边 20 dp 要按住 120 ms 不动才抓），与 anikku-harmony 0043 同源。versionCode 3809，versionName `0.21.2-harmony.9-8206`，签名与 preview.8 相同（`4bd90284…ea8a`）。流水线 `143b93517`。`check_patches` run 38564906465、`dry_run` run 38564985618、正式 run 38566077398 均成功（dry_run 成功后才触发正式 run）。`app.mihon.debug`，arm64 26,958,757 B（SHA-256 前缀 `01b7d412a7a6`），universal 67,267,756 B。manifest 无 ui-test。开发树 `dev-0023` 提交 `e1621be`（发版时为 `6d579ec`，之后只改了提交信息里的同源编号，代码相同）。`VerticalFastScroller.kt` 的 Harmony 段与 Anikku 0043 相同（Anikku 多第四根滚动条）。series 33 张（0001–0035，0004 / 0009 已删）。
-- `v0.21.2-harmony-preview.10` —— 2026-10-14 13:35 UTC，**当前版本**。加入补丁 0036（滚动性能记录器：设置 → 高级 →「滚动性能记录（调试）」，左下角「记录」按钮导出脱敏的帧耗时文件），与 anikku-harmony 0044 同源。versionCode 3810，versionName `0.21.2-harmony.10-8207`，签名与 preview.9 相同（`4bd90284…ea8a`）。流水线 `bdcc008e0`。`check_patches` run 38570494789、`dry_run` run 38570546143、正式 run 38572070546 均成功。`app.mihon.debug`，arm64 26,976,657 B（SHA-256 前缀 `0df8d7c4aea7`），universal 67,285,656 B。DEX 含 `harmony_scroll_perf_recorder`、`FrameMetrics 未提供`、`privacy: no titles`、`mark user`，preview.9 没有。manifest 无 ui-test。开发树 `dev-0023` 提交 `9f61aef`（发版时为 `46e8ef9`，代码相同），`:presentation-core:testDebugUnitTest :app:testDebugUnitTest` 通过（presentation-core 59 个用例，0 失败，2 跳过；app 41 个）。`HarmonyFramePerf.kt` / `PanoramaFrameCounters.kt` / `PanoramaScrollTrace.kt` / `PanoramaMasonry.kt` / `HarmonyFramePerfTest.kt` 与 Anikku 0044 逐字节相同。分析脚本在归档仓 `tools/scroll-perf-analyze/analyze.py`。series 34 张（0001–0036，0004 / 0009 已删）。发版后 `repo` 分支 `releases.json` 的第一条仍是 preview.9：GitHub「列出 Releases」接口不按创建时间排序，preview.10 排在第 7 位（下标 6）。App 端按版本号取最大，不受影响。`write-release-index.sh` 已改为翻完所有页、按 `created_at` 倒序取 30 条（`1db0e3620`，`release_index` run 38574198250），现在第一条是 preview.10，共 28 条。
+- `v0.21.2-harmony-preview.10` —— 2026-10-14 13:35 UTC，已被 preview.11 取代。加入补丁 0036（滚动性能记录器：设置 → 高级 →「滚动性能记录（调试）」，左下角「记录」按钮导出脱敏的帧耗时文件），与 anikku-harmony 0044 同源。versionCode 3810，versionName `0.21.2-harmony.10-8207`，签名与 preview.9 相同（`4bd90284…ea8a`）。流水线 `bdcc008e0`。`check_patches` run 38570494789、`dry_run` run 38570546143、正式 run 38572070546 均成功。`app.mihon.debug`，arm64 26,976,657 B（SHA-256 前缀 `0df8d7c4aea7`），universal 67,285,656 B。DEX 含 `harmony_scroll_perf_recorder`、`FrameMetrics 未提供`、`privacy: no titles`、`mark user`，preview.9 没有。manifest 无 ui-test。开发树 `dev-0023` 提交 `9f61aef`（发版时为 `46e8ef9`，代码相同），`:presentation-core:testDebugUnitTest :app:testDebugUnitTest` 通过（presentation-core 59 个用例，0 失败，2 跳过；app 41 个）。发版时 `HarmonyFramePerf.kt` / `PanoramaFrameCounters.kt` / `PanoramaScrollTrace.kt` / `PanoramaMasonry.kt` / `HarmonyFramePerfTest.kt` 与 Anikku 0044 逐字节相同；0037 起 `HarmonyFramePerf.kt` 不再与 Anikku 0044 逐字节相同。分析脚本在归档仓 `tools/scroll-perf-analyze/analyze.py`。series 34 张（0001–0036，0004 / 0009 已删）。发版后 `repo` 分支 `releases.json` 的第一条仍是 preview.9：GitHub「列出 Releases」接口不按创建时间排序，preview.10 排在第 7 位（下标 6）。App 端按版本号取最大，不受影响。`write-release-index.sh` 已改为翻完所有页、按 `created_at` 倒序取 30 条（`1db0e3620`，`release_index` run 38574198250），当时第一条是 preview.10，共 28 条。preview.11 起为 29 条、第一条 preview.11。
+- `v0.21.2-harmony-preview.11` —— 2026-10-14 约 16:25 UTC，**当前版本**。加入补丁 0037–0040（记录器补上被丢掉的 FrameMetrics 报告、各阶段分位数和长按对照开关；滑动中学到的跨档形状等停稳再提交；浏览预取默认只读封面文件头；翻页追加不再整表重排）。versionCode 3811，versionName `0.21.2-harmony.11-8211`，签名与 preview.10 相同（`4bd90284…ea8a`）。流水线 `33568c567`。`check_patches` run 38595775346、`dry_run` run 38595854992、正式 run 38597112426 均成功。`app.mihon.debug`，arm64 27,009,425 B（SHA-256 前缀 `544cefae3f39`），universal 67,318,424 B。DEX 含 `harmony-scroll-perf`、`HarmonyPerfToggles`、`HarmonyFramePerfSampler`、`mark toggle`、`harmony_fade`、`cpu_pool`、`privacy: no titles`。开发树 `/tmp/mihon-verify212` 分支 `dev-0024` HEAD `005f27b`（0037=`400fd6c`，0038=`6a7156b`，0039=`14f48c5`，0040=`005f27b`）。`spotlessCheck`、`:app:compileNightlyKotlin`、`:presentation-core:testDebugUnitTest`、`:app:testDebugUnitTest` 通过（presentation-core 65 个用例，0 失败，2 跳过；app 49 个，0 失败）。干净树 `/tmp/mihon-verify217`（v0.21.2，N=11）套用后，除 `app/build.gradle.kts` 的版本号 / 更新器行外，改动文件与开发树 `cmp` 一致。`HarmonyFramePerf.kt` / `HarmonyPerfToggles.kt` 计划与 anikku-harmony 0044 逐字节同源，**Anikku 侧待移植**。0038 / 0039 / 0040 与 anikku-harmony 0025/0027、0027、0030 同一份做法，Anikku 本轮没改，同病待修。分析脚本在归档仓 `tools/scroll-perf-analyze/analyze.py`（已认导出格式 `harmony-scroll-perf` 2）。series 38 张（0001–0040，0004 / 0009 已删）。`repo` 分支 `releases.json` 29 条、第一条 preview.11（该索引提交的 SHA 待确认）。浏览页越甩越卡的两种假设（合成器回压 vs 报帧被丢）本版还没分开，见 §5.1 0037 与 §7。Animeko 没有全景瀑布流网格，也没有 `HarmonyFramePerf`，不适用。
 
 ## 3. 仓库结构
 
@@ -120,7 +121,11 @@ patches/0032-*.patch           # 滚动条热区收回为绘制宽度 ThumbThick
 patches/0033-*.patch           # 全景滑动诊断: 崩溃日志附最近 400 条轨迹, 不改滚动行为 (PanoramaScrollTrace.kt / PanoramaMasonry.kt 与 Anikku 0041 逐字节相同)
 patches/0034-*.patch           # 全景滚动没碰到两端时返回精确 delta (PanoramaMasonry.kt 与 Anikku 0042 逐字节相同; 0033 诊断日志保留)
 patches/0035-*.patch           # 滚动条: 按在拇指上立即抓, 拇指旁 20 dp 按住 120 ms 才抓 (与 Anikku 0043 同源)
-patches/0036-*.patch           # 滚动性能记录器 + 「记录」按钮导出脱敏文件 (HarmonyFramePerf.kt 等与 Anikku 0044 逐字节相同)
+patches/0036-*.patch           # 滚动性能记录器 + 「记录」按钮导出脱敏文件 (发版时 HarmonyFramePerf.kt 等与 Anikku 0044 逐字节相同; 0037 起格式 2, 不再逐字节相同)
+patches/0037-*.patch           # 记录器补丢帧计数、阶段分位数、封面加载和长按对照开关 (导出 harmony-scroll-perf 2; HarmonyFramePerf.kt / HarmonyPerfToggles.kt 计划与 Anikku 0044 逐字节同源, Anikku 待移植)
+patches/0038-*.patch           # 滑动中学到的跨档形状等网格停稳再提交 (与 Anikku 0025/0027 同一份做法, 本轮 Anikku 没改)
+patches/0039-*.patch           # 浏览页全景预取默认只读封面文件头 (与 Anikku 0027 同一份做法, 本轮 Anikku 没改)
+patches/0040-*.patch           # 全景瀑布流翻页追加, 不再整表重排 (此前与 Anikku 0030 逐字节相同的那份文件, 本轮 Anikku 没改)
 scripts/prepare-source.sh      # 官方源码 → 套补丁 → 改版本号, 每步一个 commit
 scripts/write-release-index.sh # Releases 接口返回 → repo 分支的 releases.json / latest.json
 .github/workflows/harmony_preview.yml   # 每日构建发布, 最后写 Release 索引
@@ -465,14 +470,57 @@ CBZ 模式（0003 的 `finalizeArchive`）没有动：它本来就是单文件�
 开着时的开销：每帧一次后台 FrameMetrics 回调、每个 vsync 一次 Choreographer 回调（主线程按刷新率唤醒），以及 500 ms 采样。关着时什么都不跑。
 
 **重做要点**：
-- `HarmonyFramePerf.kt`、`HarmonyFramePerfTest.kt`、`PanoramaFrameCounters.kt`、`PanoramaScrollTrace.kt`、`PanoramaMasonry.kt` 与 Anikku 0044 **逐字节相同**，改一处要同步另一处。
+- 发版时 `HarmonyFramePerf.kt`、`HarmonyFramePerfTest.kt`、`PanoramaFrameCounters.kt`、`PanoramaScrollTrace.kt`、`PanoramaMasonry.kt` 与 Anikku 0044 **逐字节相同**。0037 起 `HarmonyFramePerf.kt` 多了丢帧计数和格式 2，不再逐字节相同，Anikku 待移植；其余几份见 0038 / 0040。
 - 字符串在 `i18n` base + zh-rCN + zh-rTW 的 Harmony 段。
 - 导出内容只能是数字和固定标签。往里加字段前先想清楚会不会带出书名 / 网址。
-- 分析脚本在归档仓 `tools/scroll-perf-analyze/analyze.py`，导出格式变了要一起改。
+- 分析脚本在归档仓 `tools/scroll-perf-analyze/analyze.py`，导出格式变了要一起改。0037 起格式是 `harmony-scroll-perf` 2。
 
 开发树 HEAD 复跑 `:presentation-core:testDebugUnitTest :app:testDebugUnitTest` 通过（presentation-core 59 个用例，0 失败，2 跳过；app 41 个）；发版前另跑了 spotless 和 `:app:compileNightlyKotlin`。
 
-同病：Anikku 0044 同轮已加。Animeko 不适用：用户没报 Animeko 卡顿，它也没有全景网格；需要时可移植 `HarmonyFramePerf`，去掉全景计数器即可。
+同病：Anikku 0044 同轮已加（仍是格式 1）。Animeko 不适用：用户没报 Animeko 卡顿，它也没有全景网格；需要时可移植 `HarmonyFramePerf`，去掉全景计数器即可。
+
+补丁 0037–0040。用户 2026-10-14 约 14:00 UTC 报告：书架网格顺，浏览页全景网格越甩越卡。记录 `mihon_scroll_perf_20261014-220359`（华为 HOP-AL10，卓易通里的 Android 16，90 Hz）。
+
+记录结论：
+- Compose / Choreographer 动画仍约 90 Hz（最长间隔 ≤21 ms）。
+- 一次甩动里系统报上来的帧从 22:03:36–38 的 98–99% 掉到 22:03:47 以后的 53–62%。书架甩动仍是 95–100%。
+- 报上来的帧都没超过截止时间（p50 6.8→8.9 ms，2560 帧甩动里 0 次 jank）。
+- 变卡的那几下进程 CPU 更低（约 43%，顺的时候约 83%）。坏的甩动里没有 GC。温控状态 0。90→60 Hz 只出现在停手的空隙。
+- 瀑布流整表重排（布局 16–20 ms）大多发生在还顺或停着的时候，46.774 秒之后就没有了，不是越甩越卡的原因。
+- 另外：浏览预取为每一行解码一张 128 px 硬件位图再扔掉，和正在看的封面抢 Coil 仅有的 3 个解码槽。
+
+两种假设本版还分不清，所以 0037 只加测量和对照开关，不把现象标成已修：
+- **甲**：合成器 / `BLASTBufferQueue` 回压，HWUI 直接跳帧。22:03:50 之后 BBQ 日志升到每秒 10–41 条。
+- **乙**：FrameMetrics 报告被丢（3 个槽的环；旧记录器没写 `dropCountSinceLastInvocation`），看起来像丢帧。
+
+0037 做法：
+- 写入 `dropCountSinceLastInvocation`。FrameMetrics 线程优先级 `THREAD_PRIORITY_DISPLAY`。采样挪到独立线程，名字 `HarmonyFramePerfSampler`。
+- 每一段滚动和整份记录：全部帧（不只是卡顿帧）的 draw / sync / command / swap / gpu / layout 的 p50 / p90，加上 reported、drops、ticks、missed vsyncs。missed = max(0, round(Δintended / refreshPeriod) − 1 − dropCount)。最近 30 秒另有一行一秒。
+- 采样增加：Java heap、native heap、gc-time、blocking-gc；分线程 CPU（main、RenderThread、hwui、`cpu_pool` = DefaultDispatcher 线程池、OkHttp = `cpu_ok`、perf、other）；采样耗时；Coil 计数（data source、硬件位图、errors、starts），经 `App.kt` 里接上的 Coil `EventListener`。
+- `BLASTBufferQueue` 拆成三类：max frames / `Faking releaseBufferCallback` / 其它。
+- 长按「记录」弹出菜单，循环「封面淡入（开/关）」「硬件位图（开/关）」「预取（读文件头 / 旧解码 / 关闭）」和「导出」。每次改动往轨迹写 `mark toggle crossfade=.. hardware=.. prefetch=..`。文件头在开始和导出时各记一次开关。
+- 开关在 `HarmonyPerfToggles.kt`，只在内存里。进程重启回到 crossfade=on、hardware=on、prefetch=bounds。不要写成 DataStore / SharedPreferences。
+- 导出格式 `harmony-scroll-perf` 2。
+
+0038 做法：任一网格还在滚时，第一次跨档提交进 `pendingCross`，停稳（300 ms）后一次 epoch bump 提交。刷新合并成主线程 looper 上的一次 post。滑动中用实时 `isScrollInProgress` 探针，不要用可能滞后一帧的快照。
+
+0039 做法：默认 BOUNDS。Coil 把图拉到磁盘；请求级 `decoderFactory` 只读文件头（`imageSource.file()` + `inJustDecodeBounds`），返回 1×1 的 `ColorImage`（`isSampled`，关掉这份请求的内存缓存），跑在 `Dispatchers.IO`，不占那 3 个解码槽，也不做硬件位图。窗口是第一个可见项再往后 30 项，同时最多 2 个，滑动中暂停，落后超过一个窗口就取消，完成的 id 记住，失败重试一次。DECODE 是旧的整图解码路径，OFF 是不预取。`MangaCover` 遵守封面淡入 / 硬件位图开关，并用 `memoryCacheKeyExtra`；两个开关都是默认值时，封面数据与改前一致。
+
+0040 做法：新的一页带着新的 items lambda。形状 epoch 没变、已经排好的 key 前缀对得上，就只追加，并把页脚那一行重新放好；否则整表重建。
+
+**重做要点**（rebase 到新上游时这 4 张）：
+- `HarmonyFramePerf.kt` / `HarmonyPerfToggles.kt` 计划与 anikku-harmony 0044 **逐字节相同**。Anikku 本轮没移植，0044 仍是格式 1。
+- 0038 与 anikku-harmony 0025 / 0027 同一份做法，0039 与 0027 同一份做法，0040 改的是此前与 anikku-harmony 0030 逐字节相同的 `PanoramaMasonry.kt`。Anikku 本轮没改，同病待修。
+- 三个对照开关只放内存。重启必须回到 crossfade=on、hardware=on、prefetch=bounds。
+- 导出仍只能是数字和固定标签。`mark toggle` 行只写这三项的开 / 关。
+- 分析脚本在归档仓 `tools/scroll-perf-analyze/`，格式 2 的阶段分位数、`mark toggle`、`toggles_at_start`、`cpu_pool`（旧导出写的是 `cpu_coil`）要一起认。
+- 独立 grok 复核修过的 8 处不要丢掉：开关的内存缓存 key 附加项（`memoryCacheKeyExtra`）、快照不在主线程读、追加时核对已排版 key 前缀、预取失败重试一次、用 `imageSource.file()` 读文件头、`isSampled`、滑动中的实时 `isScrollInProgress` 探针、`threadCpuBroken` 的作用域和 `cpu_pool`。
+
+作者 Xun2202。分析与实现由 grok-4.7-high 子代理完成，主代理复核，另有一次独立 grok 复核（上面 8 处）。
+
+`spotlessCheck`、`:app:compileNightlyKotlin`、`:presentation-core:testDebugUnitTest`、`:app:testDebugUnitTest` 通过（presentation-core 65 个用例，0 失败，2 跳过；app 49 个，0 失败）。干净树 `/tmp/mihon-verify217`（`prepare-source.sh`，v0.21.2，N=11）套用后，除 `app/build.gradle.kts` 的版本号 / 更新器行外，改动文件与开发树 `cmp` 一致。开发树 `/tmp/mihon-verify212` 分支 `dev-0024` HEAD `005f27b`（0037=`400fd6c`，0038=`6a7156b`，0039=`14f48c5`，0040=`005f27b`）。流水线提交 `33568c567`。
+
+同病：Anikku 的 0038–0040 等价改动同病待修；0037 的 `HarmonyFramePerf.kt` / `HarmonyPerfToggles.kt` 待移植。Anikku 浏览页另外还有调色板解码、400 ms 延迟转圈、每行急切 `stateIn`、浏览页快速滚动条，是否也在拖慢，待确认。Animeko 不适用：没有全景瀑布流网格，也没有 `HarmonyFramePerf`。
 
 
 ### 5.2 加新补丁
@@ -564,7 +612,8 @@ gh release list --repo Xun2202/mihon-harmony
 | 自写 ScrollableState 必须精确返回 delta，否则 pullToRefresh 会吃回甩速度 | `PanoramaMasonryState` 把 `next - current` 当已消费量。offset 是 Float，超过 65536 px 精度只有 1/128 px，差不等于 delta，每帧剩下千分之几像素。外层 Material 3 `pullToRefresh`（`PullRefresh.kt`，material3 1.5.0-beta01）在 `onPostScroll` 里把剩余当下拉，`distancePulled` 非 0；`onPreFling → onRelease` 在 `distancePulled != 0` 且速度往下拉方向时吃掉全部速度，再清 0，下一次往回拖又积上。往下翻的剩余被 `coerceAtLeast(0)` 截掉，所以只坏往回。0034 没碰到两端时返回精确 delta，碰到两端才返回 `next - current`（Compose 自带的 Lazy 列表同样）。新测试 `return flicks under pull to refresh keep their velocity far down the list`：offset 70000，先往下翻 3 次再往回甩 4 次，修前起速 `[5120, 5120, 5120, 0, 0, 0, 0]`，修后往回甩 -5120。两个 App 里只有全景网格是自写的 ScrollableState。以后新写的滚动容器同样要遵守 |
 | 发版等待脚本把一次 API 报错当成 dry_run 已完成 | preview.7 的正式 run 38553912820 在 dry_run 38553801784 结束前就触发了。正式 run 在同一并发组里排队，等 dry_run 成功后才执行，结果无影响。等待循环要把取不到 `conclusion` 当作「未完成」。preview.8 的正式 run 38559877474 是在 dry_run 38558925925 成功之后才触发的，等待脚本已修好 |
 | 滚动条又很难按到（preview.8 及之前） | 0032 把热区收回为画出来的拇指宽（12 dp + 边距），不再误抓往回甩，但手指很难按中。0035（`preview.9`）起热区恢复 32 dp + 边距，分两段：按在画出来的拇指上立即抓；拇指旁边那 20 dp 与内容共享触摸（`sharePointerInputWithSiblings() = true`，否则重叠的兄弟节点命中测试到第一个就停，内容收不到事件），只有手指按住、不超过 touch slop 达 120 ms，且内容没在滚动时才抓。快甩会更早越过 slop，照常滚内容带惯性；惯性中按下只是停住内容，不会抓。已知副作用：在拇指旁边一动不动按 500 ms 仍可能触发条目长按菜单。与 Anikku 0043 同源 |
-| 觉得上下滑 / 惯性时卡，有时又很顺 | 0036（`preview.10`）起：设置 → 高级 →「滚动性能记录（调试）」，默认关。打开后左下角出现半透明「记录」按钮，感觉卡的时候立刻点，分享出来的 `<app>_scroll_perf_<时间>.txt` 发来。文件只有数字：FrameMetrics 各阶段耗时、Choreographer 帧间隔、每帧全景测量次数 / 耗时 / 新组合格子数、每 500 ms 的 GC / CPU / 刷新率 / 温控 / 省电、每秒卓易通图形层噪音行数（只计数）和全景滑动轨迹；不含标题、URL、扩展列表、logcat 原文。分析：归档仓 `tools/scroll-perf-analyze/analyze.py <文件>`。卡顿判据：有 DEADLINE 时 TOTAL > DEADLINE，否则 > 1.5 个 vsync。FrameMetrics 3 秒内没有回调时文件里写「FrameMetrics 未提供」，只看 Choreographer 间隔。开着时每帧一次回调、每个 vsync 唤醒主线程，用完关掉。与 Anikku 0044 同源 |
+| 觉得上下滑 / 惯性时卡，有时又很顺 | 0036（`preview.10`）起：设置 → 高级 →「滚动性能记录（调试）」，默认关。打开后左下角出现半透明「记录」按钮，感觉卡的时候立刻点，分享出来的 `<app>_scroll_perf_<时间>.txt` 发来。文件只有数字：FrameMetrics 各阶段耗时、Choreographer 帧间隔、每帧全景测量次数 / 耗时 / 新组合格子数、每 500 ms 的 GC / CPU / 刷新率 / 温控 / 省电、每秒卓易通图形层噪音行数（只计数）和全景滑动轨迹；不含标题、URL、扩展列表、logcat 原文。分析：归档仓 `tools/scroll-perf-analyze/analyze.py <文件>`。卡顿判据：有 DEADLINE 时 TOTAL > DEADLINE，否则 > 1.5 个 vsync。FrameMetrics 3 秒内没有回调时文件里写「FrameMetrics 未提供」，只看 Choreographer 间隔。开着时每帧一次回调、每个 vsync 唤醒主线程，用完关掉。与 Anikku 0044 同源。0037（`preview.11`）起还会写下被丢掉的报告数、各阶段 p50/p90、封面加载，长按「记录」可以改封面淡入 / 硬件位图 / 预取再各甩一段；导出格式 `harmony-scroll-perf` 2，三个对照项只在这次打开 App 期间有效，重启回到淡入开、硬件位图开、预取只读文件头。浏览页越甩越卡的对照步骤见下一行 |
+| 浏览页全景网格越甩越卡，书架还顺 | preview.11（0037–0040）已加上测量和三处相关改动，根因还没分开（合成器 / `BLASTBufferQueue` 回压 vs FrameMetrics 3 槽报告被丢）。2026-10-14 约 14:00 UTC 的 `mihon_scroll_perf_20261014-220359`（华为 HOP-AL10，卓易通 Android 16，90 Hz）里，动画仍约 90 Hz，浏览甩动的已报告帧从 98–99% 掉到 53–62%，书架仍 95–100%；已报告帧都没超时（2560 帧甩动 0 次 jank）；整表重排在 46.774 秒后就没有了，不是越甩越卡的原因。请按归档仓 README §3 第 43 项录一份再发来：书架甩 10 秒作对照；进一个没看过的源的浏览页（全景网格）连续甩 15 秒；长按「记录」把封面淡入改成关再甩 15 秒；淡入改回开、硬件位图改成关再甩 15 秒；硬件位图改回开、预取切到「旧解码」再甩 15 秒；点「记录」或菜单里「导出」分享。每一段尽量甩还没缓存过的封面（往下翻，或换一个源 / 搜索）。 |
 | `repo` 分支 `releases.json` 第一条不是最新版 | GitHub「列出 Releases」接口不按创建时间排序（2026-10-14 mihon-harmony 的 preview.10 排在 preview.9 等 6 个旧版之后）。三个 App 的更新器都按版本号取最大，不受影响；但只取第一页 30 条时，新版可能被挤出去。`write-release-index.sh` 起翻完所有页、按 `created_at` 倒序取 30 条（三个流水线同一改动）。raw CDN 约 5 分钟缓存，要看即时内容用 `gh api "repos/<repo>/contents/releases.json?ref=repo"` |
 | 手机提示版本过老 / 降级不给装 | 更新器按版本号取最大。官方 2026-10-13 04:27 UTC 出了 v0.21.2，定时 run 38392710194 自动发了 `v0.21.2-harmony-preview.1`（versionCode 3801）；随后在 0.21.1 上发的 `v0.21.1-harmony-preview.5`（3705）号更小，手机拒装。preview.5 保留未删，更新器不会把它推给已在 0.21.2 的用户。补救是在最新上游上重发：`v0.21.2-harmony-preview.2`（3802，正式 run 38427442080）。workflow「Resolve release version」（提交 `fd1835633`）：非 dry_run 且目标 tag 还不存在时，按「上游版本.N」`sort -V`，比已发布最高的旧就 `exit 1` 报「installs would be a downgrade」。已存在的 tag 仍 skip，定时 run 不会因此变红。发版前先看 Releases 上最新的上游底座。本地用真实 tag 列表测过：0.21.1 的 preview.6 拒绝，0.21.2 的 preview.3、0.21.3 的 preview.1、0.21.10 的 preview.1 放行。CI 上没实际触发过拒绝路径 |
 
@@ -668,3 +717,5 @@ gh release list --repo Xun2202/mihon-harmony
 - 2026-10-14 用户：解锁后第一下滑不动，随后说「要不不加这个解锁后第一下不动了，好像又没有问题了」，诊断提交已撤掉，没有发版。
 - 2026-10-14（13:35 UTC）用户：想记录上下滑 / 惯性时的帧率或耗时，「有时候又很丝滑」，要一个调试按钮导出脱敏日志，不依赖 IP 或 token。补丁 0036（与 anikku-harmony 0044 同源）：设置 → 高级 →「滚动性能记录（调试）」，左下角「记录」按钮经分享面板导出只含数字的文件；归档仓新增 `tools/scroll-perf-analyze/analyze.py`。推 `main` `bdcc008e0` → `check_patches` run 38570494789 绿 → `dry_run` run 38570546143 绿 → 正式 run 38572070546 → **`v0.21.2-harmony-preview.10`**（13:35 UTC），`app.mihon.debug` versionCode 3810、versionName `0.21.2-harmony.10-8207`，签名 `4bd90284…ea8a` 不变，arm64 26,976,657 B（SHA-256 前缀 `0df8d7c4aea7`），DEX 含 `harmony_scroll_perf_recorder`、`privacy: no titles`。开发树 HEAD 复跑 `:presentation-core:testDebugUnitTest :app:testDebugUnitTest` 通过（presentation-core 59 个用例，0 失败，2 跳过；app 41 个）。
 - 2026-10-14（13:43 UTC）`repo` 分支索引按 `created_at` 倒序（`1db0e3620`，`release_index` run 38574198250）：GitHub 列表接口把 mihon-harmony preview.10 排在 6 个旧版之后，App 按版本号取最大所以不受影响，但只取第一页时新版可能被挤出。三个流水线同一改动。同时更正补丁 0035 正文里的同源编号（原写成 anikku-harmony 0044），只改提交信息，代码不变。
+- 2026-10-14（约 14:00 UTC）用户：书架网格顺，浏览页全景网格越甩越卡。记录 `mihon_scroll_perf_20261014-220359`（华为 HOP-AL10，卓易通里的 Android 16，90 Hz）：动画仍约 90 Hz（最长间隔 ≤21 ms），浏览甩动的已报告帧从 22:03:36–38 的 98–99% 掉到 22:03:47 以后的 53–62%，书架仍 95–100%；已报告帧都没超时（p50 6.8→8.9 ms，2560 帧甩动 0 次 jank）；变卡时进程 CPU 约 43%（顺时约 83%），坏的甩动没有 GC，温控 0，90→60 Hz 只在停手空隙；整表重排（布局 16–20 ms）大多在还顺或停着时，46.774 秒后就没有了。两种假设还没分开：合成器 / `BLASTBufferQueue` 回压（22:03:50 后日志每秒 10–41 条），或 FrameMetrics 3 槽报告被丢（旧记录器没写 `dropCountSinceLastInvocation`）。浏览预取还在为每一行解码 128 px 硬件位图再扔掉，和可见封面抢 Coil 的 3 个解码槽。
+- 2026-10-14（约 16:25 UTC）补丁 0037–0040（作者 Xun2202；grok-4.7-high 子代理实现，主代理复核，另有一次独立 grok 复核修了 8 处）。0037 记录器补丢帧计数、各阶段 p50/p90、封面加载、分线程 CPU，长按「记录」切换封面淡入 / 硬件位图 / 预取（只在内存，重启回到淡入开、硬件位图开、预取只读文件头），导出格式 `harmony-scroll-perf` 2。0038 滑动中第一次跨档等停稳 300 ms 再一次提交。0039 浏览预取默认只读文件头。0040 翻页追加、不再整表重排。推 `main` `33568c567` → `check_patches` run 38595775346 绿 → `dry_run` run 38595854992 绿 → 正式 run 38597112426 → **`v0.21.2-harmony-preview.11`**（约 16:25 UTC），`app.mihon.debug` versionCode 3811、versionName `0.21.2-harmony.11-8211`，签名 `4bd90284…ea8a` 不变，arm64 27,009,425 B（SHA-256 前缀 `544cefae3f39`），universal 67,318,424 B，DEX 含 `harmony-scroll-perf`、`HarmonyPerfToggles`、`HarmonyFramePerfSampler`、`mark toggle`、`harmony_fade`、`cpu_pool`、`privacy: no titles`。开发树 `/tmp/mihon-verify212` `dev-0024` HEAD `005f27b`。干净树 `/tmp/mihon-verify217`（v0.21.2，N=11）除版本号行外与开发树 `cmp` 一致。本地 `spotlessCheck`、`:app:compileNightlyKotlin`、presentation-core 65 个用例（0 失败，2 跳过）、app 49 个用例（0 失败）。series 38 张（0001–0040，0004 / 0009 已删）。`repo` 分支 `releases.json` 29 条、第一条 preview.11（索引提交 SHA 待确认）。Anikku 本轮没改：0038–0040 同病待修，0037 待移植；Anikku 浏览页另外的调色板解码、400 ms 延迟转圈、每行急切 `stateIn`、浏览页快速滚动条待确认。Animeko 不适用。越甩越卡是否修好，要等按归档 README §3 第 43 项录的对照文件。
