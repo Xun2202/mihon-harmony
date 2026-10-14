@@ -27,3 +27,6 @@
 0027-presentation-fast-scroller-hold-grab.patch
 0028-presentation-panorama-tiered-auto-columns.patch
 0029-presentation-fast-scroller-snapshotflow.patch
+0030-presentation-panorama-shaped-columns.patch
+0031-library-panorama-shape-mode.patch
+0032-presentation-fast-scroller-thumb-hitbox.patch
