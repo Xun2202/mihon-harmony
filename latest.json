@@ -1,9 +1,9 @@
 {
-  "url": "https://api.github.com/repos/Xun2202/mihon-harmony/releases/412593525",
-  "assets_url": "https://api.github.com/repos/Xun2202/mihon-harmony/releases/412593525/assets",
-  "upload_url": "https://uploads.github.com/repos/Xun2202/mihon-harmony/releases/412593525/assets{?name,label}",
-  "html_url": "https://github.com/Xun2202/mihon-harmony/releases/tag/v0.21.2-harmony-preview.6",
-  "id": 412593525,
+  "url": "https://api.github.com/repos/Xun2202/mihon-harmony/releases/412629745",
+  "assets_url": "https://api.github.com/repos/Xun2202/mihon-harmony/releases/412629745/assets",
+  "upload_url": "https://uploads.github.com/repos/Xun2202/mihon-harmony/releases/412629745/assets{?name,label}",
+  "html_url": "https://github.com/Xun2202/mihon-harmony/releases/tag/v0.21.2-harmony-preview.7",
+  "id": 412629745,
   "author": {
     "login": "github-actions[bot]",
     "id": 41898282,
@@ -25,22 +25,22 @@
     "user_view_type": "public",
     "site_admin": false
   },
-  "node_id": "RE_kwDOUrmIR84Yl611",
-  "tag_name": "v0.21.2-harmony-preview.6",
-  "target_commitish": "e8220fba2682a3e781fb98b23fb85d6cd8a5e086",
-  "name": "Mihon Harmony Preview v0.21.2-harmony-preview.6",
+  "node_id": "RE_kwDOUrmIR84YmDrx",
+  "tag_name": "v0.21.2-harmony-preview.7",
+  "target_commitish": "15289c4dffd79c71ff2f8750e477734ab0d671ae",
+  "name": "Mihon Harmony Preview v0.21.2-harmony-preview.7",
   "draft": false,
   "immutable": false,
   "prerelease": false,
-  "created_at": "2026-10-14T10:16:14Z",
-  "updated_at": "2026-10-14T10:31:48Z",
-  "published_at": "2026-10-14T10:31:48Z",
+  "created_at": "2026-10-14T11:02:32Z",
+  "updated_at": "2026-10-14T11:15:45Z",
+  "published_at": "2026-10-14T11:15:45Z",
   "assets": [
     {
-      "url": "https://api.github.com/repos/Xun2202/mihon-harmony/releases/assets/640039947",
-      "id": 640039947,
-      "node_id": "RA_kwDOUrmIR84mJjwL",
-      "name": "mihon-v0.21.2-harmony-preview.6-arm64-v8a.apk",
+      "url": "https://api.github.com/repos/Xun2202/mihon-harmony/releases/assets/640143737",
+      "id": 640143737,
+      "node_id": "RA_kwDOUrmIR84mJ9F5",
+      "name": "mihon-v0.21.2-harmony-preview.7-arm64-v8a.apk",
       "label": "",
       "uploader": {
         "login": "github-actions[bot]",
@@ -66,17 +66,17 @@
       "content_type": "application/vnd.android.package-archive",
       "state": "uploaded",
       "size": 26958753,
-      "digest": "sha256:e7233bbfcd39341de28a1e05b52038a3abbbe6d94c6418cba16295b07b35c4db",
+      "digest": "sha256:9f97e5d1471612a41269efb7cd5d549f975d5d2377a0a752ab4345b808842bbe",
       "download_count": 0,
-      "created_at": "2026-10-14T10:31:44Z",
-      "updated_at": "2026-10-14T10:31:46Z",
-      "browser_download_url": "https://github.com/Xun2202/mihon-harmony/releases/download/v0.21.2-harmony-preview.6/mihon-v0.21.2-harmony-preview.6-arm64-v8a.apk"
+      "created_at": "2026-10-14T11:15:41Z",
+      "updated_at": "2026-10-14T11:15:43Z",
+      "browser_download_url": "https://github.com/Xun2202/mihon-harmony/releases/download/v0.21.2-harmony-preview.7/mihon-v0.21.2-harmony-preview.7-arm64-v8a.apk"
     },
     {
-      "url": "https://api.github.com/repos/Xun2202/mihon-harmony/releases/assets/640039952",
-      "id": 640039952,
-      "node_id": "RA_kwDOUrmIR84mJjwQ",
-      "name": "mihon-v0.21.2-harmony-preview.6-universal.apk",
+      "url": "https://api.github.com/repos/Xun2202/mihon-harmony/releases/assets/640143744",
+      "id": 640143744,
+      "node_id": "RA_kwDOUrmIR84mJ9GA",
+      "name": "mihon-v0.21.2-harmony-preview.7-universal.apk",
       "label": "",
       "uploader": {
         "login": "github-actions[bot]",
@@ -102,14 +102,14 @@
       "content_type": "application/vnd.android.package-archive",
       "state": "uploaded",
       "size": 67267752,
-      "digest": "sha256:68e3f7019efc6ab5788d852d545a61b0e97fc7fb28bad7a1dc4068be8c84dd56",
+      "digest": "sha256:881576bfa0f84e91112932d6269b43f7822bbfe9023041f38a81bd25049305ed",
       "download_count": 0,
-      "created_at": "2026-10-14T10:31:44Z",
-      "updated_at": "2026-10-14T10:31:47Z",
-      "browser_download_url": "https://github.com/Xun2202/mihon-harmony/releases/download/v0.21.2-harmony-preview.6/mihon-v0.21.2-harmony-preview.6-universal.apk"
+      "created_at": "2026-10-14T11:15:42Z",
+      "updated_at": "2026-10-14T11:15:44Z",
+      "browser_download_url": "https://github.com/Xun2202/mihon-harmony/releases/download/v0.21.2-harmony-preview.7/mihon-v0.21.2-harmony-preview.7-universal.apk"
     }
   ],
-  "tarball_url": "https://api.github.com/repos/Xun2202/mihon-harmony/tarball/v0.21.2-harmony-preview.6",
-  "zipball_url": "https://api.github.com/repos/Xun2202/mihon-harmony/zipball/v0.21.2-harmony-preview.6",
-  "body": "基于 [Mihon v0.21.2](https://github.com/mihonapp/mihon/releases/tag/v0.21.2) 的非官方 HarmonyOS / 卓易通 兼容构建 (nightly 构建类型)。\n\n## 本构建包含的补丁\n\n- `0001-downloads-rename-fallback-for-saf-without-renamedocument.patch`: downloads: fall back to copy+delete when SAF renameDocument is unsupported\n- `0002-updater-use-harmony-fork-releases.patch`: updater: check this fork's GitHub releases for -harmony-preview builds\n- `0003-downloads-cbz-temp-in-private-cache.patch`: downloads: keep CBZ temp files in the private cache, tolerate stale archives\n- `0005-downloads-background-keep-alive-silent-audio.patch`: downloads: keep the process alive in the background on HarmonyOS (silent audio + wake lock)\n- `0006-downloads-notification-speed-and-progress.patch`: downloads: Animeko-style progress notification with speed and progress\n- `0007-updater-delete-installed-apk.patch`: updater: delete the installed update APK at startup\n- `0008-updater-release-mirror.patch`: updater: read the release list from the repo-branch mirror first\n- `0010-downloads-finalize-with-fewer-saf-copies-and-error-reasons.patch`: downloads: finish chapters with fewer SAF copies and show why a download failed\n- `0011-downloads-never-skip-silently-reuse-or-replace-leftover-folders.patch`: downloads: never drop a chapter silently; reuse or replace folders left on disk\n- `0012-crash-log-filter-harmony-noise-and-keep-app-log.patch`: =?UTF-8?q?crash=20log:=20filter=20=E5=8D=93?= =?UTF-8?q?=E6=98=93=E9=80=9A=20graphics=20noise=20and=20keep=20the=20app'?= =?UTF-8?q?s=20own=20log=20lines?=\n- `0013-downloads-retried-failed-chapters-are-not-skipped.patch`: downloads: do not report a retried failed chapter as \"already in the queue\"\n- `0014-library-panorama-comfortable-grid-display-mode.patch`: library: add a panorama comfortable grid display mode (wide covers, staggered layout)\n- `0015-library-panorama-compact-grid-display-mode.patch`: library: add a panorama compact grid display mode\n- `0016-presentation-staggered-fast-scroller-steady-thumb.patch`: presentation: keep the staggered fast scroller thumb steady\n- `0017-updater-pick-highest-harmony-version.patch`: updater: pick the highest harmony version instead of the first listed\n- `0018-library-panorama-stable-cell-shapes.patch`: library: keep panorama cell shapes stable while scrolling\n- `0019-library-panorama-settle-debounce-browse-prefetch.patch`: library: wait for the panorama grid to really stop and learn browse shapes ahead\n- `0020-presentation-staggered-scroller-stable-thumb.patch`: presentation: keep the staggered fast-scroll thumb from stepping back once a row\n- `0021-presentation-panorama-masonry-reading-order.patch`: presentation: lay panorama cells left to right unless a lane is recessed by half\n- `0022-updater-retry-and-resume-the-update-download.patch`: updater: retry and resume the update download\n- `0023-presentation-panorama-auto-columns-span.patch`: presentation: panorama auto columns fit book covers and wide covers span two lanes\n- `0024-presentation-panorama-scroll-anchor-by-key.patch`: presentation: panorama grid saves its scroll anchor by key\n- `0025-presentation-panorama-layout-epoch.patch`: presentation: panorama layout skips per-item work while content is unchanged\n- `0026-library-panorama-cover-shapes-versioned.patch`: library: panorama cover shapes notify per version, not per map read\n- `0027-presentation-fast-scroller-hold-grab.patch`: presentation: fast scroller thumb stays grabbed while pressed\n- `0028-presentation-panorama-tiered-auto-columns.patch`: presentation: panorama auto columns widen on large windows\n- `0029-presentation-fast-scroller-snapshotflow.patch`: presentation: fast scroller follows scroll without restarting per frame\n- `0030-presentation-panorama-shaped-columns.patch`: presentation: panorama auto columns follow the shelf's dominant cover shape\n- `0031-library-panorama-shape-mode.patch`: library: panorama grids pick tall or wide columns from committed cover shapes\n- `0032-presentation-fast-scroller-thumb-hitbox.patch`: presentation: fast scroller hit box stays on the drawn thumb\n\n## 安装说明\n\n- 下载 `mihon-v0.21.2-harmony-preview.6-arm64-v8a.apk`（华为设备均为 arm64）。\n- 包名为 `app.mihon.debug`，与官方正式版 `app.mihon` 是两个独立应用，可以共存；harmony-preview 版本之间可直接覆盖安装。\n- 设置 → 高级 → 扩展安装器 选「Private」，扩展会装进 App 自己的目录，不再受卓易通安装限制。\n- 应用内更新会检查本仓库的 Release，而不是官方更新服务器。\n- 建议开启 设置 → 下载 →「保存为 CBZ」：目录模式下下载中的图片会被鸿蒙图库索引。\n\n## 校验 (SHA-256)\n\n```\ne7233bbfcd39341de28a1e05b52038a3abbbe6d94c6418cba16295b07b35c4db  mihon-v0.21.2-harmony-preview.6-arm64-v8a.apk\n68e3f7019efc6ab5788d852d545a61b0e97fc7fb28bad7a1dc4068be8c84dd56  mihon-v0.21.2-harmony-preview.6-universal.apk\n```\n"
+  "tarball_url": "https://api.github.com/repos/Xun2202/mihon-harmony/tarball/v0.21.2-harmony-preview.7",
+  "zipball_url": "https://api.github.com/repos/Xun2202/mihon-harmony/zipball/v0.21.2-harmony-preview.7",
+  "body": "基于 [Mihon v0.21.2](https://github.com/mihonapp/mihon/releases/tag/v0.21.2) 的非官方 HarmonyOS / 卓易通 兼容构建 (nightly 构建类型)。\n\n## 本构建包含的补丁\n\n- `0001-downloads-rename-fallback-for-saf-without-renamedocument.patch`: downloads: fall back to copy+delete when SAF renameDocument is unsupported\n- `0002-updater-use-harmony-fork-releases.patch`: updater: check this fork's GitHub releases for -harmony-preview builds\n- `0003-downloads-cbz-temp-in-private-cache.patch`: downloads: keep CBZ temp files in the private cache, tolerate stale archives\n- `0005-downloads-background-keep-alive-silent-audio.patch`: downloads: keep the process alive in the background on HarmonyOS (silent audio + wake lock)\n- `0006-downloads-notification-speed-and-progress.patch`: downloads: Animeko-style progress notification with speed and progress\n- `0007-updater-delete-installed-apk.patch`: updater: delete the installed update APK at startup\n- `0008-updater-release-mirror.patch`: updater: read the release list from the repo-branch mirror first\n- `0010-downloads-finalize-with-fewer-saf-copies-and-error-reasons.patch`: downloads: finish chapters with fewer SAF copies and show why a download failed\n- `0011-downloads-never-skip-silently-reuse-or-replace-leftover-folders.patch`: downloads: never drop a chapter silently; reuse or replace folders left on disk\n- `0012-crash-log-filter-harmony-noise-and-keep-app-log.patch`: =?UTF-8?q?crash=20log:=20filter=20=E5=8D=93?= =?UTF-8?q?=E6=98=93=E9=80=9A=20graphics=20noise=20and=20keep=20the=20app'?= =?UTF-8?q?s=20own=20log=20lines?=\n- `0013-downloads-retried-failed-chapters-are-not-skipped.patch`: downloads: do not report a retried failed chapter as \"already in the queue\"\n- `0014-library-panorama-comfortable-grid-display-mode.patch`: library: add a panorama comfortable grid display mode (wide covers, staggered layout)\n- `0015-library-panorama-compact-grid-display-mode.patch`: library: add a panorama compact grid display mode\n- `0016-presentation-staggered-fast-scroller-steady-thumb.patch`: presentation: keep the staggered fast scroller thumb steady\n- `0017-updater-pick-highest-harmony-version.patch`: updater: pick the highest harmony version instead of the first listed\n- `0018-library-panorama-stable-cell-shapes.patch`: library: keep panorama cell shapes stable while scrolling\n- `0019-library-panorama-settle-debounce-browse-prefetch.patch`: library: wait for the panorama grid to really stop and learn browse shapes ahead\n- `0020-presentation-staggered-scroller-stable-thumb.patch`: presentation: keep the staggered fast-scroll thumb from stepping back once a row\n- `0021-presentation-panorama-masonry-reading-order.patch`: presentation: lay panorama cells left to right unless a lane is recessed by half\n- `0022-updater-retry-and-resume-the-update-download.patch`: updater: retry and resume the update download\n- `0023-presentation-panorama-auto-columns-span.patch`: presentation: panorama auto columns fit book covers and wide covers span two lanes\n- `0024-presentation-panorama-scroll-anchor-by-key.patch`: presentation: panorama grid saves its scroll anchor by key\n- `0025-presentation-panorama-layout-epoch.patch`: presentation: panorama layout skips per-item work while content is unchanged\n- `0026-library-panorama-cover-shapes-versioned.patch`: library: panorama cover shapes notify per version, not per map read\n- `0027-presentation-fast-scroller-hold-grab.patch`: presentation: fast scroller thumb stays grabbed while pressed\n- `0028-presentation-panorama-tiered-auto-columns.patch`: presentation: panorama auto columns widen on large windows\n- `0029-presentation-fast-scroller-snapshotflow.patch`: presentation: fast scroller follows scroll without restarting per frame\n- `0030-presentation-panorama-shaped-columns.patch`: presentation: panorama auto columns follow the shelf's dominant cover shape\n- `0031-library-panorama-shape-mode.patch`: library: panorama grids pick tall or wide columns from committed cover shapes\n- `0032-presentation-fast-scroller-thumb-hitbox.patch`: presentation: fast scroller hit box stays on the drawn thumb\n- `0033-presentation-panorama-scroll-trace.patch`: presentation: panorama scroll trace in the crash log dump\n\n## 安装说明\n\n- 下载 `mihon-v0.21.2-harmony-preview.7-arm64-v8a.apk`（华为设备均为 arm64）。\n- 包名为 `app.mihon.debug`，与官方正式版 `app.mihon` 是两个独立应用，可以共存；harmony-preview 版本之间可直接覆盖安装。\n- 设置 → 高级 → 扩展安装器 选「Private」，扩展会装进 App 自己的目录，不再受卓易通安装限制。\n- 应用内更新会检查本仓库的 Release，而不是官方更新服务器。\n- 建议开启 设置 → 下载 →「保存为 CBZ」：目录模式下下载中的图片会被鸿蒙图库索引。\n\n## 校验 (SHA-256)\n\n```\n9f97e5d1471612a41269efb7cd5d549f975d5d2377a0a752ab4345b808842bbe  mihon-v0.21.2-harmony-preview.7-arm64-v8a.apk\n881576bfa0f84e91112932d6269b43f7822bbfe9023041f38a81bd25049305ed  mihon-v0.21.2-harmony-preview.7-universal.apk\n```\n"
 }
