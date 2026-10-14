@@ -73,7 +73,8 @@
 - `v0.21.2-harmony-preview.1` —— 2026-10-13，**定时任务自动发布**。上游 Mihon 2026-10-13 04:27 UTC 发了 v0.21.2；定时 run 38392710194（11:47 UTC，target `f32a21972`，含补丁 0001–0019）套上后发布。versionCode 3801。功能同当时的 v0.21.1-harmony-preview.4（还没有 0020）。用户手机升到了它。
 - `v0.21.2-harmony-preview.2` —— 2026-10-13，含补丁 0020，已被 preview.3 取代。同一套 20 张补丁（含 0020）在干净 v0.21.2 树 `/tmp/mihon-verify212` 套用成功（`prepare-source.sh … v0.21.2 2`，versionCode 3802）。跳过单独 dry_run：0.21.2 preview.1 已用前 19 张编过，0020 只改 `VerticalFastScroller.kt`，正式 run 编译失败不会发布。正式 run 38427442080（16:09 UTC，target `3d89a0796`）。`app.mihon.debug` versionCode 3802、versionName `0.21.2-harmony.2-8191`，签名 `4bd90284…ea8a` 不变，arm64 26,956,473 B、SHA-256 `1a9cd9d5…`，DEX 含新滚动条字段。`repo` 分支 `releases.json` 前三项 `v0.21.2-harmony-preview.2`、`v0.21.2-harmony-preview.1`、`v0.21.1-harmony-preview.5`（共 20 条）。拇指顺不顺要用户在这一版上真机确认。0021 起这套估算已删除。
 - `v0.21.2-harmony-preview.3` —— 2026-10-13，已被 preview.4 取代。加入补丁 0021（自建全景瀑布流：末尾不再左空、列数变化当帧重排、滚动条用真实内容高度）。versionCode 3803，versionName `0.21.2-harmony.3-8192`，签名与 preview.2 相同（`4bd90284…ea8a`）。开发树 `/tmp/mihon-verify212` `dev-0021` 提交 `08bd109`（底座 v0.21.2 + 0001–0020），流水线 `e5c6c734e`。`:presentation-core:spotlessCheck` `:app:spotlessCheck` 通过，`:presentation-core:testDebugUnitTest` 16/16，`:app:compileNightlyKotlin` 通过。干净 v0.21.2 树套 21 张成功，12 个改动文件 `cmp` 一致。`check_patches` run 38453485932、`dry_run` run 38453484931、正式 run 38454541710 均成功。arm64 26,940,089 B（SHA-256 前缀 `58ea2694f782`），universal 67,249,088 B，DEX 含 `PanoramaMasonryLayout`。`repo` 分支 `releases.json` 第一条即此版，共 21 条。未上模拟器。与 anikku-harmony 0030 同源。
-- `v0.21.2-harmony-preview.4` —— 2026-10-14，**当前版本**。加入补丁 0022（更新页下载：专用客户端重试 + Range 续传，失败在更新说明上方用红字写原因）。versionCode 3804，versionName `0.21.2-harmony.4-8193`，签名与 preview.3 相同（`4bd90284…ea8a`）。开发树 `/tmp/mihon-verify212` 分支 `dev-0022` 提交 `e1a029d`（底座 v0.21.2 + 0001–0021 + 0022），流水线 `779cccafc`。主代理复跑 `:app:spotlessCheck :app:compileNightlyKotlin :app:testDebugUnitTest --tests '*AppUpdateApkDownloaderTest*'` 退出 0，3/3、skipped 0。干净 v0.21.2 以 N=4 套全部 20 张（0001–0022，0004 / 0009 早已删除） → versionCode 3804，与开发树只差版本号。`check_patches` run 38512243044、`dry_run` run 38512260459、正式 run 38513011212 均成功。Release 非 draft、非 prerelease，target `779cccafc`。arm64 26,942,369 B（SHA-256 前缀 `fbcf9c960068`），universal 67,251,368 B，DEX 含 `Update download attempt`、`update.apk`，资源含 `harmony_update_download_timeout`。`repo` 分支 `releases.json` 22 条，第一条即此版。从旧版升到这一版时，点下载的仍是旧代码，第一下可能还会失败，再点即可；从 preview.4 往后的更新才自动重试。Anikku 不适用；Animeko 待确认。
+- `v0.21.2-harmony-preview.4` —— 2026-10-14，已被 preview.5 取代。加入补丁 0022（更新页下载：专用客户端重试 + Range 续传，失败在更新说明上方用红字写原因）。versionCode 3804，versionName `0.21.2-harmony.4-8193`，签名与 preview.3 相同（`4bd90284…ea8a`）。开发树 `/tmp/mihon-verify212` 分支 `dev-0022` 提交 `e1a029d`（底座 v0.21.2 + 0001–0021 + 0022），流水线 `779cccafc`。主代理复跑 `:app:spotlessCheck :app:compileNightlyKotlin :app:testDebugUnitTest --tests '*AppUpdateApkDownloaderTest*'` 退出 0，3/3、skipped 0。干净 v0.21.2 以 N=4 套全部 20 张（0001–0022，0004 / 0009 早已删除） → versionCode 3804，与开发树只差版本号。`check_patches` run 38512243044、`dry_run` run 38512260459、正式 run 38513011212 均成功。Release 非 draft、非 prerelease，target `779cccafc`。arm64 26,942,369 B（SHA-256 前缀 `fbcf9c960068`），universal 67,251,368 B，DEX 含 `Update download attempt`、`update.apk`，资源含 `harmony_update_download_timeout`。`repo` 分支 `releases.json` 22 条，第一条即此版。从旧版升到这一版时，点下载的仍是旧代码，第一下可能还会失败，再点即可；从 preview.4 往后的更新才自动重试。Anikku 不适用；Animeko 待确认。
+- `v0.21.2-harmony-preview.5` —— 2026-10-14 07:39 UTC，**当前版本**。加入补丁 0023–0029（返回位置按 key 记、布局世代、封面形状按版本通知、滚动条按下即抓、自动列宽分档、瀑布流滚动条不再每帧重启），与 anikku-harmony 0031–0037 一一对应、同源。versionCode 3805，versionName `0.21.2-harmony.5-8200`，签名与 preview.4 相同（`4bd90284…ea8a`）。流水线 `0066de0e4`。`check_patches` run 38527739609、`dry_run` run 38527787706、正式 run 38529020510 均成功。`app.mihon.debug`，arm64 26,942,369 B（SHA-256 前缀 `1f52f85fbac7`），universal 67,251,368 B。DEX 含 `PanoramaColumns$Tiered`、`holdOpaqueWhileThumbGrabbed`、`PanoramaMasonryContentEpoch`。`repo` 分支 `releases.json` 23 条，第一条即此版。子代理（grok-4.7-high-fast）实现；主代理复跑 `:presentation-core:spotlessCheck :app:spotlessCheck :presentation-core:testDebugUnitTest :app:testDebugUnitTest :app:compileNightlyKotlin --rerun-tasks` 通过（presentation-core 35 个用例，0 失败，2 个门控跳过；app 28 个，0 失败）。干净树 `/tmp/mihon-verify213`（v0.21.2，N=5）套用成功，12 个改动文件与开发树 `cmp` 一致。没有真机 / 模拟器手势测试。`PanoramaMasonry.kt` / `PanoramaMasonryLayout.kt` / `PanoramaMasonryLayoutTest.kt` 与 Anikku 逐字节相同。series 27 张（0001–0029，0004 / 0009 已删）。
 
 ## 3. 仓库结构
 
@@ -101,6 +102,13 @@ patches/0019-*.patch           # 全景网格静止判断加 300 ms + 浏览页�
 patches/0020-*.patch           # 瀑布流快速滚动条拇指不再每行回跳 (StaggeredGridEstimate 段与 Anikku 0028 逐字节相同; 0021 起整段删除)
 patches/0021-*.patch           # 自建全景瀑布流: 阅读顺序容差 + 列数变化当帧重排 (PanoramaMasonry*.kt 与 Anikku 0030 逐字节相同)
 patches/0022-*.patch           # 更新下载: 专用客户端重试 + Range 续传 + 失败原因 (AppUpdateApkDownloader.kt)
+patches/0023-*.patch           # 全景自动列适合竖封面; 横封面 ≥3 列时跨两列 (与 Anikku 0031 同源)
+patches/0024-*.patch           # 全景滚动锚点按 key 存, 列表加载完整后再恢复 (与 Anikku 0032 同源)
+patches/0025-*.patch           # 全景布局世代: 内容不变时跳过逐项计算 (与 Anikku 0033 逐字节相同)
+patches/0026-*.patch           # 封面形状表按版本通知, 不再整表订阅 (与 Anikku 0034 同源)
+patches/0027-*.patch           # 滚动条按下即抓, 按住不淡出 (列表/网格/瀑布流; 与 Anikku 0035 同源)
+patches/0028-*.patch           # 自动列宽按网格宽分档 Tiered (常量在 LibraryComfortableGrid.kt; 与 Anikku 0036 同源)
+patches/0029-*.patch           # 瀑布流滚动条单个 LaunchedEffect + snapshotFlow (与 Anikku 0037 同源)
 scripts/prepare-source.sh      # 官方源码 → 套补丁 → 改版本号, 每步一个 commit
 scripts/write-release-index.sh # Releases 接口返回 → repo 分支的 releases.json / latest.json
 .github/workflows/harmony_preview.yml   # 每日构建发布, 最后写 Release 索引
@@ -299,6 +307,34 @@ CBZ 模式（0003 的 `finalizeArchive`）没有动：它本来就是单文件�
 
 同病：Anikku **不适用**。更新下载走上游 `NetworkHelper.downloadFileWithResume`（最多 5 次、Range 续传、416 删文件、指数退避）。读超时仍是 30 秒，但失败会在 worker 内重试，页面保持「正在下载」。Animeko **待确认**。上游 `DefaultFileDownloader.tryDownload` 每个地址只下一次、无续传，失败后自动换 `downloadUrlAlternatives` 的下一个（ABI 包 → universal），用户未反馈。验证方法：大陆网络下点更新，看是否先失败后自动成功。
 
+补丁 0023–0029 与 anikku-harmony 0031–0037 一一对应、同源（用户 2026-10-14：①「我在游览时书架时点进一个资源，退出后会回到书架最顶，没有记忆。其他ui界面也要好好排查下」；②「mihon有2000资源书架，滑动的时候……一旦我高速松开，进入惯性滑动就会感觉一卡一卡的」；③「按住滑动条快速下翻，按住后看到滑动条会变透明，然后识别成我在手指按着资源界面下滑，操作变成了上翻」；④「感觉mihon的自动好像默认有点过宽，我手机上折叠情况下，只有两列……横的是不是可以限制下高度」）。不是卓易通平台限制。用户手机：华为 Pura X Max（折叠 / 展开）、直板机 vivo X100 Pro，要兼顾旋转。屏幕估算见归档仓 `docs/设备屏幕参考.md`。
+
+根因四条：
+① `rememberPanoramaMasonryState` 用父组合的 `SideEffect` 把滚动锚点拷进 `rememberSaveable`。滑动不会重组父组合，存下的永远是顶部 0。进详情页（Voyager push）后书架组合被拆掉，返回时按 0 恢复。次因：恢复时按下标而不是按 key，短列表时恢复被一次性消费掉。受影响：书架全景、浏览全景。Anikku 另有相关作品全景。
+② `PanoramaCoverShapes` 用 `mutableStateMapOf`，整表都被订阅：任一封面加载完成就整屏重组、整表重测，预取还在 IO 线程写快照。另外，布局缓存命中时每帧仍要对 2000 项调用 `heightOf` 并新建 key 列表；滚动条 `LaunchedEffect(scrollOffset)` 每帧重启。
+③ 瀑布流滚动条只在拇指可见（alpha>0）时才挂拖动手势。按住不动、还没超过 touch slop 时不算滚动，拇指照常淡出，手势被摘掉后落到内容上。
+④ 自动最小列宽 168 dp：360 dp 宽的屏只有 2 列。
+
+做法，按补丁：
+- 0023：自动列改为适合竖封面的宽度；横封面在 ≥3 列时跨两列（`PanoramaSpan.TwoLanesWhenRoomy`）。列宽的具体数字由 0028 分档取代，这张留下跨列。
+- 0024：`PanoramaMasonryState.Saver` 按 key 存锚点，列表加载完整后再恢复。
+- 0025：布局世代 `PanoramaMasonryContentEpoch`，内容不变时跳过逐项计算。基准（2000 项，120 帧）：每帧 0.323 ms → 0.0082 ms，每帧分配 266,776 B → 56 B。
+- 0026：封面形状表改为按版本通知，不再整表订阅。跨 0.75 比例档的变化等所有网格静止 300 ms 后一次提交；写快照放回主线程。
+- 0027：`startDragImmediately`，按下即抓；按住期间不淡出、不摘手势（`holdOpaqueWhileThumbGrabbed`），触摸区 32 dp。列表、网格、瀑布流三根滚动条都改了。
+- 0028：`PanoramaColumns.Tiered`，按网格自身宽度分档：< 600 dp 最小 112 dp，≥ 600 dp 用 140 dp。网格宽 360 / 420 / 459 dp 为 3 列，664 / 672 dp 为 4 列，800 dp 为 5 列，933 / 939 dp 为 6 列。Pura X Max 折叠竖屏约 459 dp → 3 列，展开横屏约 939 dp → 6 列；vivo X100 Pro 竖屏 360 / 420 dp → 3 列。比较的是网格宽度，不是设备屏宽，分屏也适用。
+- 0029：瀑布流滚动条改为单个 `LaunchedEffect` + `snapshotFlow`，不再每帧重启。
+
+**重做要点**（rebase 到新上游时这 7 张）：
+- `PanoramaMasonry.kt`、`PanoramaMasonryLayout.kt`、`PanoramaMasonryLayoutTest.kt` 与 Anikku 0031–0037 里对应的三份 **逐字节相同**，改一处要同步另一处。
+- `PanoramaColumns.Tiered` 的常量在 `LibraryComfortableGrid.kt`（Anikku 在 `PanoramaGrid.kt`）。不要为了 `cmp` 把常量挪到对方的文件。
+- 滚动条的 Harmony 改动用 `// Harmony -->` 到 `// Harmony <--` 包住。上游列表 / 网格滚动条的 `LaunchedEffect(firstVisibleItemScrollOffset)` **不要**改成 `snapshotFlow`：它们在书架以外，改了会落后一帧。
+- 封面形状阈值常量名仍是本仓 `RATIO_SWITCH_TO_PANORAMA`（Anikku `RatioSwitchToPanorama`）。0026 改的是通知方式，不是这个名字。
+- 共享测试不再依赖 `java.awt` / `com.sun.management`（预览用手写 PNG 编码，分配计数用反射）。不要为了测试再去改 Gradle。
+
+子代理（grok-4.7-high-fast）实现。主代理复跑 `:presentation-core:spotlessCheck :app:spotlessCheck :presentation-core:testDebugUnitTest :app:testDebugUnitTest :app:compileNightlyKotlin --rerun-tasks` 通过（presentation-core 35 个用例，0 失败，2 个门控跳过；app 28 个，0 失败）。干净树 `/tmp/mihon-verify213`（`prepare-source.sh`，v0.21.2，N=5）套用成功，12 个改动文件与开发树 `cmp` 一致。没有真机 / 模拟器手势测试。流水线提交 `0066de0e4`。
+
+同病：Anikku 0031–0037 同轮已修。Animeko：滚动条按住不适用（Android 端是不可拖动的 `LazyListVerticalScrollIndicator`，没有可拖动的快速滚动条）；惯性卡顿 / 自动列宽不适用（没有全景瀑布流，也不学习封面比例）；返回丢位置待确认（另一套导航，要用户在真机上从追番列表进条目再返回看位置）。
+
 ### 5.2 加新补丁
 
 在套完现有补丁的源码树上直接改代码并 commit（message 写清楚为什么），`git format-patch -1` 导出，
@@ -378,6 +414,10 @@ gh release list --repo Xun2202/mihon-harmony
 | 上游改了封面横竖阈值或标题行数，全景格子高矮不对 | 高度不测量、按公式算（`panoramaCoverCellHeightPx`）：槽宽先减左右各 4dp；宽封面 3/2、高封面 2/3；格子高 = 封面高 + 上下各 4dp；松散再加标题 4dp×2 + 2×18sp。阈值常量名本仓是 `RATIO_SWITCH_TO_PANORAMA`，Anikku 是 `RatioSwitchToPanorama`，逻辑相同，不要改成对方的名字 |
 | 全景网格右侧拇指松开后很快消失 | 0021 起书架拇指停留从原来的 2 秒改为系统默认约 300 ms。浏览页本来就没有这根滚动条。Anikku 仍是原来的不规则滚动条淡出，没有这一处 |
 | 更新页点「下载」失败，按钮变成「重试」 | preview.3 及之前：共用客户端对 GitHub 资产只发一次（读 30 秒、整次 2 分钟），大陆第一次连 CDN 常在连上后卡住或被重置，OkHttp 不在同一次调用里重试，异常就删 `update.apk`。0022（`v0.21.2-harmony-preview.4`）起专用客户端重试最多 4 次并 Range 续传；最终失败在更新说明上方用红字写原因（下载超时 / 网络中断 / 服务器返回 HTTP N / 存储写入失败）。从旧版升到 preview.4 的这一次仍是旧代码在下载，第一下可能还会失败，再点即可；从 preview.4 往后才自动重试。仍失败就看红字。要日志：设置 → 高级打开详细日志，失败后不要划掉进程，设置 → 高级 → 导出崩溃日志，搜 `NewUpdateScreenModel` |
+| 全景网格点进条目再返回，回到最顶 | preview.4 及之前：`rememberPanoramaMasonryState` 用父组合 `SideEffect` 把锚点拷进 `rememberSaveable`，滑动不重组父组合，存下的永远是 0；进详情（Voyager push）后组合被拆掉，返回按 0 恢复。次因是按下标恢复，短列表时被一次性消费掉。0024（`v0.21.2-harmony-preview.5`）起 `PanoramaMasonryState.Saver` 按 key 存，列表加载完整后再恢复。书架全景、浏览全景都改了。没有真机手势测试 |
+| 2000 项书架高速松开后惯性滑动一卡一卡 | 封面形状表 `mutableStateMapOf` 整表订阅，任一封面加载完就整屏重组、整表重测；布局缓存命中时每帧仍对全部条目 `heightOf` 并新建 key 列表；瀑布流滚动条 `LaunchedEffect(scrollOffset)` 每帧重启。0025 加 `PanoramaMasonryContentEpoch`，内容不变就跳过逐项计算（2000 项、120 帧：每帧 0.323 ms → 0.0082 ms，分配 266,776 B → 56 B）。0026 改为按版本通知，跨 0.75 比例档等所有网格静止 300 ms 后一次提交，写快照放回主线程。0029 把瀑布流滚动条改成单个 `LaunchedEffect` + `snapshotFlow`。可装的是 `v0.21.2-harmony-preview.5`。上游列表 / 网格滚动条的 `LaunchedEffect(firstVisibleItemScrollOffset)` 故意没改：改成 `snapshotFlow` 会落后一帧 |
+| 按住滚动条快速下翻时拇指变透明，松手方向变成上翻 | 滚动条只在拇指 alpha>0 时挂拖动手势。按住不动、还没超过 touch slop 时不算滚动，拇指淡出，手势落到内容上。0027（preview.5）起 `startDragImmediately`，按住期间 `holdOpaqueWhileThumbGrabbed`、不摘手势，触摸区 32 dp。列表、网格、瀑布流三根都改了 |
+| 全景「自动」在折叠屏只有两列，竖封面过大、横封面过小 | preview.4 及之前自动最小列宽 168 dp，360 dp 宽只有 2 列。0023 起横封面在 ≥3 列时跨两列（`PanoramaSpan.TwoLanesWhenRoomy`）。0028 起 `PanoramaColumns.Tiered`：网格宽 < 600 dp 最小 112 dp，≥ 600 dp 用 140 dp（常量在 `LibraryComfortableGrid.kt`）。360 / 420 / 459 dp → 3 列，664 / 672 dp → 4 列，800 dp → 5 列，933 / 939 dp → 6 列。比较的是网格自身宽度，分屏同样适用。Pura X Max 折叠竖屏约 459 dp → 3 列，展开横屏约 939 dp → 6 列 |
 | 手机提示版本过老 / 降级不给装 | 更新器按版本号取最大。官方 2026-10-13 04:27 UTC 出了 v0.21.2，定时 run 38392710194 自动发了 `v0.21.2-harmony-preview.1`（versionCode 3801）；随后在 0.21.1 上发的 `v0.21.1-harmony-preview.5`（3705）号更小，手机拒装。preview.5 保留未删，更新器不会把它推给已在 0.21.2 的用户。补救是在最新上游上重发：`v0.21.2-harmony-preview.2`（3802，正式 run 38427442080）。workflow「Resolve release version」（提交 `fd1835633`）：非 dry_run 且目标 tag 还不存在时，按「上游版本.N」`sort -V`，比已发布最高的旧就 `exit 1` 报「installs would be a downgrade」。已存在的 tag 仍 skip，定时 run 不会因此变红。发版前先看 Releases 上最新的上游底座。本地用真实 tag 列表测过：0.21.1 的 preview.6 拒绝，0.21.2 的 preview.3、0.21.3 的 preview.1、0.21.10 的 preview.1 放行。CI 上没实际触发过拒绝路径 |
 
 ## 8. 不要做的事
@@ -464,3 +504,6 @@ gh release list --repo Xun2202/mihon-harmony
   做法：新文件 `AppUpdateApkDownloader.kt`。专用客户端读 60 秒 / 整次 10 分钟（全局 NetworkHelper 不变）；最多 4 次，间隔 2/4/8 秒；IOException 与 5xx 重试，416 删文件从 0 重来，其它 4xx 直接失败；206 追加、200 重写；中途不删文件，最终失败才删；能读出 versionCode 的完整旧包删掉重下，半截续传。失败红字：下载超时 / 网络中断 / 服务器返回 HTTP N / 存储写入失败。`AppUpdateApkCleaner.updateApk` 在 `externalCacheDir` 为 null 时回落 `cacheDir`。重做时保住 `newCachelessCallWithProgress(request, listener, existingSize)` 与 `ProgressResponseBody` 的 existingSize 语义。
   开发树 `/tmp/mihon-verify212` `dev-0022` 提交 `e1a029d`（底座 v0.21.2 + 0001–0021）。`:app:spotlessCheck :app:compileNightlyKotlin :app:testDebugUnitTest --tests '*AppUpdateApkDownloaderTest*'` 退出 0，3/3、skipped 0（JDK HttpServer：半截断开后续传、416 从头、404 不重试）。导出 `patches/0022-updater-retry-and-resume-the-update-download.patch`。干净 v0.21.2 以 N=4 套全部 20 张（0001–0022，0004 / 0009 早已删除） → versionCode 3804，与开发树只差版本号。
   推 `main` `779cccafc` → `check_patches` run 38512243044 绿 → `dry_run` run 38512260459 绿 → 正式 run 38513011212 → **`v0.21.2-harmony-preview.4`**（非 draft、非 prerelease，target `779cccafc`），`app.mihon.debug` versionCode 3804、versionName `0.21.2-harmony.4-8193`，签名 `4bd90284…ea8a` 不变，arm64 26,942,369 B（SHA-256 前缀 `fbcf9c960068`），universal 67,251,368 B，DEX 含 `Update download attempt`、`update.apk`，资源含 `harmony_update_download_timeout`；`repo` 分支 `releases.json` 22 条，第一条即此版。Anikku 不适用（上游 `downloadFileWithResume` 已在 worker 内重试）。Animeko 待确认（每个地址只下一次，失败后自动换 universal；大陆网络点更新看是否先失败后自动成功）。从旧版升到 preview.4 的这一次仍是旧代码在下载，第一下可能还会失败，再点即可。
+- 2026-10-14（07:39 UTC）用户四件：① 书架点进资源再退出回到最顶；② 2000 项书架高速松开后惯性滑动一卡一卡（Anikku 同样）；③ 按住滑动条快速下翻，滑动条变透明，被识别成按着内容下滑，变成上翻；④ 自动列在折叠情况下只有两列，横封面偏小。根因见 §5.1 补丁 0023–0029，与 anikku-harmony 0031–0037 一一对应、同源。
+  子代理（grok-4.7-high-fast）实现。主代理复跑 `:presentation-core:spotlessCheck :app:spotlessCheck :presentation-core:testDebugUnitTest :app:testDebugUnitTest :app:compileNightlyKotlin --rerun-tasks` 通过（presentation-core 35 个用例，0 失败，2 个门控跳过；app 28 个，0 失败）。干净树 `/tmp/mihon-verify213`（v0.21.2，N=5）套用成功，12 个改动文件与开发树 `cmp` 一致。`PanoramaMasonry.kt` / `PanoramaMasonryLayout.kt` / `PanoramaMasonryLayoutTest.kt` 与 Anikku 逐字节相同。共享测试不再依赖 `java.awt` / `com.sun.management`。没有真机 / 模拟器手势测试。上游列表 / 网格滚动条的 `LaunchedEffect(firstVisibleItemScrollOffset)` 没改。
+  推 `main` `0066de0e4` → `check_patches` run 38527739609 绿 → `dry_run` run 38527787706 绿 → 正式 run 38529020510 → **`v0.21.2-harmony-preview.5`**（07:39 UTC），`app.mihon.debug` versionCode 3805、versionName `0.21.2-harmony.5-8200`，签名 `4bd90284…ea8a` 不变，arm64 26,942,369 B（SHA-256 前缀 `1f52f85fbac7`），universal 67,251,368 B，DEX 含 `PanoramaColumns$Tiered`、`holdOpaqueWhileThumbGrabbed`、`PanoramaMasonryContentEpoch`；`repo` 分支 `releases.json` 23 条，第一条即此版。series 27 张（0001–0029，0004 / 0009 已删）。同轮 Anikku 0031–0037 → `v0.2.0-harmony-preview.18`。Animeko：滚动条按住、惯性卡顿、自动列宽不适用；返回丢位置待确认。
