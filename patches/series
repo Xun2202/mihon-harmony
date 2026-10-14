@@ -20,3 +20,10 @@
 0020-presentation-staggered-scroller-stable-thumb.patch
 0021-presentation-panorama-masonry-reading-order.patch
 0022-updater-retry-and-resume-the-update-download.patch
+0023-presentation-panorama-auto-columns-span.patch
+0024-presentation-panorama-scroll-anchor-by-key.patch
+0025-presentation-panorama-layout-epoch.patch
+0026-library-panorama-cover-shapes-versioned.patch
+0027-presentation-fast-scroller-hold-grab.patch
+0028-presentation-panorama-tiered-auto-columns.patch
+0029-presentation-fast-scroller-snapshotflow.patch

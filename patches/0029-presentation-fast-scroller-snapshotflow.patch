@@ -1,0 +1,80 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Xun2202 <98207886+Xun2202@users.noreply.github.com>
+Date: Wed, 14 Oct 2026 06:11:44 +0000
+Subject: [PATCH] presentation: fast scroller follows scroll without restarting
+ per frame
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+VerticalMasonryFastScroller restarted its follow effect on every change
+of scroll offset, max scroll, and canScrollForward. A fling writes the
+offset on each frame, so that coroutine was cancelled and started again
+for every one of them and the shelf stuttered.
+
+One effect now collects a snapshotFlow of those three values. It still
+returns without moving the thumb while the thumb is dragged. The effect
+is keyed on the track height and top padding, which change with the
+layout rather than with each frame, so a resize still picks up the new
+track.
+
+The list scroller assigns the thumb during composition. The grid
+scroller's LaunchedEffect(firstVisibleItemScrollOffset) is upstream and
+closes over row estimates recomputed in composition, so it is left as
+it is.
+
+与 anikku-harmony 0037 同源。
+---
+ .../core/components/VerticalFastScroller.kt   | 31 ++++++++++++-------
+ 1 file changed, 19 insertions(+), 12 deletions(-)
+
+diff --git a/presentation-core/src/main/java/tachiyomi/presentation/core/components/VerticalFastScroller.kt b/presentation-core/src/main/java/tachiyomi/presentation/core/components/VerticalFastScroller.kt
+index 616fa2b..7f7c600 100644
+--- a/presentation-core/src/main/java/tachiyomi/presentation/core/components/VerticalFastScroller.kt
++++ b/presentation-core/src/main/java/tachiyomi/presentation/core/components/VerticalFastScroller.kt
+@@ -61,6 +61,7 @@ import kotlinx.coroutines.channels.BufferOverflow
+ import kotlinx.coroutines.coroutineScope
+ import kotlinx.coroutines.delay
+ import kotlinx.coroutines.flow.MutableSharedFlow
++import kotlinx.coroutines.flow.collect
+ import kotlinx.coroutines.flow.collectLatest
+ import kotlinx.coroutines.flow.first
+ import kotlinx.coroutines.flow.sample
+@@ -521,19 +522,25 @@ fun VerticalMasonryFastScroller(
+             }
+ 
+             val lastScrollOffset = remember { MutableData(Float.NaN) }
+-            LaunchedEffect(state.scrollOffset, state.maxScroll, state.canScrollForward) {
+-                if (isThumbDragged) return@LaunchedEffect
+-                val proportion = if (!state.canScrollForward) {
+-                    1f
+-                } else {
+-                    (state.scrollOffset / state.maxScroll).coerceIn(0f, 1f)
+-                }
+-                val target = trackHeightPx * proportion + thumbTopPadding
+-                if (state.scrollOffset != lastScrollOffset.value) {
+-                    lastScrollOffset.value = state.scrollOffset
+-                    scrolled.tryEmit(Unit)
++            // Harmony: a fling moves the offset every frame, and restarting this effect
++            // stalled the shelf. The collector stays up and still skips a grabbed thumb.
++            LaunchedEffect(trackHeightPx, thumbTopPadding) {
++                snapshotFlow {
++                    Triple(state.scrollOffset, state.maxScroll, state.canScrollForward)
++                }.collect { (scrollOffset, maxScroll, canScrollForward) ->
++                    if (isThumbDraggedState.value) return@collect
++                    val proportion = if (!canScrollForward) {
++                        1f
++                    } else {
++                        (scrollOffset / maxScroll).coerceIn(0f, 1f)
++                    }
++                    val target = trackHeightPx * proportion + thumbTopPadding
++                    if (scrollOffset != lastScrollOffset.value) {
++                        lastScrollOffset.value = scrollOffset
++                        scrolled.tryEmit(Unit)
++                    }
++                    thumbOffsetY = target
+                 }
+-                thumbOffsetY = target
+             }
+ 
+             val alpha = remember { Animatable(0f) }
