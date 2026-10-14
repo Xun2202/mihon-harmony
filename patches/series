@@ -33,3 +33,4 @@
 0033-presentation-panorama-scroll-trace.patch
 0034-presentation-panorama-exact-scroll-delta.patch
 0035-presentation-fast-scroller-hold-to-grab.patch
+0036-app-scroll-performance-recorder.patch
