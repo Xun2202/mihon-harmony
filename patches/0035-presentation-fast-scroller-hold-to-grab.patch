@@ -36,7 +36,7 @@ no events there. The KDoc that said otherwise is corrected.
 after the grab cancels an item long press. A finger held perfectly still
 for 500 ms can still fire it.
 
-与 anikku-harmony 0044 同源。
+与 anikku-harmony 0043 同源。
 ---
  .../core/components/VerticalFastScroller.kt   | 161 ++++++++++++++++--
  .../components/PanoramaMasonryFlingTest.kt    | 139 +++++++++++++++
