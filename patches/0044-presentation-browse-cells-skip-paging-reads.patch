@@ -1,0 +1,552 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Xun2202 <98207886+Xun2202@users.noreply.github.com>
+Date: Wed, 14 Oct 2026 17:45:38 +0000
+Subject: [PATCH] presentation: browse cells skip per-frame paging reads
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+A browse panorama fling spent 2-11 ms in layout on the slow frames. Each cell
+read LazyPagingItems.get, which subscribes that composition to the whole paging
+snapshot and records a prefetch hint. The key lambda called peek on every
+getKey. PanoramaMasonry.getIndex walked the list, and the item provider built
+a new interval list on every call.
+
+Manga cells and the loading row now have their own content types. The cell
+reads the row with peek inside derivedStateOf, and calls get once from a
+SideEffect so the next page still loads. Keys are taken once from the snapshot.
+getIndex uses a map built with the interval content, and the provider is reused
+while that content is current.
+
+与 anikku-harmony 同病（同一段代码 / 同一套网格），Anikku 侧待移植。
+---
+ .../components/BrowseSourceComfortableGrid.kt | 45 +++++++----
+ .../components/BrowseSourceCompactGrid.kt     | 45 +++++++----
+ .../browse/components/BrowseSourceList.kt     | 13 ++--
+ .../browse/components/BrowseSourcePaging.kt   | 78 +++++++++++++++++++
+ .../library/components/PanoramaCoverShapes.kt |  9 +++
+ .../core/components/PanoramaMasonry.kt        | 36 +++++++--
+ .../components/PanoramaMasonryLayoutTest.kt   | 39 ++++++++++
+ 7 files changed, 219 insertions(+), 46 deletions(-)
+ create mode 100644 app/src/main/java/eu/kanade/presentation/browse/components/BrowseSourcePaging.kt
+
+diff --git a/app/src/main/java/eu/kanade/presentation/browse/components/BrowseSourceComfortableGrid.kt b/app/src/main/java/eu/kanade/presentation/browse/components/BrowseSourceComfortableGrid.kt
+index b674c8d..eef304e 100644
+--- a/app/src/main/java/eu/kanade/presentation/browse/components/BrowseSourceComfortableGrid.kt
++++ b/app/src/main/java/eu/kanade/presentation/browse/components/BrowseSourceComfortableGrid.kt
+@@ -7,8 +7,6 @@ import androidx.compose.foundation.lazy.grid.GridItemSpan
+ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+ import androidx.compose.runtime.Composable
+ import androidx.compose.runtime.CompositionLocalProvider
+-import androidx.compose.runtime.collectAsState
+-import androidx.compose.runtime.getValue
+ import androidx.compose.ui.unit.dp
+ import androidx.paging.LoadState
+ import androidx.paging.compose.LazyPagingItems
+@@ -52,6 +50,7 @@ fun BrowseSourceComfortableGrid(
+     if (usePanoramaCover) {
+         // The grid owns the scroll state: a cross-band shape commit remeasures every lane.
+         val state = rememberPanoramaMasonryState()
++        HintBrowseFarEnd(mangaList) { state.lastVisibleItemIndex }
+         val settled = rememberPanoramaGridSettled { state.isScrollInProgress }
+         PrefetchPanoramaCoverShapes(
+             itemCount = mangaList.itemCount,
+@@ -60,6 +59,8 @@ fun BrowseSourceComfortableGrid(
+             lastVisibleIndex = { state.lastVisibleItemIndex },
+         )
+         val shapeMode = rememberPanoramaShapeModeState()
++        val loadState = mangaList.loadState
++        val mangaKeys = rememberBrowseMangaKeys(mangaList)
+         CompositionLocalProvider(LocalPanoramaGridSettled provides settled) {
+             TrackPanoramaCoverShapes(mangaList.itemCount, shapeMode) { mangaList.peek(it)?.value?.id }
+             val mode = shapeMode.mode
+@@ -74,9 +75,10 @@ fun BrowseSourceComfortableGrid(
+                 verticalSpacing = CommonMangaItemDefaults.GridVerticalSpacer,
+                 horizontalSpacing = CommonMangaItemDefaults.GridHorizontalSpacer,
+             ) {
+-                if (mangaList.loadState.prepend is LoadState.Loading) {
++                if (loadState.prepend is LoadState.Loading) {
+                     item(
+                         key = "browse_source_loading_prepend",
++                        contentType = BROWSE_SOURCE_LOADING_TYPE,
+                         span = PanoramaSpan.FullLine,
+                         height = PanoramaCellHeight.Fixed(BrowseSourceLoadingRowHeight),
+                     ) {
+@@ -85,21 +87,22 @@ fun BrowseSourceComfortableGrid(
+                 }
+ 
+                 items(
+-                    count = mangaList.itemCount,
+-                    key = { index -> mangaList.peek(index)?.value?.id ?: index },
++                    count = mangaKeys.size,
++                    key = { index -> mangaKeys[index] },
++                    contentType = { BROWSE_SOURCE_COMFORTABLE },
+                     span = { index ->
+-                        val id = mangaList.peek(index)?.value?.id
+-                        panoramaCoverSpan(id == null || committedCoverIsWide(id), mode)
++                        val id = mangaKeys[index] as? Long
++                        panoramaCoverSpan(committedCoverIsWide(id), mode)
+                     },
+                     height = { index ->
+-                        val id = mangaList.peek(index)?.value?.id
++                        val id = mangaKeys[index] as? Long
+                         PanoramaCellHeight.Cover(
+-                            wide = id == null || committedCoverIsWide(id),
++                            wide = committedCoverIsWide(id),
+                             titleBelow = true,
+                         )
+                     },
+                 ) { index ->
+-                    val manga by mangaList[index]?.collectAsState() ?: return@items
++                    val manga = presentedBrowseManga(mangaList, index) ?: return@items
+                     BrowseSourceComfortableGridItem(
+                         manga = manga,
+                         onClick = { onMangaClick(manga) },
+@@ -108,11 +111,10 @@ fun BrowseSourceComfortableGrid(
+                     )
+                 }
+ 
+-                if (mangaList.loadState.refresh is LoadState.Loading ||
+-                    mangaList.loadState.append is LoadState.Loading
+-                ) {
++                if (loadState.refresh is LoadState.Loading || loadState.append is LoadState.Loading) {
+                     item(
+                         key = "browse_source_loading_append",
++                        contentType = BROWSE_SOURCE_LOADING_TYPE,
+                         span = PanoramaSpan.FullLine,
+                         height = PanoramaCellHeight.Fixed(BrowseSourceLoadingRowHeight),
+                     ) {
+@@ -131,13 +133,19 @@ fun BrowseSourceComfortableGrid(
+         horizontalArrangement = Arrangement.spacedBy(CommonMangaItemDefaults.GridHorizontalSpacer),
+     ) {
+         if (mangaList.loadState.prepend is LoadState.Loading) {
+-            item(span = { GridItemSpan(maxLineSpan) }) {
++            item(
++                span = { GridItemSpan(maxLineSpan) },
++                contentType = BROWSE_SOURCE_LOADING_TYPE,
++            ) {
+                 BrowseSourceLoadingItem()
+             }
+         }
+ 
+-        items(count = mangaList.itemCount) { index ->
+-            val manga by mangaList[index]?.collectAsState() ?: return@items
++        items(
++            count = mangaList.itemCount,
++            contentType = { BROWSE_SOURCE_COMFORTABLE },
++        ) { index ->
++            val manga = presentedBrowseManga(mangaList, index) ?: return@items
+             BrowseSourceComfortableGridItem(
+                 manga = manga,
+                 onClick = { onMangaClick(manga) },
+@@ -146,7 +154,10 @@ fun BrowseSourceComfortableGrid(
+         }
+ 
+         if (mangaList.loadState.refresh is LoadState.Loading || mangaList.loadState.append is LoadState.Loading) {
+-            item(span = { GridItemSpan(maxLineSpan) }) {
++            item(
++                span = { GridItemSpan(maxLineSpan) },
++                contentType = BROWSE_SOURCE_LOADING_TYPE,
++            ) {
+                 BrowseSourceLoadingItem()
+             }
+         }
+diff --git a/app/src/main/java/eu/kanade/presentation/browse/components/BrowseSourceCompactGrid.kt b/app/src/main/java/eu/kanade/presentation/browse/components/BrowseSourceCompactGrid.kt
+index c16d813..ca51003 100644
+--- a/app/src/main/java/eu/kanade/presentation/browse/components/BrowseSourceCompactGrid.kt
++++ b/app/src/main/java/eu/kanade/presentation/browse/components/BrowseSourceCompactGrid.kt
+@@ -7,8 +7,6 @@ import androidx.compose.foundation.lazy.grid.GridItemSpan
+ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+ import androidx.compose.runtime.Composable
+ import androidx.compose.runtime.CompositionLocalProvider
+-import androidx.compose.runtime.collectAsState
+-import androidx.compose.runtime.getValue
+ import androidx.compose.ui.unit.dp
+ import androidx.paging.LoadState
+ import androidx.paging.compose.LazyPagingItems
+@@ -52,6 +50,7 @@ fun BrowseSourceCompactGrid(
+     if (usePanoramaCover) {
+         // The grid owns the scroll state: a cross-band shape commit remeasures every lane.
+         val state = rememberPanoramaMasonryState()
++        HintBrowseFarEnd(mangaList) { state.lastVisibleItemIndex }
+         val settled = rememberPanoramaGridSettled { state.isScrollInProgress }
+         PrefetchPanoramaCoverShapes(
+             itemCount = mangaList.itemCount,
+@@ -60,6 +59,8 @@ fun BrowseSourceCompactGrid(
+             lastVisibleIndex = { state.lastVisibleItemIndex },
+         )
+         val shapeMode = rememberPanoramaShapeModeState()
++        val loadState = mangaList.loadState
++        val mangaKeys = rememberBrowseMangaKeys(mangaList)
+         CompositionLocalProvider(LocalPanoramaGridSettled provides settled) {
+             TrackPanoramaCoverShapes(mangaList.itemCount, shapeMode) { mangaList.peek(it)?.value?.id }
+             val mode = shapeMode.mode
+@@ -74,9 +75,10 @@ fun BrowseSourceCompactGrid(
+                 verticalSpacing = CommonMangaItemDefaults.GridVerticalSpacer,
+                 horizontalSpacing = CommonMangaItemDefaults.GridHorizontalSpacer,
+             ) {
+-                if (mangaList.loadState.prepend is LoadState.Loading) {
++                if (loadState.prepend is LoadState.Loading) {
+                     item(
+                         key = "browse_source_loading_prepend",
++                        contentType = BROWSE_SOURCE_LOADING_TYPE,
+                         span = PanoramaSpan.FullLine,
+                         height = PanoramaCellHeight.Fixed(BrowseSourceLoadingRowHeight),
+                     ) {
+@@ -85,21 +87,22 @@ fun BrowseSourceCompactGrid(
+                 }
+ 
+                 items(
+-                    count = mangaList.itemCount,
+-                    key = { index -> mangaList.peek(index)?.value?.id ?: index },
++                    count = mangaKeys.size,
++                    key = { index -> mangaKeys[index] },
++                    contentType = { BROWSE_SOURCE_COMPACT },
+                     span = { index ->
+-                        val id = mangaList.peek(index)?.value?.id
+-                        panoramaCoverSpan(id == null || committedCoverIsWide(id), mode)
++                        val id = mangaKeys[index] as? Long
++                        panoramaCoverSpan(committedCoverIsWide(id), mode)
+                     },
+                     height = { index ->
+-                        val id = mangaList.peek(index)?.value?.id
++                        val id = mangaKeys[index] as? Long
+                         PanoramaCellHeight.Cover(
+-                            wide = id == null || committedCoverIsWide(id),
++                            wide = committedCoverIsWide(id),
+                             titleBelow = false,
+                         )
+                     },
+                 ) { index ->
+-                    val manga by mangaList[index]?.collectAsState() ?: return@items
++                    val manga = presentedBrowseManga(mangaList, index) ?: return@items
+                     BrowseSourceCompactGridItem(
+                         manga = manga,
+                         onClick = { onMangaClick(manga) },
+@@ -108,11 +111,10 @@ fun BrowseSourceCompactGrid(
+                     )
+                 }
+ 
+-                if (mangaList.loadState.refresh is LoadState.Loading ||
+-                    mangaList.loadState.append is LoadState.Loading
+-                ) {
++                if (loadState.refresh is LoadState.Loading || loadState.append is LoadState.Loading) {
+                     item(
+                         key = "browse_source_loading_append",
++                        contentType = BROWSE_SOURCE_LOADING_TYPE,
+                         span = PanoramaSpan.FullLine,
+                         height = PanoramaCellHeight.Fixed(BrowseSourceLoadingRowHeight),
+                     ) {
+@@ -131,13 +133,19 @@ fun BrowseSourceCompactGrid(
+         horizontalArrangement = Arrangement.spacedBy(CommonMangaItemDefaults.GridHorizontalSpacer),
+     ) {
+         if (mangaList.loadState.prepend is LoadState.Loading) {
+-            item(span = { GridItemSpan(maxLineSpan) }) {
++            item(
++                span = { GridItemSpan(maxLineSpan) },
++                contentType = BROWSE_SOURCE_LOADING_TYPE,
++            ) {
+                 BrowseSourceLoadingItem()
+             }
+         }
+ 
+-        items(count = mangaList.itemCount) { index ->
+-            val manga by mangaList[index]?.collectAsState() ?: return@items
++        items(
++            count = mangaList.itemCount,
++            contentType = { BROWSE_SOURCE_COMPACT },
++        ) { index ->
++            val manga = presentedBrowseManga(mangaList, index) ?: return@items
+             BrowseSourceCompactGridItem(
+                 manga = manga,
+                 onClick = { onMangaClick(manga) },
+@@ -146,7 +154,10 @@ fun BrowseSourceCompactGrid(
+         }
+ 
+         if (mangaList.loadState.refresh is LoadState.Loading || mangaList.loadState.append is LoadState.Loading) {
+-            item(span = { GridItemSpan(maxLineSpan) }) {
++            item(
++                span = { GridItemSpan(maxLineSpan) },
++                contentType = BROWSE_SOURCE_LOADING_TYPE,
++            ) {
+                 BrowseSourceLoadingItem()
+             }
+         }
+diff --git a/app/src/main/java/eu/kanade/presentation/browse/components/BrowseSourceList.kt b/app/src/main/java/eu/kanade/presentation/browse/components/BrowseSourceList.kt
+index 63be2a5..7e1f757 100644
+--- a/app/src/main/java/eu/kanade/presentation/browse/components/BrowseSourceList.kt
++++ b/app/src/main/java/eu/kanade/presentation/browse/components/BrowseSourceList.kt
+@@ -3,8 +3,6 @@ package eu.kanade.presentation.browse.components
+ import androidx.compose.foundation.layout.PaddingValues
+ import androidx.compose.foundation.lazy.LazyColumn
+ import androidx.compose.runtime.Composable
+-import androidx.compose.runtime.collectAsState
+-import androidx.compose.runtime.getValue
+ import androidx.compose.ui.unit.dp
+ import androidx.paging.LoadState
+ import androidx.paging.compose.LazyPagingItems
+@@ -25,14 +23,17 @@ fun BrowseSourceList(
+     LazyColumn(
+         contentPadding = contentPadding + PaddingValues(vertical = 8.dp),
+     ) {
+-        item {
++        item(contentType = BROWSE_SOURCE_LOADING_TYPE) {
+             if (mangaList.loadState.prepend is LoadState.Loading) {
+                 BrowseSourceLoadingItem()
+             }
+         }
+ 
+-        items(count = mangaList.itemCount) { index ->
+-            val manga by mangaList[index]?.collectAsState() ?: return@items
++        items(
++            count = mangaList.itemCount,
++            contentType = { BROWSE_SOURCE_LIST },
++        ) { index ->
++            val manga = presentedBrowseManga(mangaList, index) ?: return@items
+             BrowseSourceListItem(
+                 manga = manga,
+                 onClick = { onMangaClick(manga) },
+@@ -40,7 +41,7 @@ fun BrowseSourceList(
+             )
+         }
+ 
+-        item {
++        item(contentType = BROWSE_SOURCE_LOADING_TYPE) {
+             if (mangaList.loadState.refresh is LoadState.Loading || mangaList.loadState.append is LoadState.Loading) {
+                 BrowseSourceLoadingItem()
+             }
+diff --git a/app/src/main/java/eu/kanade/presentation/browse/components/BrowseSourcePaging.kt b/app/src/main/java/eu/kanade/presentation/browse/components/BrowseSourcePaging.kt
+new file mode 100644
+index 0000000..fff6ca2
+--- /dev/null
++++ b/app/src/main/java/eu/kanade/presentation/browse/components/BrowseSourcePaging.kt
+@@ -0,0 +1,78 @@
++package eu.kanade.presentation.browse.components
++
++import androidx.compose.runtime.Composable
++import androidx.compose.runtime.LaunchedEffect
++import androidx.compose.runtime.SideEffect
++import androidx.compose.runtime.collectAsState
++import androidx.compose.runtime.derivedStateOf
++import androidx.compose.runtime.getValue
++import androidx.compose.runtime.remember
++import androidx.compose.runtime.snapshotFlow
++import androidx.paging.compose.LazyPagingItems
++import kotlinx.coroutines.flow.StateFlow
++import kotlinx.coroutines.flow.collect
++import tachiyomi.domain.manga.model.Manga
++
++internal const val BROWSE_SOURCE_COMFORTABLE = "browse_source_comfortable"
++internal const val BROWSE_SOURCE_COMPACT = "browse_source_compact"
++internal const val BROWSE_SOURCE_LIST = "browse_source_list"
++internal const val BROWSE_SOURCE_LOADING_TYPE = "browse_source_loading"
++
++/**
++ * Ids for the current paging snapshot. The lazy key and the panorama span read this array
++ * instead of calling [LazyPagingItems.peek] on every measure.
++ */
++@Composable
++internal fun rememberBrowseMangaKeys(mangaList: LazyPagingItems<StateFlow<Manga>>): Array<Any> {
++    val snapshot = mangaList.itemSnapshotList
++    return remember(snapshot) {
++        Array(snapshot.size) { index -> snapshot[index]?.value?.id ?: index }
++    }
++}
++
++/**
++ * The manga at [index], without subscribing the cell to the whole paging snapshot.
++ *
++ * [LazyPagingItems.peek] does not ask for the next page. [LazyPagingItems.get] does, and it also
++ * reads the snapshot state. The hint runs from [SideEffect], so a new page does not recompose
++ * this cell unless the row at [index] changed.
++ */
++@Composable
++internal fun presentedBrowseManga(
++    mangaList: LazyPagingItems<StateFlow<Manga>>,
++    index: Int,
++): Manga? {
++    val mangaFlow = remember(mangaList, index) {
++        derivedStateOf { mangaList.peek(index) }
++    }
++    // Harmony: get() is the prefetch hint. Reading it while composing subscribes the cell to every snapshot.
++    SideEffect {
++        if (index in 0 until mangaList.itemCount) mangaList[index]
++    }
++    val flow = mangaFlow.value ?: return null
++    val manga by flow.collectAsState()
++    return manga
++}
++
++/**
++ * Prefetch hint for the far end of a fling.
++ *
++ * The per-cell [SideEffect] in [presentedBrowseManga] only runs for cells that were composed.
++ * A fast fling skips those, so the grid also reports [lastVisibleIndex] whenever it changes.
++ * [LazyPagingItems.get] has to run on the main thread; this effect does.
++ */
++@Composable
++internal fun HintBrowseFarEnd(
++    mangaList: LazyPagingItems<StateFlow<Manga>>,
++    lastVisibleIndex: () -> Int,
++) {
++    LaunchedEffect(mangaList) {
++        snapshotFlow {
++            val count = mangaList.itemCount
++            val last = lastVisibleIndex()
++            last to count
++        }.collect { (last, count) ->
++            if (last in 0 until count) mangaList[last]
++        }
++    }
++}
+diff --git a/app/src/main/java/eu/kanade/presentation/library/components/PanoramaCoverShapes.kt b/app/src/main/java/eu/kanade/presentation/library/components/PanoramaCoverShapes.kt
+index e641d74..bdd1a85 100644
+--- a/app/src/main/java/eu/kanade/presentation/library/components/PanoramaCoverShapes.kt
++++ b/app/src/main/java/eu/kanade/presentation/library/components/PanoramaCoverShapes.kt
+@@ -89,6 +89,15 @@ internal fun committedCoverIsWide(mangaId: Long): Boolean {
+     return PanoramaCoverShapes.committedRatio(mangaId) <= RATIO_SWITCH_TO_PANORAMA
+ }
+ 
++/** Band for a paging slot whose manga has not arrived yet. */
++internal fun committedCoverIsWide(mangaId: Long?): Boolean {
++    return if (mangaId == null) {
++        PanoramaCoverShapes.placeholderRatio <= RATIO_SWITCH_TO_PANORAMA
++    } else {
++        committedCoverIsWide(mangaId)
++    }
++}
++
+ /**
+  * Applies cross-band shapes once the grid has settled.
+  *
+diff --git a/presentation-core/src/main/java/tachiyomi/presentation/core/components/PanoramaMasonry.kt b/presentation-core/src/main/java/tachiyomi/presentation/core/components/PanoramaMasonry.kt
+index d3e22e4..70fbeb4 100644
+--- a/presentation-core/src/main/java/tachiyomi/presentation/core/components/PanoramaMasonry.kt
++++ b/presentation-core/src/main/java/tachiyomi/presentation/core/components/PanoramaMasonry.kt
+@@ -295,6 +295,7 @@ class PanoramaMasonryState {
+ 
+     private var intervalContent: PanoramaIntervalContent? = null
+     private var intervalLambda: (PanoramaMasonryScope.() -> Unit)? = null
++    private var itemProvider: PanoramaItemProvider? = null
+ 
+     private var keyCache: List<Any>? = null
+     private var keyCacheEpoch: Long = Long.MIN_VALUE
+@@ -450,6 +451,17 @@ class PanoramaMasonryState {
+         return created
+     }
+ 
++    /**
++     * The same provider for one items lambda, including the key-to-index map.
++     * LazyLayout asks for the provider again on each measure.
++     */
++    internal fun itemProviderFor(content: PanoramaMasonryScope.() -> Unit): LazyLayoutItemProvider {
++        val intervals = intervalsFor(content)
++        val current = itemProvider
++        if (current != null && current.wraps(intervals)) return current
++        return PanoramaItemProvider(intervals).also { itemProvider = it }
++    }
++
+     /**
+      * The previous key list when [epoch] and [count] are unchanged, otherwise null.
+      * A null result is the only path that may allocate the next list.
+@@ -691,7 +703,8 @@ fun PanoramaMasonry(
+                 flingBehavior = flingBehavior,
+             ),
+         itemProvider = {
+-            PanoramaItemProvider(PanoramaIntervalContent(latestContent.value))
++            // Harmony: one provider per items lambda. Rebuilding the intervals here scanned every key.
++            state.itemProviderFor(latestContent.value)
+         },
+     ) { constraints ->
+         val measureStart = System.nanoTime()
+@@ -1042,6 +1055,11 @@ internal class PanoramaInterval(
+ private class PanoramaItemProvider(
+     private val intervals: PanoramaIntervalContent,
+ ) : LazyLayoutItemProvider {
++    // Harmony: first index of a repeated key, same as the old linear scan. Built once per intervals.
++    private val indexByKey: Map<Any, Int> = buildKeyIndex(intervals)
++
++    fun wraps(content: PanoramaIntervalContent): Boolean = intervals === content
++
+     override val itemCount: Int
+         get() = intervals.itemCount
+ 
+@@ -1059,10 +1077,16 @@ private class PanoramaItemProvider(
+ 
+     override fun getKey(index: Int): Any = intervals.getKey(index)
+ 
+-    override fun getIndex(key: Any): Int {
+-        for (index in 0 until itemCount) {
+-            if (getKey(index) == key) return index
+-        }
+-        return -1
++    override fun getIndex(key: Any): Int = indexByKey[key] ?: -1
++}
++
++private fun buildKeyIndex(intervals: PanoramaIntervalContent): Map<Any, Int> {
++    val count = intervals.itemCount
++    if (count == 0) return emptyMap()
++    val map = HashMap<Any, Int>(count)
++    for (index in 0 until count) {
++        val key = intervals.getKey(index)
++        if (key !in map) map[key] = index
+     }
++    return map
+ }
+diff --git a/presentation-core/src/test/java/tachiyomi/presentation/core/components/PanoramaMasonryLayoutTest.kt b/presentation-core/src/test/java/tachiyomi/presentation/core/components/PanoramaMasonryLayoutTest.kt
+index eab1832..9d5b7c1 100644
+--- a/presentation-core/src/test/java/tachiyomi/presentation/core/components/PanoramaMasonryLayoutTest.kt
++++ b/presentation-core/src/test/java/tachiyomi/presentation/core/components/PanoramaMasonryLayoutTest.kt
+@@ -1,6 +1,7 @@
+ package tachiyomi.presentation.core.components
+ 
+ import androidx.compose.runtime.saveable.SaverScope
++import androidx.compose.ui.unit.dp
+ import org.junit.jupiter.api.Assertions.assertArrayEquals
+ import org.junit.jupiter.api.Assertions.assertEquals
+ import org.junit.jupiter.api.Assertions.assertFalse
+@@ -1228,6 +1229,44 @@ class PanoramaMasonryLayoutTest {
+         PanoramaMasonryContentEpoch.intValue = 0
+     }
+ 
++    @Test
++    fun `getIndex uses a map built once per interval content`() {
++        val state = PanoramaMasonryState()
++        var keyCalls = 0
++        val content: PanoramaMasonryScope.() -> Unit = {
++            items(
++                count = 5,
++                key = { index ->
++                    keyCalls++
++                    if (index == 4) "k2" else "k$index"
++                },
++                height = { PanoramaCellHeight.Fixed(0.dp) },
++            ) {
++            }
++        }
++        val provider = state.itemProviderFor(content)
++        assertEquals(5, keyCalls)
++        assertEquals(0, provider.getIndex("k0"))
++        assertEquals(2, provider.getIndex("k2"))
++        assertEquals(-1, provider.getIndex("missing"))
++        assertEquals(5, keyCalls)
++        assertTrue(provider === state.itemProviderFor(content))
++        assertEquals(5, keyCalls)
++
++        val other: PanoramaMasonryScope.() -> Unit = {
++            items(
++                count = 1,
++                key = { "only" },
++                height = { PanoramaCellHeight.Fixed(0.dp) },
++            ) {
++            }
++        }
++        val rebuilt = state.itemProviderFor(other)
++        assertTrue(rebuilt !== provider)
++        assertEquals(0, rebuilt.getIndex("only"))
++        assertEquals(-1, rebuilt.getIndex("k0"))
++    }
++
+     @Test
+     fun `Benchmark unchanged scroll frames`() {
+         assumeTrue(System.getenv("PANORAMA_BENCH") == "1") {

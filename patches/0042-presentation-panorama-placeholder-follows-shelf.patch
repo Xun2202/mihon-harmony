@@ -1,0 +1,2018 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Xun2202 <98207886+Xun2202@users.noreply.github.com>
+Date: Wed, 14 Oct 2026 18:04:52 +0000
+Subject: [PATCH] presentation: panorama placeholders follow the shelf and
+ placed cells keep their slot
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Browse source panorama laid unknown covers out as WIDE_COVER_RATIO 9/16.
+That is under the 0.75 switch, so each cell was a wide 3:2 band spanning
+two lanes. Most manga covers are tall, about 1.5 height/width, and nearly
+every cell then flipped to a single lane. Since cross-band first commits
+wait for settle, and header prefetch pauses while scrolling, those flips
+all landed about 300 ms after each fling stopped. Each one was a full
+structural relayout: content height 14098 to 4092 for 20 items and 31008
+to 16957 for 59 items, with the anchor jumping 394-1628 px. The shelf
+showed a wide block first, then shrank and reshuffled after every stop.
+
+Unknown ids now use a process-wide placeholder, tall 3/2 by default, so
+the slot and the drawn cover start as a book. committedRatio reports that
+placeholder. The column vote still reads committedRatioOrNull and skips
+unknowns, so the placeholder cannot vote for itself. When the grid
+settles, onGridSignal sets the placeholder from the vote: Tall or Wide
+forces that band; Unknown with at least one committed ratio follows the
+majority, entering wide at 0.60 and leaving it at 0.40; a shelf with
+nothing committed leaves the placeholder alone. A band flip clears frozen
+slots and bumps the content epoch once, which is how a wide-thumb shelf
+converges. The same band does not bump.
+
+A first commit is compared with that placeholder, not with 9/16. The same
+band commits immediately, including while scrolling, and does not bump.
+A cross-band change stores the ratio either way and does not rebuild from
+index 0. The masonry caches the band it queried on the rectangle. An id
+placed strictly below the last visible index relayouts only the tail from
+that index; rectangles above it are the same instances, and the change is
+not structural, so the anchor is not restored. An id on screen or above
+keeps the band already on its rectangle for this layout session.
+committedRatio and rememberCoverRatio report that frozen band, so the
+cover drawn with crop stays inside the slot it was given. The true ratio
+is what the next layout session and the shape file use. Leaving the grid
+drops freezes for keys no other grid still has placed.
+
+The settle flush no longer commits every pending cross-band cover. It
+still publishes the shape version so the placeholder sample can run.
+Header prefetch no longer pauses while scrolling. The window is the first
+visible row through the last visible row plus 60, with at most four
+requests in flight. Cancel-behind, the finished set, and one retry stay.
+
+A library shelf whose ratios are already committed lays out as before.
+A tall file load matches the tall placeholder, so it no longer bumps the
+content epoch.
+
+与 anikku-harmony 0025 / 0027 / 0030 同病（同一段代码 / 同一套网格），Anikku 侧待移植。
+---
+ .../library/components/CommonMangaItem.kt     |   4 +-
+ .../components/LibraryComfortableGrid.kt      |  18 +-
+ .../library/components/PanoramaCoverShapes.kt | 281 +++++++++------
+ .../library/components/PanoramaShapeMode.kt   |  26 +-
+ .../components/PanoramaCoverShapesTest.kt     | 261 ++++++++++----
+ .../components/PanoramaShapeModeTest.kt       |  90 ++++-
+ .../core/components/PanoramaMasonry.kt        | 157 ++++++++-
+ .../core/components/PanoramaMasonryLayout.kt  | 324 +++++++++++++++---
+ .../components/PanoramaMasonryLayoutTest.kt   | 168 +++++++++
+ 9 files changed, 1102 insertions(+), 227 deletions(-)
+
+diff --git a/app/src/main/java/eu/kanade/presentation/library/components/CommonMangaItem.kt b/app/src/main/java/eu/kanade/presentation/library/components/CommonMangaItem.kt
+index 7591016..b9b36fb 100644
+--- a/app/src/main/java/eu/kanade/presentation/library/components/CommonMangaItem.kt
++++ b/app/src/main/java/eu/kanade/presentation/library/components/CommonMangaItem.kt
+@@ -97,7 +97,7 @@ fun MangaCompactGridItem(
+         { result ->
+             val image = result.result.image
+             val width = image.width
+-            // Harmony: same-band updates this cell. A cross-band commit waits until the grid settles.
++            // Harmony: same-band updates this cell. A cross-band edit keeps the placed slot.
+             if (width > 0) {
+                 PanoramaCoverShapes.noteVisibleRatio(
+                     coverData.mangaId,
+@@ -235,7 +235,7 @@ fun MangaComfortableGridItem(
+         { result ->
+             val image = result.result.image
+             val width = image.width
+-            // Harmony: same-band updates this cell. A cross-band commit waits until the grid settles.
++            // Harmony: same-band updates this cell. A cross-band edit keeps the placed slot.
+             if (width > 0) {
+                 PanoramaCoverShapes.noteVisibleRatio(
+                     coverData.mangaId,
+diff --git a/app/src/main/java/eu/kanade/presentation/library/components/LibraryComfortableGrid.kt b/app/src/main/java/eu/kanade/presentation/library/components/LibraryComfortableGrid.kt
+index 0d12951..016afb1 100644
+--- a/app/src/main/java/eu/kanade/presentation/library/components/LibraryComfortableGrid.kt
++++ b/app/src/main/java/eu/kanade/presentation/library/components/LibraryComfortableGrid.kt
+@@ -5,6 +5,7 @@ import androidx.compose.foundation.layout.fillMaxSize
+ import androidx.compose.foundation.lazy.grid.items
+ import androidx.compose.runtime.Composable
+ import androidx.compose.runtime.MutableFloatState
++import androidx.compose.runtime.SideEffect
+ import androidx.compose.runtime.mutableFloatStateOf
+ import androidx.compose.runtime.remember
+ import androidx.compose.ui.Modifier
+@@ -15,6 +16,7 @@ import tachiyomi.domain.manga.model.MangaCover
+ import tachiyomi.presentation.core.components.PanoramaCellHeight
+ import tachiyomi.presentation.core.components.PanoramaColumns
+ import tachiyomi.presentation.core.components.PanoramaMasonryContentEpoch
++import tachiyomi.presentation.core.components.PanoramaMasonryTailEpoch
+ import tachiyomi.presentation.core.components.PanoramaSpan
+ 
+ @Composable
+@@ -183,14 +185,18 @@ internal fun rememberCoverRatio(mangaId: Long, usePanoramaCover: Boolean): Mutab
+     if (!usePanoramaCover) {
+         return remember(mangaId) { mutableFloatStateOf(1f) }
+     }
+-    // Harmony: this cell subscribes to the layout epoch, not the whole ratio table.
+-    // A cross-band commit bumps the epoch; a same-band edit does not recompose the shelf.
++    // Harmony: the content epoch is a placeholder flip. The tail epoch is a band change below
++    // the viewport. Both recompose this cell onto [committedRatio], which stays on the placed
++    // band when the learnt ratio crossed after the cell was on screen.
+     PanoramaMasonryContentEpoch.intValue
+-    val ratio = remember(mangaId) {
+-        mutableFloatStateOf(PanoramaCoverShapes.committedRatio(mangaId))
+-    }
++    PanoramaMasonryTailEpoch.intValue
+     val committed = PanoramaCoverShapes.committedRatio(mangaId)
+-    if (ratio.floatValue != committed) ratio.floatValue = committed
++    // Initial value is the committed band, so the first frame does not draw the wrong slot.
++    // The write is a SideEffect: assigning snapshot state during composition is not allowed.
++    val ratio = remember(mangaId) { mutableFloatStateOf(committed) }
++    SideEffect {
++        if (ratio.floatValue != committed) ratio.floatValue = committed
++    }
+     return ratio
+ }
+ // Harmony <--
+diff --git a/app/src/main/java/eu/kanade/presentation/library/components/PanoramaCoverShapes.kt b/app/src/main/java/eu/kanade/presentation/library/components/PanoramaCoverShapes.kt
+index 2bbb689..e641d74 100644
+--- a/app/src/main/java/eu/kanade/presentation/library/components/PanoramaCoverShapes.kt
++++ b/app/src/main/java/eu/kanade/presentation/library/components/PanoramaCoverShapes.kt
+@@ -45,6 +45,8 @@ import kotlinx.coroutines.withContext
+ import tachiyomi.domain.manga.model.Manga
+ import tachiyomi.domain.manga.model.asMangaCover
+ import tachiyomi.presentation.core.components.PanoramaMasonryContentEpoch
++import tachiyomi.presentation.core.components.PanoramaMasonryTailEpoch
++import tachiyomi.presentation.core.components.PanoramaPlacedCovers
+ import java.io.BufferedReader
+ import java.io.BufferedWriter
+ import java.io.File
+@@ -75,11 +77,14 @@ private val AlwaysSettled: () -> Boolean = { true }
+ val LocalPanoramaGridSettled = compositionLocalOf<() -> Boolean> { AlwaysSettled }
+ 
+ /**
+- * Unknown covers commit as 9/16, which is on the wide side of 0.75.
+- * The masonry reads the committed value through [committedCoverIsWide], not this constant.
++ * Wide placeholder, height/width 9/16, on the wide side of 0.75.
++ * Unknown covers use [TALL_COVER_RATIO] until a shelf votes a wide majority.
+  */
+ internal const val WIDE_COVER_RATIO = 9f / 16f
+ 
++/** Tall placeholder, height/width 3/2. A book cover in one lane. */
++internal const val TALL_COVER_RATIO = 3f / 2f
++
+ internal fun committedCoverIsWide(mangaId: Long): Boolean {
+     return PanoramaCoverShapes.committedRatio(mangaId) <= RATIO_SWITCH_TO_PANORAMA
+ }
+@@ -90,6 +95,7 @@ internal fun committedCoverIsWide(mangaId: Long): Boolean {
+  * Harmony: composition peeks a few ids for the sample key and does not walk the shelf.
+  * [PanoramaCoverShapes.committedShapeVersion] is read here, in the effect, and not in measure.
+  * A version bump while settled (the shape file landing, or a flush) samples again.
++ * The sample updates the process-wide placeholder. It does not flush placed cells.
+  */
+ @Composable
+ internal fun TrackPanoramaCoverShapes(
+@@ -114,7 +120,7 @@ internal fun TrackPanoramaCoverShapes(
+                 PanoramaCoverShapes.committedShapeVersion.intValue,
+             )
+         }.collect { (settled, signature, _) ->
+-            // Harmony: flush cross-band commits first. That flush may bump the version.
++            // Harmony: a settle still publishes the shape version. Placeholder updates run below.
+             PanoramaCoverShapes.setGridScrolling(token, scrolling = !settled)
+             val version = PanoramaCoverShapes.committedShapeVersion.intValue
+             val (total, idAt) = listed
+@@ -151,21 +157,13 @@ private object AndroidSnapshotDispatcher : PanoramaSnapshotDispatcher {
+ object PanoramaCoverShapes {
+     private val learnt = HashMap<Long, Float>()
+     private val committed = HashMap<Long, Float>()
+-    private val pendingCross = HashMap<Long, Float>()
++
++    /** Display band kept for a cell that was already on screen when its ratio crossed. */
++    private val frozenWide = HashMap<Long, Boolean>()
+     private val pendingIds = LinkedHashSet<Long>()
+     private val scrollingGrids = HashSet<Any>()
+-
+-    /** Live isScrollInProgress, read at flush time. The settled flag lags that by a frame. */
+-    private val scrollProbes = HashMap<Any, () -> Boolean>()
+     private val stored = LinkedHashMap<Long, Float>()
+ 
+-    /**
+-     * True while any panorama grid has not settled. Prefetch reads this so it can pause
+-     * enqueueing for the whole gesture, including the settle delay.
+-     */
+-    internal var anyGridScrolling by mutableStateOf(false)
+-        private set
+-
+     private val gate = Any()
+     private val ready = CompletableDeferred<Unit>()
+ 
+@@ -188,6 +186,19 @@ object PanoramaCoverShapes {
+     @Volatile
+     private var loaded = false
+ 
++    /**
++     * The shape-file flush has not run yet.
++     * Harmony: [loaded] flips on the loader thread after [read] returns, so it can change before
++     * or after that flush. This flag travels with the file's ids. A first commit in that flush
++     * must not freeze the placeholder band a measure already placed.
++     */
++    private var fileLoadFlush = false
++
++    /** Unknown ids report this until a settled shelf votes another band. */
++    @Volatile
++    internal var placeholderRatio: Float = TALL_COVER_RATIO
++        private set
++
+     /**
+      * Harmony: owner-thread counter. Increments after the shape file is applied and after every
+      * flush commit. Read from composition or an effect only. Measure must not read it, and it
+@@ -195,6 +206,21 @@ object PanoramaCoverShapes {
+      */
+     internal val committedShapeVersion = mutableIntStateOf(0)
+ 
++    init {
++        installDetachHook()
++    }
++
++    private fun installDetachHook() {
++        // Harmony: leaving a grid drops freezes for keys no other grid still has placed.
++        PanoramaPlacedCovers.onDetached = { keys ->
++            synchronized(gate) {
++                for (key in keys) {
++                    if (key is Long) frozenWide.remove(key)
++                }
++            }
++        }
++    }
++
+     fun init(file: File, scope: CoroutineScope) {
+         synchronized(gate) {
+             if (initialized) return
+@@ -220,22 +246,64 @@ object PanoramaCoverShapes {
+ 
+     fun get(mangaId: Long): Float? = synchronized(gate) { learnt[mangaId] }
+ 
+-    /** Committed height/width, or 9/16 when this id has never been committed. Not a snapshot read. */
++    /**
++     * Height/width the slot and the drawn cover both use.
++     * Unknown ids report [placeholderRatio]. A cell frozen on screen reports that band instead
++     * of a ratio learnt after it was placed. Not a snapshot read.
++     */
+     fun committedRatio(mangaId: Long): Float = synchronized(gate) {
+-        committed[mangaId] ?: WIDE_COVER_RATIO
++        val known = committed[mangaId]
++        val frozen = frozenWide[mangaId]
++        when {
++            frozen == null -> known ?: placeholderRatio
++            known != null && isWide(known) == frozen -> known
++            frozen -> WIDE_COVER_RATIO
++            else -> TALL_COVER_RATIO
++        }
+     }
+ 
+     /**
+      * Committed height/width, or null when this id has never been committed.
+-     * Harmony: column voting must use this. [committedRatio] fills unknown ids with 9/16, which is wide.
++     * Harmony: column voting and the placeholder majority must use this. [committedRatio] fills
++     * unknown ids, and a frozen slot must not vote as the band it is still drawing.
+      */
+     fun committedRatioOrNull(mangaId: Long): Float? = synchronized(gate) {
+         committed[mangaId]
+     }
+ 
+     /**
+-     * Updates the cell's ratio when the committed band did not change.
+-     * A cross-band change waits for [PanoramaMasonryContentEpoch] and the cell reads it there.
++     * Placeholder band for the next unknown cover. [PanoramaShapeMode.Tall] and [PanoramaShapeMode.Wide] set that
++     * band. [Unknown] with [known] > 0 follows the committed majority, entering wide at 0.60 and
++     * leaving it at 0.40. [known] == 0 leaves the placeholder alone. A band flip bumps
++     * [PanoramaMasonryContentEpoch] once and drops frozen slots so the rebuild sees the new band.
++     */
++    internal fun applyShapePlaceholder(mode: PanoramaShapeMode, known: Int, wide: Int) {
++        val next = when (mode) {
++            PanoramaShapeMode.Tall -> TALL_COVER_RATIO
++            PanoramaShapeMode.Wide -> WIDE_COVER_RATIO
++            PanoramaShapeMode.Unknown -> {
++                if (known <= 0) return
++                val fraction = wide.toDouble() / known.toDouble()
++                val wideNow = if (isWide(placeholderRatio)) {
++                    fraction > PANORAMA_WIDE_EXIT_FRACTION
++                } else {
++                    fraction >= PANORAMA_WIDE_ENTER_FRACTION
++                }
++                if (wideNow) WIDE_COVER_RATIO else TALL_COVER_RATIO
++            }
++        }
++        if (sameBand(placeholderRatio, next)) {
++            placeholderRatio = next
++            return
++        }
++        synchronized(gate) { frozenWide.clear() }
++        placeholderRatio = next
++        PanoramaMasonryContentEpoch.intValue++
++    }
++
++    /**
++     * Same-band edits update this cell. A cross-band edit keeps the band [committedRatio] reports,
++     * which is the placed slot when this id was already on screen.
+      */
+     fun noteVisibleRatio(mangaId: Long, ratio: Float, coverRatio: MutableFloatState) {
+         put(mangaId, ratio)
+@@ -260,7 +328,7 @@ object PanoramaCoverShapes {
+                     val eldest = stored.entries.iterator().next().key
+                     stored.remove(eldest)
+                     learnt.remove(eldest)
+-                    pendingCross.remove(eldest)
++                    frozenWide.remove(eldest)
+                     pendingIds.remove(eldest)
+                 }
+                 stored[mangaId] = ratio
+@@ -276,50 +344,39 @@ object PanoramaCoverShapes {
+     }
+ 
+     internal fun setGridScrolling(token: Any, scrolling: Boolean) {
+-        val (flush, scrollingNow) = synchronized(gate) {
++        val flush = synchronized(gate) {
+             val wasSettled = scrollingGrids.isEmpty()
+             if (scrolling) scrollingGrids.add(token) else scrollingGrids.remove(token)
+             val nowScrolling = scrollingGrids.isNotEmpty()
+-            (!wasSettled && !nowScrolling) to nowScrolling
++            !wasSettled && !nowScrolling
+         }
+-        if (anyGridScrolling != scrollingNow) anyGridScrolling = scrollingNow
+         if (flush) scheduleFlush()
+     }
+ 
+-    /**
+-     * [scrollingNow] is read on the owner thread from [runFlush]. It must not re-enter
+-     * [PanoramaCoverShapes]. A true result holds a cross-band commit the same way a scrolling
+-     * grid does, including the frame before [setGridScrolling] has seen the gesture.
+-     */
+-    internal fun attachScrollProbe(token: Any, scrollingNow: () -> Boolean) {
+-        synchronized(gate) { scrollProbes[token] = scrollingNow }
+-    }
+-
+-    internal fun detachScrollProbe(token: Any) {
+-        synchronized(gate) { scrollProbes.remove(token) }
+-    }
+-
+     internal fun resetForTest() {
+         synchronized(gate) {
+             learnt.clear()
+             committed.clear()
+-            pendingCross.clear()
++            frozenWide.clear()
+             pendingIds.clear()
+             scrollingGrids.clear()
+-            scrollProbes.clear()
+             stored.clear()
+             flushQueued = false
+             initialized = false
+             loaded = false
++            fileLoadFlush = false
+             dirty = false
++            placeholderRatio = TALL_COVER_RATIO
+             storeFile = null
+             persistJob?.cancel()
+             persistJob = null
+             persistScope = null
+         }
+-        anyGridScrolling = false
+         snapshotDispatcher = AndroidSnapshotDispatcher
++        PanoramaPlacedCovers.resetForTest()
++        installDetachHook()
+         PanoramaMasonryContentEpoch.intValue = 0
++        PanoramaMasonryTailEpoch.intValue = 0
+         committedShapeVersion.intValue = 0
+     }
+ 
+@@ -440,8 +497,10 @@ object PanoramaCoverShapes {
+                 stored.remove(eldest)
+                 learnt.remove(eldest)
+                 pendingIds.remove(eldest)
+-                pendingCross.remove(eldest)
++                frozenWide.remove(eldest)
+             }
++            // Consumed by the flush scheduled below, not by the loaded flag in init's finally.
++            fileLoadFlush = true
+         }
+         // Harmony: one flush applies the file. runFlush publishes committedShapeVersion on the owner thread.
+         scheduleFlush()
+@@ -459,71 +518,97 @@ object PanoramaCoverShapes {
+     }
+ 
+     private fun runFlush() {
+-        val bump = synchronized(gate) {
++        val (ids, publishingFile) = synchronized(gate) {
+             flushQueued = false
+-            applyPending(!gridScrollingNow())
++            val pending = ArrayList(pendingIds)
++            pendingIds.clear()
++            val file = fileLoadFlush
++            fileLoadFlush = false
++            pending to file
++        }
++        // Harmony: placed bands are read outside the lock. The lookup must not re-enter this object.
++        val placed = HashMap<Long, Boolean>(ids.size)
++        val below = HashSet<Long>()
++        for (id in ids) {
++            val band = PanoramaPlacedCovers.bandIfOnScreenOrAbove(id)
++            if (band != null) {
++                placed[id] = band
++            } else if (PanoramaPlacedCovers.isStrictlyBelowViewport(id)) {
++                below.add(id)
++            }
+         }
+-        // Harmony: one epoch for the whole batch. Same-band edits do not reach this write.
+-        if (bump) PanoramaMasonryContentEpoch.intValue++
++        val applied = synchronized(gate) { applyPending(ids, placed, below, publishingFile) }
++        // Harmony: one tail epoch for the batch. Cells already on screen are frozen and do not set this.
++        if (applied.tail) PanoramaMasonryTailEpoch.intValue++
++        // Harmony: the shape file landed on cells already measured with the placeholder. One bump,
++        // not one per id, so the shelf relayouts instead of freezing that placeholder band.
++        if (applied.bumpContent) PanoramaMasonryContentEpoch.intValue++
+         // Harmony: every commit, including a same-band flush and the shape-file load. Not the layout epoch.
+         committedShapeVersion.intValue++
+     }
+ 
+-    /** Caller holds [gate]. A probe reads scroll state and must not re-enter. */
+-    private fun gridScrollingNow(): Boolean {
+-        if (scrollingGrids.isNotEmpty()) return true
+-        for (probe in scrollProbes.values) {
+-            if (probe()) return true
+-        }
+-        return false
+-    }
+-
+-    /** Caller holds [gate]. Returns whether a wide/tall band changed. */
+-    private fun applyPending(settled: Boolean): Boolean {
+-        var bump = false
+-        val ids = ArrayList(pendingIds)
+-        pendingIds.clear()
++    /**
++     * Caller holds [gate]. A first commit is compared with [placeholderRatio].
++     * The same band commits with no tail. A cross-band commit stores the ratio either way.
++     * On screen or above, the placed band stays for this layout once the grid has already shown
++     * that key. Below the viewport, the tail moves.
++     * [publishingFile] is the cold start: the shape file is applied after a measure placed the
++     * placeholder. That first commit bumps the content epoch once instead of freezing the slot.
++     */
++    private fun applyPending(
++        ids: List<Long>,
++        placedWide: Map<Long, Boolean>,
++        belowViewport: Set<Long>,
++        publishingFile: Boolean,
++    ): PendingApply {
++        var tail = false
++        var bumpContent = false
++        val placeholder = placeholderRatio
++        val placeholderWide = isWide(placeholder)
+         for (id in ids) {
+             val known = learnt[id] ?: continue
+             val current = committed[id]
+-            if (current == null) {
+-                // Harmony: the cell is still the wide placeholder. Committing a tall ratio here
+-                // bumps the layout epoch and relayouts every lane under the finger.
+-                if (sameBand(known, WIDE_COVER_RATIO)) {
+-                    committed[id] = known
+-                    pendingCross.remove(id)
+-                } else if (settled) {
+-                    committed[id] = known
+-                    pendingCross.remove(id)
+-                    bump = true
++            val baseline = current ?: placeholder
++            if (sameBand(baseline, known)) {
++                committed[id] = known
++                if (current != null && frozenWide[id] == isWide(known)) frozenWide.remove(id)
++                continue
++            }
++            committed[id] = known
++            val placed = placedWide[id]
++            val knownWide = isWide(known)
++            if (placed != null && placed != knownWide) {
++                // First commit whose placed band is still the placeholder, and the new band differs.
++                // Below the viewport that id is not in [placedWide]; the tail branch handles it.
++                // On screen, freeze once the grid has already displayed the key. The file-load
++                // flush is the cold start (loaded transition): bump the content epoch once.
++                val firstOnPlaceholder = current == null && placed == placeholderWide
++                if (firstOnPlaceholder && publishingFile) {
++                    frozenWide.remove(id)
++                    bumpContent = true
+                 } else {
+-                    pendingCross[id] = known
++                    // Harmony: on screen or above. The ratio is stored; this layout keeps the slot.
++                    frozenWide[id] = placed
+                 }
+-            } else if (sameBand(current, known)) {
+-                committed[id] = known
+-                pendingCross.remove(id)
+-            } else if (settled) {
+-                committed[id] = known
+-                pendingCross.remove(id)
+-                bump = true
++            } else if (id in belowViewport) {
++                frozenWide.remove(id)
++                tail = true
+             } else {
+-                pendingCross[id] = known
+-            }
+-        }
+-        if (settled && pendingCross.isNotEmpty()) {
+-            for ((id, ratio) in pendingCross) {
+-                val current = committed[id]
+-                if (current == null || !sameBand(current, ratio)) bump = true
+-                committed[id] = ratio
++                // Not placed yet. The next layout reads the committed ratio. No shelf move.
++                frozenWide.remove(id)
+             }
+-            pendingCross.clear()
+         }
+-        return bump
++        return PendingApply(tail = tail, bumpContent = bumpContent)
+     }
+ 
+-    private fun sameBand(left: Float, right: Float): Boolean {
+-        return (left <= RATIO_SWITCH_TO_PANORAMA) == (right <= RATIO_SWITCH_TO_PANORAMA)
+-    }
++    private class PendingApply(
++        val tail: Boolean,
++        val bumpContent: Boolean,
++    )
++
++    private fun isWide(ratio: Float): Boolean = ratio <= RATIO_SWITCH_TO_PANORAMA
++
++    private fun sameBand(left: Float, right: Float): Boolean = isWide(left) == isWide(right)
+ 
+     private fun write(destination: File) {
+         val parent = destination.parentFile ?: return
+@@ -569,13 +654,8 @@ object PanoramaCoverShapes {
+ fun rememberPanoramaGridSettled(isScrollInProgress: () -> Boolean): () -> Boolean {
+     val settled = remember { mutableStateOf(true) }
+     val scrolling by rememberUpdatedState(isScrollInProgress)
+-    val token = remember { Any() }
+-    // Settled follows isScrollInProgress by a frame, then the settle delay. The probe is the
+-    // scroll state itself, so a flush posted in that gap still sees the gesture.
+-    DisposableEffect(token) {
+-        PanoramaCoverShapes.attachScrollProbe(token) { scrolling() }
+-        onDispose { PanoramaCoverShapes.detachScrollProbe(token) }
+-    }
++    // Settled follows isScrollInProgress by the settle delay. The placeholder sample waits for it.
++    // A cover ratio does not: same-band commits immediately, and a cross-band edit only moves the tail.
+     LaunchedEffect(Unit) {
+         snapshotFlow { scrolling() }.collectLatest { inProgress ->
+             if (inProgress) {
+@@ -660,7 +740,7 @@ private fun PrefetchPanoramaCoverShapesDecode(itemCount: Int, mangaAt: (Int) ->
+ 
+ /**
+  * Header prefetch for the window [firstVisibleIndex, lastVisibleIndex] plus [PREFETCH_AHEAD] rows.
+- * At most [PREFETCH_MAX_IN_FLIGHT] requests run. Enqueueing waits while a panorama grid is scrolling.
++ * At most [PREFETCH_MAX_IN_FLIGHT] requests run, including while the grid is scrolling.
+  * A row more than one such window behind the viewport is cancelled. An id is finished only once a
+  * ratio was stored, so a paging append does not start over at index 0. A header miss or a failed
+  * fetch is tried at most once more. The pump reads the window ids, so a paging snapshot that fills
+@@ -716,7 +796,6 @@ private fun PrefetchPanoramaCoverShapesBounds(
+                     first = first,
+                     last = last,
+                     count = count,
+-                    scrolling = PanoramaCoverShapes.anyGridScrolling,
+                     tick = compositionTick.intValue + finishedTick.intValue,
+                     ids = ids,
+                 )
+@@ -728,7 +807,6 @@ private fun PrefetchPanoramaCoverShapesBounds(
+                     inFlight.remove(id)
+                     slot.disposable.dispose()
+                 }
+-                if (window.scrolling) return@collect
+                 val end = minOf(window.count, window.last + PREFETCH_AHEAD + 1)
+                 var index = window.first
+                 while (index < end && inFlight.size < PREFETCH_MAX_IN_FLIGHT) {
+@@ -782,7 +860,6 @@ private data class PrefetchWindow(
+     val first: Int,
+     val last: Int,
+     val count: Int,
+-    val scrolling: Boolean,
+     val tick: Int,
+     val ids: List<Long>,
+ )
+@@ -845,8 +922,8 @@ private val boundsPlaceholder = lazy { ColorImage(width = 1, height = 1) }
+ 
+ private const val SETTLE_DELAY_MILLIS = 300L
+ private const val PREFETCH_SIZE_PX = 128
+-private const val PREFETCH_AHEAD = 30
+-private const val PREFETCH_MAX_IN_FLIGHT = 2
++private const val PREFETCH_AHEAD = 60
++private const val PREFETCH_MAX_IN_FLIGHT = 4
+ 
+ /** First try plus one retry. A permanent miss stops; a single network miss does not. */
+ private const val PREFETCH_MAX_ATTEMPTS = 2
+diff --git a/app/src/main/java/eu/kanade/presentation/library/components/PanoramaShapeMode.kt b/app/src/main/java/eu/kanade/presentation/library/components/PanoramaShapeMode.kt
+index fce423c..ef14ca6 100644
+--- a/app/src/main/java/eu/kanade/presentation/library/components/PanoramaShapeMode.kt
++++ b/app/src/main/java/eu/kanade/presentation/library/components/PanoramaShapeMode.kt
+@@ -33,7 +33,7 @@ private const val PANORAMA_SHAPE_MIN_KNOWN = 8
+ /**
+  * Next mode from a settled sample.
+  *
+- * Harmony: [known] counts only ids that already have a committed shape. The 9/16 default is not a
++ * Harmony: [known] counts only ids that already have a committed shape. The placeholder is not a
+  * vote. A sample is trusted once [known] reaches min(total, max(8, total / 2)); otherwise the
+  * previous mode stays, including [PanoramaShapeMode.Unknown]. The first trusted sample is wide at
+  * or above 0.60 and tall below that. After that, wide waits for 0.40 before it returns to tall.
+@@ -62,11 +62,7 @@ internal fun nextPanoramaShapeMode(
+ }
+ 
+ /** Votes with [PanoramaCoverShapes.committedRatioOrNull]. An id that was never committed is skipped. */
+-internal fun panoramaShapeMode(
+-    current: PanoramaShapeMode,
+-    total: Int,
+-    mangaIdAt: (Int) -> Long?,
+-): PanoramaShapeMode {
++internal fun panoramaShapeCounts(total: Int, mangaIdAt: (Int) -> Long?): PanoramaShapeCounts {
+     var known = 0
+     var wide = 0
+     for (index in 0 until total) {
+@@ -75,7 +71,19 @@ internal fun panoramaShapeMode(
+         known++
+         if (ratio <= RATIO_SWITCH_TO_PANORAMA) wide++
+     }
+-    return nextPanoramaShapeMode(current, total, known, wide)
++    return PanoramaShapeCounts(known, wide)
++}
++
++internal data class PanoramaShapeCounts(val known: Int, val wide: Int)
++
++/** Votes with [PanoramaCoverShapes.committedRatioOrNull]. An id that was never committed is skipped. */
++internal fun panoramaShapeMode(
++    current: PanoramaShapeMode,
++    total: Int,
++    mangaIdAt: (Int) -> Long?,
++): PanoramaShapeMode {
++    val counts = panoramaShapeCounts(total, mangaIdAt)
++    return nextPanoramaShapeMode(current, total, counts.known, counts.wide)
+ }
+ 
+ /**
+@@ -139,8 +147,10 @@ internal class PanoramaShapeModeState(initial: PanoramaShapeMode) {
+         shapeVersion: Int,
+     ) {
+         if (!gate.allow(settled, PanoramaShapeSampleKey(listSignature, shapeVersion))) return
+-        val next = panoramaShapeMode(mode, total, mangaIdAt)
++        val counts = panoramaShapeCounts(total, mangaIdAt)
++        val next = nextPanoramaShapeMode(mode, total, counts.known, counts.wide)
+         if (next != mode) mode = next
++        PanoramaCoverShapes.applyShapePlaceholder(next, counts.known, counts.wide)
+     }
+ 
+     companion object {
+diff --git a/app/src/test/java/eu/kanade/presentation/library/components/PanoramaCoverShapesTest.kt b/app/src/test/java/eu/kanade/presentation/library/components/PanoramaCoverShapesTest.kt
+index 9034e10..13aa505 100644
+--- a/app/src/test/java/eu/kanade/presentation/library/components/PanoramaCoverShapesTest.kt
++++ b/app/src/test/java/eu/kanade/presentation/library/components/PanoramaCoverShapesTest.kt
+@@ -1,12 +1,26 @@
+ package eu.kanade.presentation.library.components
+ 
++import kotlinx.coroutines.CoroutineScope
++import kotlinx.coroutines.Dispatchers
++import kotlinx.coroutines.Job
++import kotlinx.coroutines.SupervisorJob
++import kotlinx.coroutines.runBlocking
++import kotlinx.coroutines.withTimeout
+ import org.junit.jupiter.api.Assertions.assertEquals
+ import org.junit.jupiter.api.Assertions.assertFalse
+ import org.junit.jupiter.api.Assertions.assertNull
++import org.junit.jupiter.api.Assertions.assertSame
+ import org.junit.jupiter.api.Assertions.assertTrue
+ import org.junit.jupiter.api.BeforeEach
+ import org.junit.jupiter.api.Test
+ import tachiyomi.presentation.core.components.PanoramaMasonryContentEpoch
++import tachiyomi.presentation.core.components.PanoramaMasonryLayoutCache
++import tachiyomi.presentation.core.components.PanoramaMasonryState
++import tachiyomi.presentation.core.components.PanoramaMasonryTailEpoch
++import tachiyomi.presentation.core.components.PanoramaPlacedCovers
++import tachiyomi.presentation.core.components.PanoramaSpan
++import tachiyomi.presentation.core.components.panoramaCoverCellHeightPx
++import java.io.File
+ 
+ class PanoramaCoverShapesTest {
+     @BeforeEach
+@@ -16,28 +30,63 @@ class PanoramaCoverShapesTest {
+     }
+ 
+     @Test
+-    fun `same band put does not bump the layout epoch`() {
+-        val epoch = PanoramaMasonryContentEpoch.intValue
+-        PanoramaCoverShapes.put(1L, 0.50f)
+-        PanoramaCoverShapes.put(1L, 0.62f)
+-        assertEquals(epoch, PanoramaMasonryContentEpoch.intValue)
+-        assertEquals(0.62f, PanoramaCoverShapes.committedRatio(1L))
+-        assertTrue(committedCoverIsWide(1L))
++    fun `a tall learn against the tall placeholder does not bump`() {
++        val content = PanoramaMasonryContentEpoch.intValue
++        val tail = PanoramaMasonryTailEpoch.intValue
++        val token = Any()
++        PanoramaCoverShapes.setGridScrolling(token, scrolling = true)
++        PanoramaCoverShapes.put(1L, TALL_COVER_RATIO)
++        PanoramaCoverShapes.put(1L, 1.62f)
++        assertEquals(content, PanoramaMasonryContentEpoch.intValue)
++        assertEquals(tail, PanoramaMasonryTailEpoch.intValue)
++        assertEquals(1.62f, PanoramaCoverShapes.committedRatio(1L))
++        assertFalse(committedCoverIsWide(1L))
++
++        PanoramaCoverShapes.setGridScrolling(token, scrolling = false)
++        assertEquals(content, PanoramaMasonryContentEpoch.intValue)
++        assertEquals(tail, PanoramaMasonryTailEpoch.intValue)
++    }
++
++    @Test
++    fun `same band put does not bump either epoch`() {
++        val content = PanoramaMasonryContentEpoch.intValue
++        val tail = PanoramaMasonryTailEpoch.intValue
++        PanoramaCoverShapes.put(1L, 1.40f)
++        PanoramaCoverShapes.put(1L, 1.62f)
++        assertEquals(content, PanoramaMasonryContentEpoch.intValue)
++        assertEquals(tail, PanoramaMasonryTailEpoch.intValue)
++        assertEquals(1.62f, PanoramaCoverShapes.committedRatio(1L))
++        assertFalse(committedCoverIsWide(1L))
+     }
+ 
+     @Test
+-    fun `a cross band commit bumps the layout epoch once the grid settles`() {
++    fun `a wide learn that is not placed yet is stored and does not bump`() {
++        val content = PanoramaMasonryContentEpoch.intValue
++        val tail = PanoramaMasonryTailEpoch.intValue
+         PanoramaCoverShapes.put(2L, 0.50f)
+-        val epoch = PanoramaMasonryContentEpoch.intValue
++        assertEquals(content, PanoramaMasonryContentEpoch.intValue)
++        assertEquals(tail, PanoramaMasonryTailEpoch.intValue)
++        assertEquals(0.50f, PanoramaCoverShapes.committedRatio(2L))
++        assertTrue(committedCoverIsWide(2L))
++        assertEquals(TALL_COVER_RATIO, PanoramaCoverShapes.committedRatio(99L))
++        assertFalse(committedCoverIsWide(99L))
++    }
++
++    @Test
++    fun `a later band change is stored immediately and does not wait for settle`() {
++        PanoramaCoverShapes.put(2L, 0.50f)
++        val content = PanoramaMasonryContentEpoch.intValue
++        val tail = PanoramaMasonryTailEpoch.intValue
+         val token = Any()
+         PanoramaCoverShapes.setGridScrolling(token, scrolling = true)
+         PanoramaCoverShapes.put(2L, 1.60f)
+-        assertEquals(epoch, PanoramaMasonryContentEpoch.intValue)
+-        assertTrue(committedCoverIsWide(2L))
++        assertEquals(content, PanoramaMasonryContentEpoch.intValue)
++        assertEquals(tail, PanoramaMasonryTailEpoch.intValue)
++        assertEquals(1.60f, PanoramaCoverShapes.committedRatio(2L))
++        assertFalse(committedCoverIsWide(2L))
+ 
+         PanoramaCoverShapes.setGridScrolling(token, scrolling = false)
+-        assertEquals(epoch + 1, PanoramaMasonryContentEpoch.intValue)
+-        assertFalse(committedCoverIsWide(2L))
++        assertEquals(content, PanoramaMasonryContentEpoch.intValue)
+         assertEquals(1.60f, PanoramaCoverShapes.committedRatio(2L))
+     }
+ 
+@@ -51,53 +100,41 @@ class PanoramaCoverShapesTest {
+                 posted.add(block)
+             }
+         }
+-        val epoch = PanoramaMasonryContentEpoch.intValue
++        val content = PanoramaMasonryContentEpoch.intValue
++        val version = PanoramaCoverShapes.committedShapeVersion.intValue
+         val worker = Thread {
+-            PanoramaCoverShapes.put(3L, 1.70f)
++            PanoramaCoverShapes.put(3L, 0.50f)
+         }
+         worker.start()
+         worker.join()
+-        assertEquals(epoch, PanoramaMasonryContentEpoch.intValue)
+-        assertTrue(committedCoverIsWide(3L))
++        assertEquals(content, PanoramaMasonryContentEpoch.intValue)
++        assertEquals(version, PanoramaCoverShapes.committedShapeVersion.intValue)
++        assertNull(PanoramaCoverShapes.committedRatioOrNull(3L))
++        assertEquals(TALL_COVER_RATIO, PanoramaCoverShapes.committedRatio(3L))
+         assertTrue(posted.isNotEmpty())
+         posted.forEach { it() }
+-        assertEquals(epoch + 1, PanoramaMasonryContentEpoch.intValue)
+-        assertFalse(committedCoverIsWide(3L))
++        assertEquals(content, PanoramaMasonryContentEpoch.intValue)
++        assertTrue(PanoramaCoverShapes.committedShapeVersion.intValue > version)
++        assertEquals(0.50f, PanoramaCoverShapes.committedRatio(3L))
++        assertTrue(committedCoverIsWide(3L))
+     }
+ 
+     @Test
+-    fun `a first tall commit while scrolling waits for settle and bumps once`() {
+-        val epoch = PanoramaMasonryContentEpoch.intValue
++    fun `a first tall commit while scrolling commits and does not bump`() {
++        val content = PanoramaMasonryContentEpoch.intValue
++        val tail = PanoramaMasonryTailEpoch.intValue
+         val token = Any()
+         PanoramaCoverShapes.setGridScrolling(token, scrolling = true)
+         PanoramaCoverShapes.put(4L, 1.50f)
+         PanoramaCoverShapes.put(5L, 1.70f)
+         PanoramaCoverShapes.put(6L, 0.50f)
+-        assertEquals(epoch, PanoramaMasonryContentEpoch.intValue)
+-        assertNull(PanoramaCoverShapes.committedRatioOrNull(4L))
+-        assertNull(PanoramaCoverShapes.committedRatioOrNull(5L))
+-        assertEquals(WIDE_COVER_RATIO, PanoramaCoverShapes.committedRatio(4L))
+-        assertEquals(WIDE_COVER_RATIO, PanoramaCoverShapes.committedRatio(5L))
+-        assertTrue(committedCoverIsWide(4L))
+-        assertTrue(committedCoverIsWide(5L))
+-        assertEquals(0.50f, PanoramaCoverShapes.committedRatio(6L))
+-        assertTrue(committedCoverIsWide(6L))
+-
+-        PanoramaCoverShapes.setGridScrolling(token, scrolling = false)
+-        assertEquals(epoch + 1, PanoramaMasonryContentEpoch.intValue)
++        assertEquals(content, PanoramaMasonryContentEpoch.intValue)
++        assertEquals(tail, PanoramaMasonryTailEpoch.intValue)
+         assertEquals(1.50f, PanoramaCoverShapes.committedRatio(4L))
+         assertEquals(1.70f, PanoramaCoverShapes.committedRatio(5L))
++        assertEquals(0.50f, PanoramaCoverShapes.committedRatio(6L))
+         assertFalse(committedCoverIsWide(4L))
+-        assertFalse(committedCoverIsWide(5L))
+-    }
+-
+-    @Test
+-    fun `a first tall commit while no grid is scrolling commits immediately`() {
+-        val epoch = PanoramaMasonryContentEpoch.intValue
+-        PanoramaCoverShapes.put(7L, 1.40f)
+-        assertEquals(epoch + 1, PanoramaMasonryContentEpoch.intValue)
+-        assertEquals(1.40f, PanoramaCoverShapes.committedRatio(7L))
+-        assertFalse(committedCoverIsWide(7L))
++        assertTrue(committedCoverIsWide(6L))
+     }
+ 
+     @Test
+@@ -113,33 +150,131 @@ class PanoramaCoverShapesTest {
+         PanoramaCoverShapes.put(8L, 1.50f)
+         PanoramaCoverShapes.put(9L, 1.60f)
+         assertEquals(1, posted.size)
+-        assertTrue(committedCoverIsWide(8L))
+-        assertTrue(committedCoverIsWide(9L))
+-        val epoch = PanoramaMasonryContentEpoch.intValue
++        assertEquals(TALL_COVER_RATIO, PanoramaCoverShapes.committedRatio(8L))
++        val content = PanoramaMasonryContentEpoch.intValue
++        val tail = PanoramaMasonryTailEpoch.intValue
+         posted.single().invoke()
+-        assertEquals(epoch + 1, PanoramaMasonryContentEpoch.intValue)
++        assertEquals(content, PanoramaMasonryContentEpoch.intValue)
++        assertEquals(tail, PanoramaMasonryTailEpoch.intValue)
+         assertEquals(1.50f, PanoramaCoverShapes.committedRatio(8L))
+         assertEquals(1.60f, PanoramaCoverShapes.committedRatio(9L))
+     }
+ 
+     @Test
+-    fun `a live scroll probe holds a tall commit before the settled flag flips`() {
+-        val epoch = PanoramaMasonryContentEpoch.intValue
+-        var inProgress = true
+-        val token = Any()
+-        PanoramaCoverShapes.attachScrollProbe(token) { inProgress }
+-        PanoramaCoverShapes.put(20L, 1.55f)
+-        assertEquals(epoch, PanoramaMasonryContentEpoch.intValue)
+-        assertNull(PanoramaCoverShapes.committedRatioOrNull(20L))
+-        assertTrue(committedCoverIsWide(20L))
+-
+-        inProgress = false
+-        PanoramaCoverShapes.put(21L, 0.40f)
+-        assertEquals(epoch + 1, PanoramaMasonryContentEpoch.intValue)
+-        assertEquals(1.55f, PanoramaCoverShapes.committedRatio(20L))
+-        assertFalse(committedCoverIsWide(20L))
+-        assertEquals(0.40f, PanoramaCoverShapes.committedRatio(21L))
++    fun `a wide learn below the viewport relayouts only the tail`() {
++        val ids = List(12) { it.toLong() }
++        val state = PanoramaMasonryState()
++        PanoramaPlacedCovers.attach(state)
++        val cache = PanoramaMasonryLayoutCache()
++        val first = layoutShelf(cache, ids, tail = 0, freezeThrough = 4)
++        state.publishPlacedCovers(first, ids, lastVisible = 4)
++        val content = PanoramaMasonryContentEpoch.intValue
++        val tail = PanoramaMasonryTailEpoch.intValue
++        PanoramaCoverShapes.put(ids[9], 0.50f)
++        assertEquals(content, PanoramaMasonryContentEpoch.intValue)
++        assertEquals(tail + 1, PanoramaMasonryTailEpoch.intValue)
++        assertEquals(0.50f, PanoramaCoverShapes.committedRatio(ids[9]))
++        assertTrue(committedCoverIsWide(ids[9]))
++        val second = layoutShelf(
++            cache,
++            ids,
++            tail = PanoramaMasonryTailEpoch.intValue,
++            freezeThrough = 4,
++        )
++        assertFalse(cache.structuralChange)
++        for (index in 0..8) {
++            assertSame(first.rects[index], second.rects[index])
++        }
++        assertEquals(PanoramaSpan.TwoLanesWhenRoomy, second.rects[9].span)
++        assertEquals(true, second.rects[9].coverWide)
+     }
++
++    @Test
++    fun `a wide learn for a visible id does not change rects`() {
++        val ids = List(12) { it.toLong() }
++        val state = PanoramaMasonryState()
++        PanoramaPlacedCovers.attach(state)
++        val cache = PanoramaMasonryLayoutCache()
++        val first = layoutShelf(cache, ids, tail = 0, freezeThrough = 4)
++        state.publishPlacedCovers(first, ids, lastVisible = 4)
++        val content = PanoramaMasonryContentEpoch.intValue
++        val tail = PanoramaMasonryTailEpoch.intValue
++        PanoramaCoverShapes.put(ids[2], 0.50f)
++        assertEquals(content, PanoramaMasonryContentEpoch.intValue)
++        assertEquals(tail, PanoramaMasonryTailEpoch.intValue)
++        assertEquals(0.50f, PanoramaCoverShapes.committedRatioOrNull(ids[2]))
++        assertEquals(TALL_COVER_RATIO, PanoramaCoverShapes.committedRatio(ids[2]))
++        assertFalse(committedCoverIsWide(ids[2]))
++        val second = layoutShelf(cache, ids, tail = tail, freezeThrough = 4)
++        assertFalse(cache.structuralChange)
++        assertSame(first, second)
++        assertEquals(PanoramaSpan.SingleLane, second.rects[2].span)
++        assertEquals(false, second.rects[2].coverWide)
++    }
++
++    @Test
++    fun `shape file load after the first measure bumps once and does not freeze`() = runBlocking {
++        val file = File.createTempFile("panorama-shapes", ".txt")
++        try {
++            // Two visible ids, both placed on the tall placeholder, both wide in the file.
++            file.writeText("2 0.500\n3 0.400\n")
++            val ids = List(12) { it.toLong() }
++            val state = PanoramaMasonryState()
++            PanoramaPlacedCovers.attach(state)
++            val cache = PanoramaMasonryLayoutCache()
++            val first = layoutShelf(cache, ids, tail = 0, freezeThrough = 4)
++            state.publishPlacedCovers(first, ids, lastVisible = 4)
++            assertEquals(TALL_COVER_RATIO, PanoramaCoverShapes.committedRatio(2L))
++            assertEquals(TALL_COVER_RATIO, PanoramaCoverShapes.committedRatio(3L))
++            val content = PanoramaMasonryContentEpoch.intValue
++            val tail = PanoramaMasonryTailEpoch.intValue
++            val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
++            try {
++                PanoramaCoverShapes.init(file, scope)
++                withTimeout(5_000) {
++                    scope.coroutineContext[Job]!!.children.toList().forEach { it.join() }
++                }
++            } finally {
++                scope.coroutineContext[Job]!!.cancel()
++            }
++            assertEquals(content + 1, PanoramaMasonryContentEpoch.intValue)
++            assertEquals(tail, PanoramaMasonryTailEpoch.intValue)
++            assertEquals(0.5f, PanoramaCoverShapes.committedRatio(2L))
++            assertEquals(0.4f, PanoramaCoverShapes.committedRatio(3L))
++            assertTrue(committedCoverIsWide(2L))
++            assertTrue(committedCoverIsWide(3L))
++        } finally {
++            file.delete()
++        }
++    }
++
++    private fun layoutShelf(
++        cache: PanoramaMasonryLayoutCache,
++        ids: List<Long>,
++        tail: Int,
++        freezeThrough: Int,
++    ) = cache.layout(
++        count = ids.size,
++        contentEpoch = 1L,
++        spanOf = { panoramaCoverSpan(committedCoverIsWide(ids[it]), PanoramaShapeMode.Unknown) },
++        heightOf = { index, width ->
++            panoramaCoverCellHeightPx(
++                laneWidthPx = width,
++                wide = committedCoverIsWide(ids[index]),
++                titleBelow = false,
++                cellPaddingPx = 0,
++                titlePaddingPx = 0,
++                titleLineHeightPx = 0,
++            )
++        },
++        laneWidths = intArrayOf(100, 100, 100),
++        verticalSpacing = 0,
++        horizontalSpacing = 0,
++        rtl = false,
++        tailEpoch = tail,
++        freezeThrough = freezeThrough,
++        coverWideOf = { committedCoverIsWide(ids[it]) },
++    )
+ }
+ 
+ private object ImmediateSnapshotDispatcher : PanoramaSnapshotDispatcher {
+diff --git a/app/src/test/java/eu/kanade/presentation/library/components/PanoramaShapeModeTest.kt b/app/src/test/java/eu/kanade/presentation/library/components/PanoramaShapeModeTest.kt
+index c5f049d..2a6ebd3 100644
+--- a/app/src/test/java/eu/kanade/presentation/library/components/PanoramaShapeModeTest.kt
++++ b/app/src/test/java/eu/kanade/presentation/library/components/PanoramaShapeModeTest.kt
+@@ -1,11 +1,13 @@
+ package eu.kanade.presentation.library.components
+ 
+ import org.junit.jupiter.api.Assertions.assertEquals
++import org.junit.jupiter.api.Assertions.assertFalse
+ import org.junit.jupiter.api.Assertions.assertNotEquals
+ import org.junit.jupiter.api.Assertions.assertNull
+ import org.junit.jupiter.api.Assertions.assertTrue
+ import org.junit.jupiter.api.BeforeEach
+ import org.junit.jupiter.api.Test
++import tachiyomi.presentation.core.components.PanoramaMasonryContentEpoch
+ 
+ class PanoramaShapeModeTest {
+     @BeforeEach
+@@ -17,12 +19,96 @@ class PanoramaShapeModeTest {
+     @Test
+     fun `an id that has not been committed does not vote`() {
+         assertNull(PanoramaCoverShapes.committedRatioOrNull(1L))
+-        assertEquals(WIDE_COVER_RATIO, PanoramaCoverShapes.committedRatio(1L))
+-        // Eight missing ids would be 100% wide if the 9/16 default counted.
++        assertEquals(TALL_COVER_RATIO, PanoramaCoverShapes.committedRatio(1L))
++        assertFalse(committedCoverIsWide(1L))
++        // Eight missing ids would be 100% tall if the 3/2 placeholder counted.
+         val mode = panoramaShapeMode(PanoramaShapeMode.Unknown, total = 8) { it.toLong() }
+         assertEquals(PanoramaShapeMode.Unknown, mode)
+     }
+ 
++    @Test
++    fun `vote ignores unknowns`() {
++        // Five wide covers and five unknown ids. If the unknowns voted as the tall placeholder,
++        // known would be 10 and the wide fraction 0.50, and the first trusted sample would be Tall.
++        repeat(5) { PanoramaCoverShapes.put(it.toLong(), 0.50f) }
++        assertEquals(
++            PanoramaShapeMode.Unknown,
++            panoramaShapeMode(PanoramaShapeMode.Unknown, total = 10) { it.toLong() },
++        )
++        val state = PanoramaShapeModeState(PanoramaShapeMode.Unknown)
++        val ids = { index: Int -> index.toLong() }
++        val epoch = PanoramaMasonryContentEpoch.intValue
++        state.onGridSignal(true, 10, ids, panoramaShapeListSignature(10, ids), 1)
++        assertEquals(PanoramaShapeMode.Unknown, state.mode)
++        // 5/5 committed ratios are wide. The five unknowns are not in that fraction.
++        assertEquals(WIDE_COVER_RATIO, PanoramaCoverShapes.placeholderRatio)
++        assertEquals(epoch + 1, PanoramaMasonryContentEpoch.intValue)
++    }
++
++    @Test
++    fun `placeholder flips to wide after a wide majority and bumps once`() {
++        val state = PanoramaShapeModeState(PanoramaShapeMode.Unknown)
++        repeat(6) { PanoramaCoverShapes.put(it.toLong(), 0.50f) }
++        repeat(4) { PanoramaCoverShapes.put(10L + it, TALL_COVER_RATIO) }
++        val ids = { index: Int -> if (index < 6) index.toLong() else 10L + (index - 6) }
++        val signature = panoramaShapeListSignature(10, ids)
++        val epoch = PanoramaMasonryContentEpoch.intValue
++        state.onGridSignal(true, 10, ids, signature, 1)
++        assertEquals(PanoramaShapeMode.Wide, state.mode)
++        assertEquals(WIDE_COVER_RATIO, PanoramaCoverShapes.placeholderRatio)
++        assertEquals(epoch + 1, PanoramaMasonryContentEpoch.intValue)
++        state.onGridSignal(true, 10, ids, signature, 1)
++        assertEquals(epoch + 1, PanoramaMasonryContentEpoch.intValue)
++    }
++
++    @Test
++    fun `an untrusted sample still moves the placeholder and known zero does not`() {
++        val state = PanoramaShapeModeState(PanoramaShapeMode.Unknown)
++        val empty = { _: Int -> null }
++        val epoch = PanoramaMasonryContentEpoch.intValue
++        state.onGridSignal(true, 8, empty, panoramaShapeListSignature(8, empty), 1)
++        assertEquals(TALL_COVER_RATIO, PanoramaCoverShapes.placeholderRatio)
++        assertEquals(epoch, PanoramaMasonryContentEpoch.intValue)
++
++        // total 40 needs 20 committed covers before the column mode moves. 10 wide is not enough.
++        repeat(10) { PanoramaCoverShapes.put(it.toLong(), 0.50f) }
++        val ids = { index: Int -> if (index < 10) index.toLong() else null }
++        state.onGridSignal(true, 40, ids, panoramaShapeListSignature(40, ids), 2)
++        assertEquals(PanoramaShapeMode.Unknown, state.mode)
++        assertEquals(WIDE_COVER_RATIO, PanoramaCoverShapes.placeholderRatio)
++        assertEquals(epoch + 1, PanoramaMasonryContentEpoch.intValue)
++    }
++
++    @Test
++    fun `placeholder hysteresis keeps wide between 0_40 and 0_60`() {
++        val state = PanoramaShapeModeState(PanoramaShapeMode.Unknown)
++        repeat(10) { PanoramaCoverShapes.put(it.toLong(), 0.50f) }
++        val ids = { index: Int -> if (index < 10) index.toLong() else null }
++        val signature = panoramaShapeListSignature(40, ids)
++        fun signal() {
++            state.onGridSignal(
++                settled = true,
++                total = 40,
++                mangaIdAt = ids,
++                listSignature = signature,
++                shapeVersion = PanoramaCoverShapes.committedShapeVersion.intValue,
++            )
++        }
++        signal()
++        assertEquals(PanoramaShapeMode.Unknown, state.mode)
++        assertEquals(WIDE_COVER_RATIO, PanoramaCoverShapes.placeholderRatio)
++        val epoch = PanoramaMasonryContentEpoch.intValue
++        // 5/10 wide is between the lines. A repeated version does not resample; the puts bump it.
++        repeat(5) { PanoramaCoverShapes.put(it.toLong(), 1.60f) }
++        signal()
++        assertEquals(WIDE_COVER_RATIO, PanoramaCoverShapes.placeholderRatio)
++        assertEquals(epoch, PanoramaMasonryContentEpoch.intValue)
++        PanoramaCoverShapes.put(5L, 1.60f)
++        signal()
++        assertEquals(TALL_COVER_RATIO, PanoramaCoverShapes.placeholderRatio)
++        assertEquals(epoch + 1, PanoramaMasonryContentEpoch.intValue)
++    }
++
+     @Test
+     fun `the wide band is the existing 0_75 switch`() {
+         repeat(8) { PanoramaCoverShapes.put(it.toLong(), 0.75f) }
+diff --git a/presentation-core/src/main/java/tachiyomi/presentation/core/components/PanoramaMasonry.kt b/presentation-core/src/main/java/tachiyomi/presentation/core/components/PanoramaMasonry.kt
+index e051967..9583cac 100644
+--- a/presentation-core/src/main/java/tachiyomi/presentation/core/components/PanoramaMasonry.kt
++++ b/presentation-core/src/main/java/tachiyomi/presentation/core/components/PanoramaMasonry.kt
+@@ -45,13 +45,77 @@ import kotlin.math.abs
+ import kotlin.math.roundToInt
+ 
+ /**
+- * Bumped when a committed cover crosses the wide/tall band.
++ * Bumped when the process-wide placeholder band flips.
+  * Read from measure, not from the parent composition, so the grid remeasures without recomposing.
+  *
+- * Harmony: app code increments this on the main thread. Same-band ratio changes must not.
++ * Harmony: app code increments this on the main thread. A single cover crossing the band must not.
++ * That edit uses [PanoramaMasonryTailEpoch] and keeps cells already on screen in their slot.
+  */
+ val PanoramaMasonryContentEpoch = mutableIntStateOf(0)
+ 
++/**
++ * Bumped when a placed cover below the viewport changes band.
++ * Cells at or above the last visible index keep the rectangle they were placed with.
++ *
++ * Harmony: app code increments this on the main thread, once per flush, not once per id.
++ */
++val PanoramaMasonryTailEpoch = mutableIntStateOf(0)
++
++/**
++ * Cover bands of the panorama grids currently composed.
++ *
++ * Harmony: a ratio learnt for a key that is already on screen, or scrolled above it, keeps the
++ * band stored on that rectangle. A key strictly below the last visible index is not reported.
++ * The masonry files stay free of app types; the app reads [bandIfOnScreenOrAbove] when it commits.
++ */
++object PanoramaPlacedCovers {
++    private val states = ArrayList<PanoramaMasonryState>()
++
++    /** Keys that left with a grid, so a stored ratio can show on the next layout. */
++    var onDetached: ((Set<Any>) -> Unit)? = null
++
++    fun attach(state: PanoramaMasonryState) {
++        if (state !in states) states.add(state)
++    }
++
++    fun detach(state: PanoramaMasonryState) {
++        if (!states.remove(state)) return
++        val gone = HashSet<Any>()
++        for (key in state.placedKeys()) {
++            if (states.none { it.placedIndex(key) != null }) gone.add(key)
++        }
++        if (gone.isNotEmpty()) onDetached?.invoke(gone)
++    }
++
++    fun resetForTest() {
++        states.clear()
++        onDetached = null
++    }
++
++    /**
++     * Placed band when some grid has [key] at or above its last visible index.
++     * Null when every placement of [key] is below the viewport, or [key] is not placed.
++     */
++    fun bandIfOnScreenOrAbove(key: Any): Boolean? {
++        for (state in states) {
++            val index = state.placedIndex(key) ?: continue
++            if (index > state.lastVisibleItemIndex) continue
++            val wide = state.placedWide(key) ?: continue
++            return wide
++        }
++        return null
++    }
++
++    /** True when some grid has already placed [key] strictly below its last visible index. */
++    fun isStrictlyBelowViewport(key: Any): Boolean {
++        for (state in states) {
++            val index = state.placedIndex(key) ?: continue
++            if (index > state.lastVisibleItemIndex) return true
++        }
++        return false
++    }
++}
++
+ /**
+  * Columns for [PanoramaMasonry]. The counts match [androidx.compose.foundation.lazy.staggeredgrid.StaggeredGridCells].
+  */
+@@ -151,6 +215,15 @@ class PanoramaMasonryState {
+     var lastVisibleItemIndex by mutableIntStateOf(0)
+         internal set
+ 
++    /**
++     * Hint for the freeze line: [lastVisibleItemIndex] after the previous measure.
++     * Harmony: not snapshot state. A fling writes [scrollOffset] before the next measure, so
++     * measure recomputes the freeze line from that offset instead of trusting this hint.
++     * Reading the snapshot index from measure would schedule a second measure whenever it
++     * changes, which is every frame of a fling.
++     */
++    internal var freezeThroughIndex: Int = 0
++
+     var firstVisibleItemScrollOffset by mutableIntStateOf(0)
+         internal set
+ 
+@@ -182,6 +255,42 @@ class PanoramaMasonryState {
+     internal var lastAnchor: PanoramaAnchor? = null
+     internal var lastKeys: List<Any>? = null
+ 
++    private val indexByKey = HashMap<Any, Int>()
++    private val wideByKey = HashMap<Any, Boolean>()
++    private var recordedLayout: PanoramaMasonryLayout? = null
++
++    /** Index of a placed key, or null when this grid has not laid that key out. */
++    internal fun placedIndex(key: Any): Int? = indexByKey[key]
++
++    /** Band stored on the placed cover, or null when [key] is not a cover in this grid. */
++    internal fun placedWide(key: Any): Boolean? = wideByKey[key]
++
++    internal fun placedKeys(): Set<Any> = indexByKey.keys.toSet()
++
++    /**
++     * Harmony: records the band queried at placement. Scroll frames reuse [layout] and do not
++     * rebuild the map. [lastVisible] is the test entry; measure updates the visible index itself.
++     */
++    fun publishPlacedCovers(layout: PanoramaMasonryLayout, keys: List<*>, lastVisible: Int) {
++        lastVisibleItemIndex = lastVisible
++        recordedLayout = null
++        recordPlacedCovers(layout, keys)
++    }
++
++    internal fun recordPlacedCovers(layout: PanoramaMasonryLayout, keys: List<*>) {
++        if (layout === recordedLayout) return
++        recordedLayout = layout
++        indexByKey.clear()
++        wideByKey.clear()
++        for (rect in layout.rects) {
++            if (rect.index !in keys.indices) continue
++            val key = keys[rect.index] ?: continue
++            indexByKey[key] = rect.index
++            val wide = rect.coverWide ?: continue
++            wideByKey[key] = wide
++        }
++    }
++
+     private var intervalContent: PanoramaIntervalContent? = null
+     private var intervalLambda: (PanoramaMasonryScope.() -> Unit)? = null
+ 
+@@ -291,6 +400,8 @@ class PanoramaMasonryState {
+             topPadding = topPadding,
+             firstVisible = firstVisibleItemIndex,
+         )
++        // Hint only. The next measure freezes against the scroll offset it actually sees.
++        freezeThroughIndex = lastVisibleItemIndex
+         canScrollBackward = scroll > 0.5f
+         canScrollForward = scroll < max - 0.5f
+     }
+@@ -540,8 +651,12 @@ fun PanoramaMasonry(
+     val defaultFling = ScrollableDefaults.flingBehavior()
+     val flingBehavior = remember(defaultFling, state) { TracedFlingBehavior(defaultFling, state.traceId, state) }
+     DisposableEffect(state) {
++        PanoramaPlacedCovers.attach(state)
+         PanoramaScrollTrace.log(state.traceId, "enter offset=${state.scrollOffset.roundToInt()}")
+-        onDispose { PanoramaScrollTrace.log(state.traceId, "leave offset=${state.scrollOffset.roundToInt()}") }
++        onDispose {
++            PanoramaPlacedCovers.detach(state)
++            PanoramaScrollTrace.log(state.traceId, "leave offset=${state.scrollOffset.roundToInt()}")
++        }
+     }
+     LaunchedEffect(state, userScrollEnabled) {
+         if (!userScrollEnabled) PanoramaScrollTrace.log(state.traceId, "userScrollEnabled=false")
+@@ -642,8 +757,10 @@ private fun LazyLayoutMeasureScope.measureMasonry(
+ 
+     val intervals = state.intervalsFor(content)
+     val count = intervals.itemCount
+-    // Harmony: snapshot read in measure. A band commit remeasures without recomposing the shelf.
++    // Harmony: snapshot reads in measure. The placeholder epoch rebuilds. A tail epoch keeps
++    // cells that intersect the current viewport and places the rest again.
+     val contentEpoch = panoramaContentEpoch(PanoramaMasonryContentEpoch.intValue, intervals)
++    val tailEpoch = PanoramaMasonryTailEpoch.intValue
+     val direction = layoutDirection
+     val padding = args.contentPadding
+     val left = padding.calculateLeftPadding(direction).roundToPx()
+@@ -725,6 +842,28 @@ private fun LazyLayoutMeasureScope.measureMasonry(
+     val rtl = direction == LayoutDirection.Rtl
+     // Harmony: previous frame's keys. A new items lambda can append when this prefix still matches.
+     val previousKeys = state.lastKeys
++    val coverWideOf: (Int) -> Boolean? = { index ->
++        val spec = intervals.heightAt(index)
++        if (spec is PanoramaCellHeight.Cover) spec.wide else null
++    }
++    // Harmony: scrollOffset already includes the fling. The previous frame's last visible index
++    // can sit above cells that are on screen now, so the freeze line is recomputed from this offset.
++    val viewport = if (constraints.hasBoundedHeight) constraints.maxHeight else 0
++    val scrollForFreeze = state.scrollOffset.roundToInt()
++    val previousLayout = state.layoutCache.placedLayout()
++    val freezeThrough = lastIntersectingIndex(
++        rects = previousLayout?.rects ?: emptyList(),
++        scrollPx = scrollForFreeze,
++        viewport = viewport,
++        topPadding = topPad,
++        hint = state.freezeThroughIndex,
++        laneCount = previousLayout?.laneCount ?: 1,
++    )
++    val anchorViewport = PanoramaViewport(
++        scrollPx = scrollForFreeze,
++        heightPx = viewport,
++        topPaddingPx = topPad,
++    )
+     val masonry = if (laneCount == 0 || count == 0) {
+         state.layoutCache.layout(
+             count = 0,
+@@ -736,6 +875,10 @@ private fun LazyLayoutMeasureScope.measureMasonry(
+             rtl = rtl,
+             keyAt = { index -> intervals.getKey(index) },
+             previousKeys = previousKeys,
++            tailEpoch = tailEpoch,
++            freezeThrough = freezeThrough,
++            coverWideOf = coverWideOf,
++            anchorViewport = anchorViewport,
+         )
+     } else {
+         state.layoutCache.layout(
+@@ -749,6 +892,10 @@ private fun LazyLayoutMeasureScope.measureMasonry(
+             rtl = rtl,
+             keyAt = { index -> intervals.getKey(index) },
+             previousKeys = previousKeys,
++            tailEpoch = tailEpoch,
++            freezeThrough = freezeThrough,
++            coverWideOf = coverWideOf,
++            anchorViewport = anchorViewport,
+         )
+     }
+ 
+@@ -756,7 +903,7 @@ private fun LazyLayoutMeasureScope.measureMasonry(
+     val keyCount = masonry.rects.size
+     val keys = state.peekCachedKeys(contentEpoch, keyCount)
+         ?: state.keysFor(contentEpoch, keyCount) { index -> intervals.getKey(index) }
+-    val viewport = if (constraints.hasBoundedHeight) constraints.maxHeight else 0
++    state.recordPlacedCovers(masonry, keys)
+     val total = topPad + masonry.contentHeight + bottomPad
+     val structural = state.layoutCache.structuralChange ||
+         (keys !== state.lastKeys && keysChanged(state.lastKeys, keys))
+diff --git a/presentation-core/src/main/java/tachiyomi/presentation/core/components/PanoramaMasonryLayout.kt b/presentation-core/src/main/java/tachiyomi/presentation/core/components/PanoramaMasonryLayout.kt
+index 8de0b7a..b3de849 100644
+--- a/presentation-core/src/main/java/tachiyomi/presentation/core/components/PanoramaMasonryLayout.kt
++++ b/presentation-core/src/main/java/tachiyomi/presentation/core/components/PanoramaMasonryLayout.kt
+@@ -18,7 +18,7 @@ const val PANORAMA_RECESS_FRACTION = 0.5
+  * [eu.kanade.presentation.library.components.MangaComfortableGridItem].
+  *
+  * The selectable box pads 4 dp on every edge. The cover is [fillMaxWidth] + [aspectRatio]:
+- * wide (height/width <= 0.75, unknown starts at 9/16) uses 3/2, tall uses 2/3.
++ * wide (height/width <= 0.75) uses 3/2, tall uses 2/3.
+  * Compact draws the title over the cover, so the cell is the padding plus the cover.
+  * Comfortable adds the title block: padding 4 dp and two lines at 18 sp (`minLines` = 2).
+  */
+@@ -67,6 +67,11 @@ class PanoramaMasonryRect(
+     val height: Int,
+     val fullLine: Boolean,
+     val span: PanoramaSpan,
++    /**
++     * Band queried when this cell was placed. Null for a row that is not a cover.
++     * Harmony: a later ratio keeps this band while the cell stays in the layout.
++     */
++    val coverWide: Boolean? = null,
+ )
+ 
+ class PanoramaMasonryLayout(
+@@ -95,6 +100,16 @@ class PanoramaAnchor(
+     val offsetFromViewportTop: Int,
+ )
+ 
++/**
++ * Viewport a tail relayout is compared with.
++ * A relaid range that still intersects it is structural, so the anchor can be restored.
++ */
++class PanoramaViewport(
++    val scrollPx: Int,
++    val heightPx: Int,
++    val topPaddingPx: Int,
++)
++
+ /**
+  * Lane count of [androidx.compose.foundation.lazy.staggeredgrid.StaggeredGridCells.Adaptive].
+  */
+@@ -318,6 +333,7 @@ fun layoutPanoramaMasonry(
+     horizontalSpacing: Int,
+     rtl: Boolean = false,
+     pairPick: PanoramaPairPick = PANORAMA_PAIR_PICK,
++    coverWideOf: (Int) -> Boolean? = { null },
+ ): PanoramaMasonryLayout {
+     val laneCount = laneWidths.size
+     require(laneCount > 0)
+@@ -338,6 +354,7 @@ fun layoutPanoramaMasonry(
+             verticalSpacing = verticalSpacing,
+             horizontalSpacing = horizontalSpacing,
+             pairPick = pairPick,
++            coverWide = coverWideOf(index),
+         )
+         rects.add(rect)
+         val bottom = rect.y + rect.height
+@@ -364,6 +381,7 @@ fun appendPanoramaMasonry(
+     spanOf: (Int) -> PanoramaSpan = { PanoramaSpan.SingleLane },
+     heightOf: (index: Int, widthPx: Int) -> Int,
+     pairPick: PanoramaPairPick = PANORAMA_PAIR_PICK,
++    coverWideOf: (Int) -> Boolean? = { null },
+ ): PanoramaMasonryLayout {
+     val rects = ArrayList<PanoramaMasonryRect>(count)
+     rects.addAll(previous.rects)
+@@ -382,6 +400,7 @@ fun appendPanoramaMasonry(
+             verticalSpacing = previous.verticalSpacing,
+             horizontalSpacing = previous.horizontalSpacing,
+             pairPick = pairPick,
++            coverWide = coverWideOf(index),
+         )
+         rects.add(rect)
+         val bottom = rect.y + rect.height
+@@ -403,6 +422,9 @@ fun appendPanoramaMasonry(
+  * Keeps [previous] through [fromIndex] and places the rest again.
+  * Lane bottoms are rebuilt from the kept rectangles, so a trailing footer can be replaced
+  * without moving the cells above it.
++ *
++ * Harmony: a cover whose band changes below the viewport starts here. Rectangles above
++ * [fromIndex] stay, including the band stored on them.
+  */
+ private fun relayoutPanoramaTail(
+     previous: PanoramaMasonryLayout,
+@@ -411,6 +433,7 @@ private fun relayoutPanoramaTail(
+     spanOf: (Int) -> PanoramaSpan,
+     heightOf: (index: Int, widthPx: Int) -> Int,
+     pairPick: PanoramaPairPick = PANORAMA_PAIR_PICK,
++    coverWideOf: (Int) -> Boolean? = { null },
+ ): PanoramaMasonryLayout {
+     val kept = fromIndex.coerceIn(0, previous.rects.size)
+     val rects = ArrayList<PanoramaMasonryRect>(count)
+@@ -435,6 +458,7 @@ private fun relayoutPanoramaTail(
+             verticalSpacing = previous.verticalSpacing,
+             horizontalSpacing = previous.horizontalSpacing,
+             pairPick = pairPick,
++            coverWide = coverWideOf(index),
+         )
+         rects.add(rect)
+         val bottom = rect.y + rect.height
+@@ -490,6 +514,12 @@ private fun laneBottomsBefore(previous: PanoramaMasonryLayout, end: Int): IntArr
+  * again; a change before that rebuilds. The same count with a new identity still rebuilds.
+  * Lane widths are compared on their own and always rebuild, including when a wide cover starts
+  * or stops spanning two lanes.
++ *
++ * Harmony: [tailEpoch] is a band change under an unchanged shape table. Cells at or above
++ * [freezeThrough] keep their rectangle. The tail starts at the first changed index strictly
++ * below that, so a cover learnt on screen does not move the shelf. A shape-table change still
++ * rebuilds from the start. When [anchorViewport] is set and the relaid range still intersects
++ * that viewport, [structuralChange] is true so the anchor is restored in the same measure.
+  */
+ class PanoramaMasonryLayoutCache {
+     private var layout: PanoramaMasonryLayout? = null
+@@ -498,11 +528,15 @@ class PanoramaMasonryLayoutCache {
+     private var horizontalSpacing: Int = Int.MIN_VALUE
+     private var rtl: Boolean = false
+     private var contentEpoch: Long = Long.MIN_VALUE
++    private var tailEpoch: Int = 0
+     private var count: Int = -1
+ 
+     var structuralChange: Boolean = false
+         private set
+ 
++    /** Layout from the previous call, or null before the first one. */
++    internal fun placedLayout(): PanoramaMasonryLayout? = layout
++
+     fun layout(
+         count: Int,
+         contentEpoch: Long = 0L,
+@@ -514,6 +548,10 @@ class PanoramaMasonryLayoutCache {
+         rtl: Boolean,
+         keyAt: ((Int) -> Any)? = null,
+         previousKeys: List<Any>? = null,
++        tailEpoch: Int = 0,
++        freezeThrough: Int = Int.MAX_VALUE,
++        coverWideOf: (Int) -> Boolean? = { null },
++        anchorViewport: PanoramaViewport? = null,
+     ): PanoramaMasonryLayout {
+         val previous = layout
+         val sameGeometry = previous != null &&
+@@ -523,50 +561,81 @@ class PanoramaMasonryLayoutCache {
+             this.laneWidths.contentEquals(laneWidths)
+         val sameEpoch = previous != null && contentEpoch == this.contentEpoch
+         val sameShape = previous != null && shapeEpoch(contentEpoch) == shapeEpoch(this.contentEpoch)
+-        val result = when {
+-            previous != null && sameGeometry && sameEpoch && count == this.count -> {
+-                structuralChange = false
+-                previous
+-            }
+-            previous != null && sameGeometry && sameEpoch && count > previous.rects.size &&
+-                (keyAt == null || previousKeys == null) -> {
+-                structuralChange = false
+-                appendPanoramaMasonry(previous, count, spanOf, heightOf)
+-            }
+-            previous != null && sameGeometry && sameShape && count > previous.rects.size -> {
+-                val from = restartIndex(previous, previousKeys, keyAt)
+-                if (from > 0) {
++        val sameTail = tailEpoch == this.tailEpoch
++        val tailResult = resolveTail(
++            previous = previous,
++            count = count,
++            sameGeometry = sameGeometry,
++            sameEpoch = sameEpoch,
++            sameShape = sameShape,
++            sameTail = sameTail,
++            spanOf = spanOf,
++            heightOf = heightOf,
++            keyAt = keyAt,
++            previousKeys = previousKeys,
++            freezeThrough = freezeThrough,
++            coverWideOf = coverWideOf,
++        )
++        val result = if (tailResult != null) {
++            structuralChange = previous != null &&
++                tailMovesViewport(previous.rects, tailResult.relaidFrom, anchorViewport)
++            tailResult.layout
++        } else {
++            when {
++                previous != null && sameGeometry && sameEpoch && sameTail && count == this.count -> {
++                    structuralChange = false
++                    previous
++                }
++                previous != null && sameGeometry && sameEpoch && sameTail && count > previous.rects.size &&
++                    (keyAt == null || previousKeys == null) -> {
+                     structuralChange = false
+-                    if (from >= previous.rects.size) {
+-                        appendPanoramaMasonry(previous, count, spanOf, heightOf)
++                    appendPanoramaMasonry(previous, count, spanOf, heightOf, coverWideOf = coverWideOf)
++                }
++                previous != null && sameGeometry && sameShape && sameTail && count > previous.rects.size -> {
++                    val from = restartIndex(previous, previousKeys, keyAt)
++                    if (from > 0) {
++                        if (from >= previous.rects.size) {
++                            structuralChange = false
++                            appendPanoramaMasonry(previous, count, spanOf, heightOf, coverWideOf = coverWideOf)
++                        } else {
++                            structuralChange = tailMovesViewport(previous.rects, from, anchorViewport)
++                            relayoutPanoramaTail(
++                                previous,
++                                from,
++                                count,
++                                spanOf,
++                                heightOf,
++                                coverWideOf = coverWideOf,
++                            )
++                        }
+                     } else {
+-                        relayoutPanoramaTail(previous, from, count, spanOf, heightOf)
++                        structuralChange = true
++                        freshLayout(
++                            count,
++                            spanOf,
++                            heightOf,
++                            laneWidths,
++                            verticalSpacing,
++                            horizontalSpacing,
++                            rtl,
++                            coverWideOf,
++                        )
+                     }
+-                } else {
+-                    structuralChange = true
+-                    layoutPanoramaMasonry(
+-                        count = count,
+-                        spanOf = spanOf,
+-                        heightOf = heightOf,
+-                        laneWidths = laneWidths,
+-                        verticalSpacing = verticalSpacing,
+-                        horizontalSpacing = horizontalSpacing,
+-                        rtl = rtl,
++                }
++                else -> {
++                    structuralChange = previous != null
++                    freshLayout(
++                        count,
++                        spanOf,
++                        heightOf,
++                        laneWidths,
++                        verticalSpacing,
++                        horizontalSpacing,
++                        rtl,
++                        coverWideOf,
+                     )
+                 }
+             }
+-            else -> {
+-                structuralChange = previous != null
+-                layoutPanoramaMasonry(
+-                    count = count,
+-                    spanOf = spanOf,
+-                    heightOf = heightOf,
+-                    laneWidths = laneWidths,
+-                    verticalSpacing = verticalSpacing,
+-                    horizontalSpacing = horizontalSpacing,
+-                    rtl = rtl,
+-                )
+-            }
+         }
+         this.layout = result
+         this.laneWidths = result.laneWidths
+@@ -574,9 +643,127 @@ class PanoramaMasonryLayoutCache {
+         this.horizontalSpacing = horizontalSpacing
+         this.rtl = rtl
+         this.contentEpoch = contentEpoch
++        this.tailEpoch = tailEpoch
+         this.count = count
+         return result
+     }
++
++    private fun freshLayout(
++        count: Int,
++        spanOf: (Int) -> PanoramaSpan,
++        heightOf: (index: Int, widthPx: Int) -> Int,
++        laneWidths: IntArray,
++        verticalSpacing: Int,
++        horizontalSpacing: Int,
++        rtl: Boolean,
++        coverWideOf: (Int) -> Boolean?,
++    ): PanoramaMasonryLayout {
++        return layoutPanoramaMasonry(
++            count = count,
++            spanOf = spanOf,
++            heightOf = heightOf,
++            laneWidths = laneWidths,
++            verticalSpacing = verticalSpacing,
++            horizontalSpacing = horizontalSpacing,
++            rtl = rtl,
++            coverWideOf = coverWideOf,
++        )
++    }
++}
++
++/** A tail edit. [relaidFrom] is -1 when every rectangle was kept. */
++private class ResolvedTail(
++    val layout: PanoramaMasonryLayout,
++    val relaidFrom: Int,
++)
++
++/**
++ * A band edit under the same shape table, or null when this call is not one.
++ * Harmony: [freezeThrough] is the last visible index. A change at or above it is ignored.
++ * The first change strictly below it is the tail. Returning [previous] keeps every rectangle.
++ */
++private fun resolveTail(
++    previous: PanoramaMasonryLayout?,
++    count: Int,
++    sameGeometry: Boolean,
++    sameEpoch: Boolean,
++    sameShape: Boolean,
++    sameTail: Boolean,
++    spanOf: (Int) -> PanoramaSpan,
++    heightOf: (index: Int, widthPx: Int) -> Int,
++    keyAt: ((Int) -> Any)?,
++    previousKeys: List<Any>?,
++    freezeThrough: Int,
++    coverWideOf: (Int) -> Boolean?,
++): ResolvedTail? {
++    if (previous == null || !sameGeometry || !sameShape || sameTail) return null
++    if (count < previous.rects.size) return null
++    val keyFrom = when {
++        keyAt == null || previousKeys == null -> {
++            // Harmony: the same count with a new items lambda still rebuilds when no keys are checked.
++            if (sameEpoch || count > previous.rects.size) previous.rects.size else return null
++        }
++        else -> {
++            val from = restartIndex(previous, previousKeys, keyAt)
++            if (from < 0) return null
++            from
++        }
++    }
++    val bandFrom = firstChangedBelow(previous, freezeThrough, spanOf, heightOf)
++    val from = if (bandFrom < 0) keyFrom else minOf(keyFrom, bandFrom)
++    if (from >= previous.rects.size && count == previous.rects.size) return ResolvedTail(previous, -1)
++    if (from >= count) return ResolvedTail(previous, -1)
++    return ResolvedTail(
++        layout = relayoutPanoramaTail(
++            previous = previous,
++            fromIndex = from,
++            count = count,
++            spanOf = spanOf,
++            heightOf = heightOf,
++            coverWideOf = coverWideOf,
++        ),
++        relaidFrom = from,
++    )
++}
++
++/**
++ * True when a cell at or after [fromIndex] intersects [anchorViewport].
++ * Harmony: that tail was supposed to be below the freeze line. If a fling has already
++ * brought it on screen, the measure restores the anchor instead of sliding those cells.
++ */
++private fun tailMovesViewport(
++    rects: List<PanoramaMasonryRect>,
++    fromIndex: Int,
++    anchorViewport: PanoramaViewport?,
++): Boolean {
++    if (anchorViewport == null || fromIndex < 0 || fromIndex >= rects.size) return false
++    val scroll = anchorViewport.scrollPx
++    val viewBottom = scroll + anchorViewport.heightPx
++    val topPadding = anchorViewport.topPaddingPx
++    for (index in fromIndex until rects.size) {
++        val rect = rects[index]
++        val top = topPadding + rect.y
++        val bottom = top + rect.height
++        if (bottom > scroll && top < viewBottom) return true
++    }
++    return false
++}
++
++/** First placed index strictly below [freezeThrough] whose span or height changed, or -1. */
++private fun firstChangedBelow(
++    previous: PanoramaMasonryLayout,
++    freezeThrough: Int,
++    spanOf: (Int) -> PanoramaSpan,
++    heightOf: (index: Int, widthPx: Int) -> Int,
++): Int {
++    // Harmony: freezeThrough may be Int.MAX_VALUE. Adding one would overflow and scan the prefix.
++    if (previous.rects.isEmpty() || freezeThrough >= previous.rects.lastIndex) return -1
++    val start = maxOf(freezeThrough + 1, 0)
++    for (index in start until previous.rects.size) {
++        val rect = previous.rects[index]
++        if (spanOf(index) != rect.span || heightOf(index, rect.width) != rect.height) return index
++    }
++    return -1
+ }
+ 
+ /** High 32 bits of [panoramaContentEpoch]. Small test epochs share shape 0. */
+@@ -606,6 +793,61 @@ private fun restartIndex(
+     return mismatch
+ }
+ 
++/**
++ * Largest index whose cell intersects the viewport.
++ *
++ * Harmony: [hint] is the previous frame's last visible index. A fling moves [scrollPx] before
++ * the next measure, so the walk starts there instead of at index 0. It stops once every lane
++ * has placed a cell past the viewport: later cells sit on those lane bottoms. When nothing at
++ * or after the hint intersects, the walk goes backward and returns the first hit.
++ */
++internal fun lastIntersectingIndex(
++    rects: List<PanoramaMasonryRect>,
++    scrollPx: Int,
++    viewport: Int,
++    topPadding: Int,
++    hint: Int,
++    laneCount: Int,
++): Int {
++    if (rects.isEmpty()) return 0
++    val viewBottom = scrollPx + viewport
++    val lanes = laneCount.coerceAtLeast(1)
++    val seed = hint.coerceIn(0, rects.lastIndex)
++    fun topOf(index: Int): Int = topPadding + rects[index].y
++    fun intersects(index: Int): Boolean {
++        val top = topOf(index)
++        val bottom = top + rects[index].height
++        return bottom > scrollPx && top < viewBottom
++    }
++    var last = -1
++    val past = BooleanArray(lanes)
++    var pastLanes = 0
++    for (index in seed until rects.size) {
++        if (intersects(index)) last = index
++        if (topOf(index) >= viewBottom) {
++            val rect = rects[index]
++            if (rect.fullLine) {
++                pastLanes = lanes
++            } else {
++                val occupied = panoramaLaneSpan(rect.span, lanes).coerceAtLeast(1)
++                for (offset in 0 until occupied) {
++                    val lane = rect.lane + offset
++                    if (lane in past.indices && !past[lane]) {
++                        past[lane] = true
++                        pastLanes++
++                    }
++                }
++            }
++            if (pastLanes >= lanes) break
++        }
++    }
++    if (last >= 0) return last
++    for (index in seed - 1 downTo 0) {
++        if (intersects(index)) return index
++    }
++    return seed
++}
++
+ /**
+  * First item, in index order, whose bottom is past the viewport top.
+  */
+@@ -693,6 +935,7 @@ private fun placeItem(
+     verticalSpacing: Int,
+     horizontalSpacing: Int,
+     pairPick: PanoramaPairPick,
++    coverWide: Boolean? = null,
+ ): PanoramaMasonryRect {
+     if (span == PanoramaSpan.FullLine) {
+         var y = bottoms[0]
+@@ -713,6 +956,7 @@ private fun placeItem(
+             height = height,
+             fullLine = true,
+             span = PanoramaSpan.FullLine,
++            coverWide = coverWide,
+         )
+     }
+     val occupied = panoramaLaneSpan(span, laneWidths.size)
+@@ -735,6 +979,7 @@ private fun placeItem(
+             height = height,
+             fullLine = false,
+             span = span,
++            coverWide = coverWide,
+         )
+     }
+     val (lane, height) = chooseLane(bottoms) { laneIndex ->
+@@ -751,6 +996,7 @@ private fun placeItem(
+         height = height,
+         fullLine = false,
+         span = span,
++        coverWide = coverWide,
+     )
+ }
+ 
+diff --git a/presentation-core/src/test/java/tachiyomi/presentation/core/components/PanoramaMasonryLayoutTest.kt b/presentation-core/src/test/java/tachiyomi/presentation/core/components/PanoramaMasonryLayoutTest.kt
+index 3e45768..7cb5728 100644
+--- a/presentation-core/src/test/java/tachiyomi/presentation/core/components/PanoramaMasonryLayoutTest.kt
++++ b/presentation-core/src/test/java/tachiyomi/presentation/core/components/PanoramaMasonryLayoutTest.kt
+@@ -6,6 +6,7 @@ import org.junit.jupiter.api.Assertions.assertEquals
+ import org.junit.jupiter.api.Assertions.assertFalse
+ import org.junit.jupiter.api.Assertions.assertNotEquals
+ import org.junit.jupiter.api.Assertions.assertNull
++import org.junit.jupiter.api.Assertions.assertSame
+ import org.junit.jupiter.api.Assertions.assertTrue
+ import org.junit.jupiter.api.Assumptions.assumeTrue
+ import org.junit.jupiter.api.Test
+@@ -425,6 +426,173 @@ class PanoramaMasonryLayoutTest {
+         assertEquals(180, replaced.rects[0].height)
+     }
+ 
++    @Test
++    fun `a band change strictly below the viewport relayouts only the tail`() {
++        val cache = PanoramaMasonryLayoutCache()
++        val lanes = intArrayOf(80, 80, 80)
++        val changed = 9
++        var wide = false
++        fun span(index: Int): PanoramaSpan {
++            return if (wide && index == changed) PanoramaSpan.TwoLanesWhenRoomy else PanoramaSpan.SingleLane
++        }
++        fun height(index: Int, width: Int): Int = if (wide && index == changed) width / 2 else 150
++        val first = cache.layout(
++            count = 12,
++            contentEpoch = 5L,
++            spanOf = { span(it) },
++            heightOf = { index, width -> height(index, width) },
++            laneWidths = lanes,
++            verticalSpacing = 0,
++            horizontalSpacing = 4,
++            rtl = false,
++            tailEpoch = 0,
++            freezeThrough = 4,
++            coverWideOf = { wide && it == changed },
++        )
++        wide = true
++        var probedFrozen = 0
++        val second = cache.layout(
++            count = 12,
++            contentEpoch = 5L,
++            spanOf = {
++                if (it <= 4) probedFrozen++
++                span(it)
++            },
++            heightOf = { index, width ->
++                if (index <= 4) probedFrozen++
++                height(index, width)
++            },
++            laneWidths = lanes,
++            verticalSpacing = 0,
++            horizontalSpacing = 4,
++            rtl = false,
++            tailEpoch = 1,
++            freezeThrough = 4,
++            coverWideOf = { wide && it == changed },
++        )
++        assertFalse(cache.structuralChange)
++        assertEquals(0, probedFrozen)
++        for (index in 0..8) {
++            assertSame(first.rects[index], second.rects[index])
++        }
++        assertEquals(PanoramaSpan.TwoLanesWhenRoomy, second.rects[changed].span)
++        assertEquals(true, second.rects[changed].coverWide)
++    }
++
++    @Test
++    fun `a band change on a visible cell keeps every rect`() {
++        val cache = PanoramaMasonryLayoutCache()
++        val lanes = intArrayOf(80, 80, 80)
++        var wide = false
++        fun height(index: Int): Int = if (wide && index == 4) 40 else 150
++        val first = cache.layout(
++            count = 12,
++            contentEpoch = 5L,
++            heightOf = { index, _ -> height(index) },
++            laneWidths = lanes,
++            verticalSpacing = 0,
++            horizontalSpacing = 0,
++            rtl = false,
++            tailEpoch = 0,
++            freezeThrough = 4,
++        )
++        wide = true
++        val second = cache.layout(
++            count = 12,
++            contentEpoch = 5L,
++            heightOf = { index, _ -> height(index) },
++            laneWidths = lanes,
++            verticalSpacing = 0,
++            horizontalSpacing = 0,
++            rtl = false,
++            tailEpoch = 1,
++            freezeThrough = 4,
++        )
++        assertFalse(cache.structuralChange)
++        assertSame(first, second)
++        assertEquals(150, second.rects[4].height)
++    }
++
++    @Test
++    fun `a fling past the old last visible keeps cells now on screen`() {
++        val lanes = intArrayOf(100, 100)
++        val count = 30
++        val viewport = 400
++        var changed = -1
++        fun height(index: Int): Int = if (index == changed) 40 else 200
++        fun layoutOf(cache: PanoramaMasonryLayoutCache, tail: Int, freeze: Int, anchor: PanoramaViewport?) =
++            cache.layout(
++                count = count,
++                contentEpoch = 3L,
++                heightOf = { index, _ -> height(index) },
++                laneWidths = lanes,
++                verticalSpacing = 0,
++                horizontalSpacing = 0,
++                rtl = false,
++                tailEpoch = tail,
++                freezeThrough = freeze,
++                anchorViewport = anchor,
++            )
++        val cache = PanoramaMasonryLayoutCache()
++        val first = layoutOf(cache, tail = 0, freeze = Int.MAX_VALUE, anchor = null)
++        val state = PanoramaMasonryState()
++        state.applyMeasuredViewport(
++            rects = first.rects,
++            keys = List(count) { it },
++            topPadding = 0,
++            viewport = viewport,
++            totalHeight = first.contentHeight,
++            bottomPadding = 0,
++            structural = false,
++        )
++        val oldLast = state.lastVisibleItemIndex
++        assertEquals(oldLast, state.freezeThroughIndex)
++        changed = oldLast + 1
++        assertTrue(changed < count - 1)
++        // The fling writes scrollOffset before the next measure. The stored freeze line stays put.
++        val jump = first.rects[changed].y
++        state.scrollOffset = jump.toFloat()
++        assertEquals(oldLast, state.freezeThroughIndex)
++        val anchor = PanoramaViewport(scrollPx = jump, heightPx = viewport, topPaddingPx = 0)
++        val freeze = lastIntersectingIndex(
++            rects = first.rects,
++            scrollPx = jump,
++            viewport = viewport,
++            topPadding = 0,
++            hint = state.freezeThroughIndex,
++            laneCount = first.laneCount,
++        )
++        var scanned = 0
++        for (rect in first.rects) {
++            val top = rect.y
++            val bottom = top + rect.height
++            if (bottom > jump && top < jump + viewport && rect.index > scanned) scanned = rect.index
++        }
++        assertEquals(scanned, freeze)
++        assertTrue(freeze > oldLast, "freeze=$freeze old=$oldLast")
++        assertTrue(changed <= freeze)
++        val second = layoutOf(cache, tail = 1, freeze = freeze, anchor = anchor)
++        assertFalse(cache.structuralChange)
++        for (index in first.rects.indices) {
++            val rect = first.rects[index]
++            val top = rect.y
++            val bottom = top + rect.height
++            if (bottom > jump && top < jump + viewport) {
++                assertSame(rect, second.rects[index])
++            }
++        }
++        assertEquals(200, second.rects[changed].height)
++        // The stale freeze line would relayout that cell. It is on screen, so the anchor is restored.
++        val stale = PanoramaMasonryLayoutCache()
++        val band = changed
++        changed = -1
++        layoutOf(stale, tail = 0, freeze = Int.MAX_VALUE, anchor = null)
++        changed = band
++        val moved = layoutOf(stale, tail = 1, freeze = oldLast, anchor = anchor)
++        assertTrue(stale.structuralChange)
++        assertEquals(40, moved.rects[changed].height)
++    }
++
+     @Test
+     fun `lane width remainder matches staggered fixed cells`() {
+         assertArrayEquals(intArrayOf(4, 3, 3), staggeredLaneWidths(10, 3, 0))

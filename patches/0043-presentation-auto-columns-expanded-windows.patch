@@ -1,0 +1,448 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Xun2202 <98207886+Xun2202@users.noreply.github.com>
+Date: Wed, 14 Oct 2026 17:41:16 +0000
+Subject: [PATCH] presentation: automatic columns widen cells on expanded
+ windows
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Automatic columns (preference 0) used a 128 dp cell in the book grids and a
+two-step panorama tier (112 dp under 600 dp, 140 dp from there up). An unfolded
+landscape window, 939 dp, then fit 7 columns in browse and 6 in panorama.
+
+The minimum is now one width tier for browse and the library, panorama and
+book grids. It follows the window-size breakpoints: 112 dp under 600 dp,
+140 dp under 840 dp, and 176 dp from 840 dp up. The lane count is
+(available + 4) / (min + 4), with available = window width - 16 dp.
+459 dp is 3, 664 dp is 4, and 939 dp is 5. A fixed count from 1 to 10 is
+unchanged.
+
+Unknown panorama shelves use that minimum directly. Tall and wide shelves
+still size from the cover shape, and the tier minimum is a floor on the
+lane width, so a tall shelf on a 939 dp window stays at 5.
+
+与 anikku-harmony 同病（同一段代码 / 同一套网格），Anikku 侧待移植。
+---
+ .../library/components/LazyLibraryGrid.kt     |  8 ++-
+ .../components/LibraryComfortableGrid.kt      | 41 ++++++-------
+ .../library/components/PanoramaShapeMode.kt   | 19 ++++--
+ .../search/MigrateSourceSearchScreen.kt       |  5 +-
+ .../source/browse/BrowseSourceScreen.kt       |  5 +-
+ .../source/browse/BrowseSourceViewModel.kt    | 10 +++-
+ .../library/components/AutoColumnWidthTest.kt | 24 ++++++++
+ .../core/components/AutoColumnWidth.kt        | 47 +++++++++++++++
+ .../core/components/PanoramaMasonry.kt        | 16 ++++-
+ .../components/PanoramaMasonryLayoutTest.kt   | 59 ++++++++++++++++++-
+ 10 files changed, 201 insertions(+), 33 deletions(-)
+ create mode 100644 app/src/test/java/eu/kanade/presentation/library/components/AutoColumnWidthTest.kt
+ create mode 100644 presentation-core/src/main/java/tachiyomi/presentation/core/components/AutoColumnWidth.kt
+
+diff --git a/app/src/main/java/eu/kanade/presentation/library/components/LazyLibraryGrid.kt b/app/src/main/java/eu/kanade/presentation/library/components/LazyLibraryGrid.kt
+index a3cd4db..a4064ef 100644
+--- a/app/src/main/java/eu/kanade/presentation/library/components/LazyLibraryGrid.kt
++++ b/app/src/main/java/eu/kanade/presentation/library/components/LazyLibraryGrid.kt
+@@ -8,6 +8,7 @@ import androidx.compose.foundation.lazy.grid.LazyGridScope
+ import androidx.compose.runtime.Composable
+ import androidx.compose.runtime.CompositionLocalProvider
+ import androidx.compose.ui.Modifier
++import androidx.compose.ui.platform.LocalConfiguration
+ import androidx.compose.ui.unit.dp
+ import tachiyomi.presentation.core.components.FastScrollLazyVerticalGrid
+ import tachiyomi.presentation.core.components.FastScrollPanoramaMasonry
+@@ -26,7 +27,12 @@ internal fun LazyLibraryGrid(
+     content: LazyGridScope.() -> Unit,
+ ) {
+     FastScrollLazyVerticalGrid(
+-        columns = if (columns == 0) GridCells.Adaptive(128.dp) else GridCells.Fixed(columns),
++        columns = if (columns == 0) {
++            // Harmony: the same width tier as browse and the panorama shelf.
++            GridCells.Adaptive(autoColumnMinWidth(LocalConfiguration.current.screenWidthDp.dp))
++        } else {
++            GridCells.Fixed(columns)
++        },
+         modifier = modifier,
+         contentPadding = contentPadding + PaddingValues(8.dp),
+         verticalArrangement = Arrangement.spacedBy(CommonMangaItemDefaults.GridVerticalSpacer),
+diff --git a/app/src/main/java/eu/kanade/presentation/library/components/LibraryComfortableGrid.kt b/app/src/main/java/eu/kanade/presentation/library/components/LibraryComfortableGrid.kt
+index 016afb1..993705d 100644
+--- a/app/src/main/java/eu/kanade/presentation/library/components/LibraryComfortableGrid.kt
++++ b/app/src/main/java/eu/kanade/presentation/library/components/LibraryComfortableGrid.kt
+@@ -9,15 +9,19 @@ import androidx.compose.runtime.SideEffect
+ import androidx.compose.runtime.mutableFloatStateOf
+ import androidx.compose.runtime.remember
+ import androidx.compose.ui.Modifier
++import androidx.compose.ui.unit.Dp
+ import androidx.compose.ui.unit.dp
+ import eu.kanade.tachiyomi.ui.library.LibraryItem
++import mihon.core.designsystem.utils.ExpandedWidthWindowSize
++import mihon.core.designsystem.utils.MediumWidthWindowSize
+ import tachiyomi.domain.library.model.LibraryManga
+ import tachiyomi.domain.manga.model.MangaCover
+ import tachiyomi.presentation.core.components.PanoramaCellHeight
+-import tachiyomi.presentation.core.components.PanoramaColumns
+ import tachiyomi.presentation.core.components.PanoramaMasonryContentEpoch
+ import tachiyomi.presentation.core.components.PanoramaMasonryTailEpoch
+ import tachiyomi.presentation.core.components.PanoramaSpan
++import tachiyomi.presentation.core.components.autoColumnMinDp
++import kotlin.math.roundToInt
+ 
+ @Composable
+ internal fun LibraryComfortableGrid(
+@@ -144,32 +148,25 @@ private fun LibraryComfortableGridItem(
+ // Harmony -->
+ 
+ /**
+- * Auto columns for panorama grids. The minimum follows this grid's own width
+- * (lane area plus horizontal content padding), not the device screen width.
++ * Minimum cell width when the column count is automatic (preference 0).
+  *
++ * The window width is compared with [MediumWidthWindowSize] and [ExpandedWidthWindowSize]:
++ * 112 dp under 600 dp, 140 dp under 840 dp, and 176 dp from 840 dp up.
+  * Lane count matches [tachiyomi.presentation.core.components.staggeredLaneCountAdaptive]:
+  * `lanes = (available + spacing) / (min + spacing)`,
+- * `spacing = GridHorizontalSpacer` (4 dp),
+- * `available = windowWidth - horizontal padding`.
+- * The grid adds `PaddingValues(8.dp)` around the scaffold content padding. In portrait the
+- * scaffold's system-bar insets add no left or right padding, so that horizontal padding is
+- * 16 dp and `available = windowWidth - 16`.
++ * `spacing` = 4 dp, `available` = window width - 16 dp of horizontal padding.
++ * 459 → 3, 664 → 4, 939 → 5.
+  *
+- * Under 600 dp the minimum is 112 dp. At 600 dp and above it is 140 dp, so a large window
+- * does not grow an extra column of tiny covers:
+- * 360 → 3, 420 → 3, 459 → 3, 664 → 4, 672 → 4, 800 → 5, 933 → 6, 939 → 6.
+- * Pura X Max folded portrait is about 459 dp (3) and unfolded landscape about 939 dp (6).
+- * vivo X100 Pro portrait is 360 and 420 dp (3).
+- * (A single 104 dp minimum put that 939 dp window on 8 columns. 168 dp, set on 2026-10-12
+- * for a single-column 3:2 cover, left a ~360 dp phone on 2 columns.)
+- *
+- * A shelf that has settled on a shape uses [panoramaAutoColumns] instead of this tier.
++ * A shelf that has settled on a shape uses [panoramaAutoColumns]. That count is not allowed
++ * to exceed this tier, so a tall shelf on a 939 dp window stays at 5.
+  */
+-internal val PanoramaGridMinColumnWidth = PanoramaColumns.Tiered(
+-    compactMin = 112.dp,
+-    expandedMin = 140.dp,
+-    breakpoint = 600.dp,
+-)
++internal fun autoColumnMinWidth(windowWidth: Dp): Dp {
++    return autoColumnMinDp(
++        windowWidthDp = windowWidth.value.roundToInt(),
++        mediumBreakpointDp = MediumWidthWindowSize.value.roundToInt(),
++        expandedBreakpointDp = ExpandedWidthWindowSize.value.roundToInt(),
++    ).dp
++}
+ 
+ /**
+  * Wide covers span two lanes when the shelf is tall or still unknown and the grid has room.
+diff --git a/app/src/main/java/eu/kanade/presentation/library/components/PanoramaShapeMode.kt b/app/src/main/java/eu/kanade/presentation/library/components/PanoramaShapeMode.kt
+index ef14ca6..279f017 100644
+--- a/app/src/main/java/eu/kanade/presentation/library/components/PanoramaShapeMode.kt
++++ b/app/src/main/java/eu/kanade/presentation/library/components/PanoramaShapeMode.kt
+@@ -1,12 +1,15 @@
+ package eu.kanade.presentation.library.components
+ 
+ import androidx.compose.runtime.Composable
++import androidx.compose.runtime.ReadOnlyComposable
+ import androidx.compose.runtime.Stable
+ import androidx.compose.runtime.getValue
+ import androidx.compose.runtime.mutableStateOf
+ import androidx.compose.runtime.saveable.Saver
+ import androidx.compose.runtime.saveable.rememberSaveable
+ import androidx.compose.runtime.setValue
++import androidx.compose.ui.platform.LocalConfiguration
++import androidx.compose.ui.unit.dp
+ import tachiyomi.presentation.core.components.PanoramaColumns
+ 
+ // Harmony -->
+@@ -168,12 +171,20 @@ internal fun rememberPanoramaShapeModeState(): PanoramaShapeModeState {
+     }
+ }
+ 
+-/** Auto columns for the mode. A fixed column count is the caller's [PanoramaColumns.Fixed]. */
++/**
++ * Auto columns for the mode. A fixed column count is the caller's [PanoramaColumns.Fixed].
++ *
++ * Unknown uses the shared width tier. Tall and wide keep the shaped count, and that tier is a
++ * floor on the lane width.
++ */
++@Composable
++@ReadOnlyComposable
+ internal fun panoramaAutoColumns(mode: PanoramaShapeMode): PanoramaColumns {
++    val min = autoColumnMinWidth(LocalConfiguration.current.screenWidthDp.dp)
+     return when (mode) {
+-        PanoramaShapeMode.Tall -> PanoramaColumns.Shaped(1.5f)
+-        PanoramaShapeMode.Wide -> PanoramaColumns.Shaped(2f / 3f)
+-        PanoramaShapeMode.Unknown -> PanoramaGridMinColumnWidth
++        PanoramaShapeMode.Tall -> PanoramaColumns.Shaped(heightOverWidth = 1.5f, minLane = min)
++        PanoramaShapeMode.Wide -> PanoramaColumns.Shaped(heightOverWidth = 2f / 3f, minLane = min)
++        PanoramaShapeMode.Unknown -> PanoramaColumns.Adaptive(min)
+     }
+ }
+ // Harmony <--
+diff --git a/app/src/main/java/eu/kanade/tachiyomi/ui/browse/migration/search/MigrateSourceSearchScreen.kt b/app/src/main/java/eu/kanade/tachiyomi/ui/browse/migration/search/MigrateSourceSearchScreen.kt
+index 5e6d2c9..651a59c 100644
+--- a/app/src/main/java/eu/kanade/tachiyomi/ui/browse/migration/search/MigrateSourceSearchScreen.kt
++++ b/app/src/main/java/eu/kanade/tachiyomi/ui/browse/migration/search/MigrateSourceSearchScreen.kt
+@@ -105,7 +105,10 @@ data class MigrateSourceSearchScreen(
+             BrowseSourceContent(
+                 source = source,
+                 mangaList = viewModel.mangaPagerFlowFlow.collectAsLazyPagingItems(),
+-                columns = viewModel.getColumnsPreference(LocalConfiguration.current.orientation),
++                columns = viewModel.getColumnsPreference(
++                    LocalConfiguration.current.orientation,
++                    LocalConfiguration.current.screenWidthDp,
++                ),
+                 // Harmony -->
+                 columnCount = viewModel.getColumnCount(LocalConfiguration.current.orientation),
+                 // Harmony <--
+diff --git a/app/src/main/java/eu/kanade/tachiyomi/ui/browse/source/browse/BrowseSourceScreen.kt b/app/src/main/java/eu/kanade/tachiyomi/ui/browse/source/browse/BrowseSourceScreen.kt
+index 728d32e..2ae5943 100644
+--- a/app/src/main/java/eu/kanade/tachiyomi/ui/browse/source/browse/BrowseSourceScreen.kt
++++ b/app/src/main/java/eu/kanade/tachiyomi/ui/browse/source/browse/BrowseSourceScreen.kt
+@@ -216,7 +216,10 @@ data class BrowseSourceScreen(
+             BrowseSourceContent(
+                 source = source,
+                 mangaList = viewModel.mangaPagerFlowFlow.collectAsLazyPagingItems(),
+-                columns = viewModel.getColumnsPreference(LocalConfiguration.current.orientation),
++                columns = viewModel.getColumnsPreference(
++                    LocalConfiguration.current.orientation,
++                    LocalConfiguration.current.screenWidthDp,
++                ),
+                 // Harmony -->
+                 columnCount = viewModel.getColumnCount(LocalConfiguration.current.orientation),
+                 // Harmony <--
+diff --git a/app/src/main/java/eu/kanade/tachiyomi/ui/browse/source/browse/BrowseSourceViewModel.kt b/app/src/main/java/eu/kanade/tachiyomi/ui/browse/source/browse/BrowseSourceViewModel.kt
+index 8ee7108..f3c561f 100644
+--- a/app/src/main/java/eu/kanade/tachiyomi/ui/browse/source/browse/BrowseSourceViewModel.kt
++++ b/app/src/main/java/eu/kanade/tachiyomi/ui/browse/source/browse/BrowseSourceViewModel.kt
+@@ -25,6 +25,7 @@ import eu.kanade.domain.manga.interactor.UpdateManga
+ import eu.kanade.domain.source.interactor.GetIncognitoState
+ import eu.kanade.domain.source.service.SourcePreferences
+ import eu.kanade.domain.track.interactor.AddTracks
++import eu.kanade.presentation.library.components.autoColumnMinWidth
+ import eu.kanade.tachiyomi.data.cache.CoverCache
+ import eu.kanade.tachiyomi.source.Source
+ import eu.kanade.tachiyomi.source.model.FilterList
+@@ -146,9 +147,14 @@ class BrowseSourceViewModel(
+         }
+         .stateIn(viewModelScope, SharingStarted.Lazily, emptyFlow())
+ 
+-    fun getColumnsPreference(orientation: Int): GridCells {
++    fun getColumnsPreference(orientation: Int, windowWidthDp: Int): GridCells {
+         val columns = getColumnCount(orientation)
+-        return if (columns == 0) GridCells.Adaptive(128.dp) else GridCells.Fixed(columns)
++        // Harmony: 0 follows the shared width tier. A fixed count is unchanged.
++        return if (columns == 0) {
++            GridCells.Adaptive(autoColumnMinWidth(windowWidthDp.dp))
++        } else {
++            GridCells.Fixed(columns)
++        }
+     }
+ 
+     // Harmony -->
+diff --git a/app/src/test/java/eu/kanade/presentation/library/components/AutoColumnWidthTest.kt b/app/src/test/java/eu/kanade/presentation/library/components/AutoColumnWidthTest.kt
+new file mode 100644
+index 0000000..ea98213
+--- /dev/null
++++ b/app/src/test/java/eu/kanade/presentation/library/components/AutoColumnWidthTest.kt
+@@ -0,0 +1,24 @@
++package eu.kanade.presentation.library.components
++
++import androidx.compose.ui.unit.dp
++import mihon.core.designsystem.utils.ExpandedWidthWindowSize
++import mihon.core.designsystem.utils.MediumWidthWindowSize
++import org.junit.jupiter.api.Assertions.assertEquals
++import org.junit.jupiter.api.Test
++import tachiyomi.presentation.core.components.autoColumnCount
++import tachiyomi.presentation.core.components.autoColumnMinDp
++import kotlin.math.roundToInt
++
++class AutoColumnWidthTest {
++    @Test
++    fun `window tiers match the foldable widths`() {
++        assertEquals(600, MediumWidthWindowSize.value.roundToInt())
++        assertEquals(840, ExpandedWidthWindowSize.value.roundToInt())
++        assertEquals(autoColumnMinDp(459), autoColumnMinWidth(459.dp).value.roundToInt())
++        assertEquals(autoColumnMinDp(664), autoColumnMinWidth(664.dp).value.roundToInt())
++        assertEquals(autoColumnMinDp(939), autoColumnMinWidth(939.dp).value.roundToInt())
++        assertEquals(3, autoColumnCount(459))
++        assertEquals(4, autoColumnCount(664))
++        assertEquals(5, autoColumnCount(939))
++    }
++}
+diff --git a/presentation-core/src/main/java/tachiyomi/presentation/core/components/AutoColumnWidth.kt b/presentation-core/src/main/java/tachiyomi/presentation/core/components/AutoColumnWidth.kt
+new file mode 100644
+index 0000000..13e1782
+--- /dev/null
++++ b/presentation-core/src/main/java/tachiyomi/presentation/core/components/AutoColumnWidth.kt
+@@ -0,0 +1,47 @@
++package tachiyomi.presentation.core.components
++
++/**
++ * Minimum cell width for an automatic column count.
++ *
++ * Narrower than [mediumBreakpointDp] uses 112 dp. Narrower than [expandedBreakpointDp] uses
++ * 140 dp. That breakpoint and wider uses 176 dp. The defaults are the app window-size
++ * breakpoints (600 dp and 840 dp). Lane count is [autoColumnCount].
++ */
++fun autoColumnMinDp(
++    windowWidthDp: Int,
++    mediumBreakpointDp: Int = 600,
++    expandedBreakpointDp: Int = 840,
++): Int {
++    return when {
++        windowWidthDp < mediumBreakpointDp -> 112
++        windowWidthDp < expandedBreakpointDp -> 140
++        else -> 176
++    }
++}
++
++/**
++ * Columns that fit [windowWidthDp] at [autoColumnMinDp].
++ *
++ * [horizontalPaddingDp] is removed before the count, and [spacingDp] is the gap counted on
++ * both sides of the division, same as [staggeredLaneCountAdaptive].
++ */
++fun autoColumnCount(
++    windowWidthDp: Int,
++    horizontalPaddingDp: Int = 16,
++    spacingDp: Int = 4,
++    mediumBreakpointDp: Int = 600,
++    expandedBreakpointDp: Int = 840,
++): Int {
++    val min = autoColumnMinDp(windowWidthDp, mediumBreakpointDp, expandedBreakpointDp)
++    val available = windowWidthDp - horizontalPaddingDp
++    return staggeredLaneCountAdaptive(available, spacingDp, min)
++}
++
++/**
++ * [lanes], unless that is more than fit at [minSize].
++ *
++ * A shaped shelf may stay on fewer, wider columns. It cannot go past the automatic tier.
++ */
++fun capLaneCountToMinWidth(lanes: Int, availableSize: Int, spacing: Int, minSize: Int): Int {
++    return minOf(lanes, staggeredLaneCountAdaptive(availableSize, spacing, minSize))
++}
+diff --git a/presentation-core/src/main/java/tachiyomi/presentation/core/components/PanoramaMasonry.kt b/presentation-core/src/main/java/tachiyomi/presentation/core/components/PanoramaMasonry.kt
+index 9583cac..d3e22e4 100644
+--- a/presentation-core/src/main/java/tachiyomi/presentation/core/components/PanoramaMasonry.kt
++++ b/presentation-core/src/main/java/tachiyomi/presentation/core/components/PanoramaMasonry.kt
+@@ -156,9 +156,11 @@ sealed interface PanoramaColumns {
+      * Harmony: the area is the measured grid (lane area plus horizontal content padding, times
+      * the measured height). An unbounded height uses scale 1. A tie within 0.05 dp keeps the
+      * smaller count, and a column narrower than 104 dp is not a candidate.
++     * [minLane] wider than that 104 dp floor caps the count, so the lane stays at least that wide.
+      */
+     data class Shaped(
+         val heightOverWidth: Float,
++        val minLane: Dp = 104.dp,
+     ) : PanoramaColumns
+ }
+ 
+@@ -798,7 +800,7 @@ private fun LazyLayoutMeasureScope.measureMasonry(
+         is PanoramaColumns.Shaped -> {
+             // Harmony: same grid width as Tiered. Height is the measure constraint; infinite height is scale 1.
+             val boundedHeight = constraints.hasBoundedHeight
+-            panoramaShapedLaneCount(
++            val shaped = panoramaShapedLaneCount(
+                 gridWidthPx = available + left + right,
+                 gridHeightPx = if (boundedHeight) constraints.maxHeight else 0,
+                 horizontalPaddingPx = left + right,
+@@ -807,6 +809,18 @@ private fun LazyLayoutMeasureScope.measureMasonry(
+                 density = density,
+                 heightBounded = boundedHeight,
+             )
++            // Harmony: 104 dp is the shaped search floor, so the default leaves that count alone.
++            // A wider minLane is the automatic tier. The shelf may stay wider, but not narrower.
++            if (columns.minLane <= 104.dp) {
++                shaped
++            } else {
++                capLaneCountToMinWidth(
++                    lanes = shaped,
++                    availableSize = available,
++                    spacing = horizontalPx,
++                    minSize = columns.minLane.roundToPx(),
++                )
++            }
+         }
+     }
+     val laneWidths = staggeredLaneWidths(available, laneCount, horizontalPx)
+diff --git a/presentation-core/src/test/java/tachiyomi/presentation/core/components/PanoramaMasonryLayoutTest.kt b/presentation-core/src/test/java/tachiyomi/presentation/core/components/PanoramaMasonryLayoutTest.kt
+index 7cb5728..eab1832 100644
+--- a/presentation-core/src/test/java/tachiyomi/presentation/core/components/PanoramaMasonryLayoutTest.kt
++++ b/presentation-core/src/test/java/tachiyomi/presentation/core/components/PanoramaMasonryLayoutTest.kt
+@@ -754,7 +754,7 @@ class PanoramaMasonryLayoutTest {
+ 
+     @Test
+     fun `tiered minimum stays on three phone columns and widens past 600 dp`() {
+-        // available = window - 16 dp horizontal padding, spacing 4 dp. See PanoramaGridMinColumnWidth.
++        // available = window - 16 dp horizontal padding, spacing 4 dp. Two-step Tiered helper.
+         // Under 600 dp the minimum is 112. At 600 dp and above it is 140.
+         val spacing = 4
+         val padding = 16
+@@ -776,6 +776,63 @@ class PanoramaMasonryLayoutTest {
+         assertEquals(140, panoramaTieredMinSize(600, breakpoint = 600, compactMin = 112, expandedMin = 140))
+     }
+ 
++    @Test
++    fun `automatic columns are 3, 4 and 5 on the foldable windows`() {
++        // available = window - 16 dp, spacing 4 dp. 112 under 600, 140 under 840, 176 from 840.
++        assertEquals(112, autoColumnMinDp(459))
++        assertEquals(140, autoColumnMinDp(664))
++        assertEquals(176, autoColumnMinDp(939))
++        assertEquals(3, autoColumnCount(459))
++        assertEquals(4, autoColumnCount(664))
++        assertEquals(5, autoColumnCount(939))
++        assertEquals(112, autoColumnMinDp(599))
++        assertEquals(140, autoColumnMinDp(600))
++        assertEquals(140, autoColumnMinDp(839))
++        assertEquals(176, autoColumnMinDp(840))
++        assertEquals(3, autoColumnCount(360))
++        assertEquals(3, autoColumnCount(420))
++    }
++
++    @Test
++    fun `shaped columns stay at most the automatic tier`() {
++        // 939 x 544 tall is 6 lanes at the 104 dp floor. 176 dp fits 5, so the cap is 5.
++        val tall = panoramaShapedLaneCount(
++            gridWidthPx = 939,
++            gridHeightPx = 544,
++            horizontalPaddingPx = 16,
++            spacingPx = 4,
++            heightOverWidth = 1.5f,
++            density = 1f,
++            heightBounded = true,
++        )
++        assertEquals(6, tall)
++        assertEquals(5, capLaneCountToMinWidth(tall, availableSize = 939 - 16, spacing = 4, minSize = 176))
++        // A wide shelf on that window is already 4, under the cap.
++        val wide = panoramaShapedLaneCount(
++            gridWidthPx = 939,
++            gridHeightPx = 544,
++            horizontalPaddingPx = 16,
++            spacingPx = 4,
++            heightOverWidth = 2f / 3f,
++            density = 1f,
++            heightBounded = true,
++        )
++        assertEquals(4, wide)
++        assertEquals(4, capLaneCountToMinWidth(wide, availableSize = 939 - 16, spacing = 4, minSize = 176))
++        val folded = panoramaShapedLaneCount(
++            gridWidthPx = 459,
++            gridHeightPx = 552,
++            horizontalPaddingPx = 16,
++            spacingPx = 4,
++            heightOverWidth = 1.5f,
++            density = 1f,
++            heightBounded = true,
++        )
++        assertEquals(3, folded)
++        assertEquals(3, capLaneCountToMinWidth(folded, availableSize = 459 - 16, spacing = 4, minSize = 112))
++        assertEquals(4, capLaneCountToMinWidth(4, availableSize = 664 - 16, spacing = 4, minSize = 140))
++    }
++
+     @Test
+     fun `shaped columns follow the grid area for tall and wide covers`() {
+         // Grid width x height, dp. Horizontal content padding is 8 + 8 and the gap is 4.

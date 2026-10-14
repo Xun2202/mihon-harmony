@@ -38,3 +38,8 @@
 0038-presentation-panorama-defer-shapes-while-scrolling.patch
 0039-presentation-panorama-prefetch-cover-headers.patch
 0040-presentation-panorama-masonry-append-pages.patch
+0041-app-scroll-recorder-lighter-sampler-and-composed-counts.patch
+0042-presentation-panorama-placeholder-follows-shelf.patch
+0043-presentation-auto-columns-expanded-windows.patch
+0044-presentation-browse-cells-skip-paging-reads.patch
+0045-browse-panorama-cover-size-probe.patch

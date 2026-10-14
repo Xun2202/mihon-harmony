@@ -1,0 +1,1019 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Xun2202 <98207886+Xun2202@users.noreply.github.com>
+Date: Wed, 14 Oct 2026 18:02:53 +0000
+Subject: [PATCH] browse: panorama pages read cover sizes before they are shown
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Masonry places each cover at its final ratio, so the height/width has to
+be known before the page is returned. After an HttpSource page loads, and
+only while the catalogue mode is ComfortableGrid or CompactGrid panorama,
+each unknown cover is probed with the source OkHttp client and headers
+(Referer included). The request is Range bytes=0-32767, at most 32 KB is
+read, and a 200 that ignored Range is cancelled instead of drained. JPEG
+is walked by segment length so an APP1 EXIF thumbnail is not the size;
+if those lengths put SOF past the first window, one follow-up reads up to
+128 KB. Six probes run at a time. The first page (refresh) waits for them inside a
+400 ms budget; appended pages are returned at once and probed in the
+background (2 s budget, cancelled when the source is invalidated), since
+they land below the viewport and a learnt shape only relayouts that tail.
+Ratios are stored as they finish. Ids already in PanoramaCoverShapes are skipped.
+Local sources are not probed. A cover that does not finish, or whose
+format is unknown, stays on the placeholder.
+
+与 anikku-harmony 同病（同一段代码 / 同一套网格），Anikku 侧待移植。
+---
+ .../source/browse/BrowseSourceViewModel.kt    |  92 +++-
+ .../util/system/HarmonyCoverHeaderProbe.kt    | 466 ++++++++++++++++++
+ .../system/HarmonyCoverHeaderProbeTest.kt     | 370 ++++++++++++++
+ 3 files changed, 926 insertions(+), 2 deletions(-)
+ create mode 100644 app/src/main/java/eu/kanade/tachiyomi/util/system/HarmonyCoverHeaderProbe.kt
+ create mode 100644 app/src/test/java/eu/kanade/tachiyomi/util/system/HarmonyCoverHeaderProbeTest.kt
+
+diff --git a/app/src/main/java/eu/kanade/tachiyomi/ui/browse/source/browse/BrowseSourceViewModel.kt b/app/src/main/java/eu/kanade/tachiyomi/ui/browse/source/browse/BrowseSourceViewModel.kt
+index f3c561f..6620e88 100644
+--- a/app/src/main/java/eu/kanade/tachiyomi/ui/browse/source/browse/BrowseSourceViewModel.kt
++++ b/app/src/main/java/eu/kanade/tachiyomi/ui/browse/source/browse/BrowseSourceViewModel.kt
+@@ -10,6 +10,8 @@ import androidx.lifecycle.ViewModel
+ import androidx.lifecycle.viewModelScope
+ import androidx.paging.Pager
+ import androidx.paging.PagingConfig
++import androidx.paging.PagingSource
++import androidx.paging.PagingState
+ import androidx.paging.cachedIn
+ import androidx.paging.filter
+ import androidx.paging.map
+@@ -29,9 +31,14 @@ import eu.kanade.presentation.library.components.autoColumnMinWidth
+ import eu.kanade.tachiyomi.data.cache.CoverCache
+ import eu.kanade.tachiyomi.source.Source
+ import eu.kanade.tachiyomi.source.model.FilterList
++import eu.kanade.tachiyomi.source.online.HttpSource
+ import eu.kanade.tachiyomi.util.removeCovers
++import eu.kanade.tachiyomi.util.system.HarmonyCoverHeaderProbe
++import kotlinx.coroutines.CancellationException
+ import kotlinx.coroutines.CoroutineScope
+ import kotlinx.coroutines.Dispatchers
++import kotlinx.coroutines.Job
++import kotlinx.coroutines.SupervisorJob
+ import kotlinx.coroutines.flow.MutableStateFlow
+ import kotlinx.coroutines.flow.SharingStarted
+ import kotlinx.coroutines.flow.StateFlow
+@@ -51,6 +58,7 @@ import tachiyomi.domain.category.interactor.GetCategories
+ import tachiyomi.domain.category.interactor.SetMangaCategories
+ import tachiyomi.domain.category.model.Category
+ import tachiyomi.domain.chapter.interactor.SetMangaDefaultChapterFlags
++import tachiyomi.domain.library.model.LibraryDisplayMode
+ import tachiyomi.domain.library.service.LibraryPreferences
+ import tachiyomi.domain.manga.interactor.GetDuplicateLibraryManga
+ import tachiyomi.domain.manga.interactor.GetManga
+@@ -69,7 +77,7 @@ class BrowseSourceViewModel(
+     @Assisted listingQuery: String?,
+     @AppCoroutineScope private val appScope: CoroutineScope,
+     private val sourceManager: SourceManager,
+-    sourcePreferences: SourcePreferences,
++    private val sourcePreferences: SourcePreferences,
+     private val libraryPreferences: LibraryPreferences,
+     private val coverCache: CoverCache,
+     private val getRemoteManga: GetRemoteManga,
+@@ -134,7 +142,17 @@ class BrowseSourceViewModel(
+         .distinctUntilChanged()
+         .map { listing ->
+             Pager(PagingConfig(pageSize = 25)) {
+-                getRemoteManga(sourceId, listing.query ?: "", listing.filters)
++                // Harmony: panorama cells need each cover ratio before the page is placed.
++                BrowseCoverProbePagingSource(
++                    delegate = getRemoteManga(sourceId, listing.query ?: "", listing.filters),
++                    httpSource = { state.value.source as? HttpSource },
++                    panorama = {
++                        val mode = sourcePreferences.sourceDisplayMode.get()
++                        mode == LibraryDisplayMode.ComfortableGridPanorama ||
++                            mode == LibraryDisplayMode.CompactGridPanorama
++                    },
++                    parentScope = viewModelScope,
++                )
+             }.flow.map { pagingData ->
+                 pagingData.map { manga ->
+                     getManga.subscribe(manga.url, manga.source)
+@@ -385,3 +403,73 @@ class BrowseSourceViewModel(
+         val isUserQuery get() = listing is Listing.Search && !listing.query.isNullOrEmpty()
+     }
+ }
++
++// Harmony: the first page waits up to 400 ms for cover headers. Append and prepend return
++// immediately and learn shapes in the background (2 s, six at a time). Those rows are below
++// the viewport, so a learnt band moves the tail. Local sources are not HttpSource.
++private class BrowseCoverProbePagingSource(
++    private val delegate: PagingSource<Long, Manga>,
++    private val httpSource: () -> HttpSource?,
++    private val panorama: () -> Boolean,
++    parentScope: CoroutineScope,
++) : PagingSource<Long, Manga>() {
++
++    private val probeJob = SupervisorJob(parentScope.coroutineContext[Job])
++    private val probeScope = CoroutineScope(parentScope.coroutineContext + probeJob)
++
++    init {
++        // Paging 3's invalidate() is final. Cancel probes from the callback, and keep forwarding.
++        registerInvalidatedCallback { probeJob.cancel() }
++        delegate.registerInvalidatedCallback { invalidate() }
++    }
++
++    override suspend fun load(params: LoadParams<Long>): LoadResult<Long, Manga> {
++        // Before the delegate, so a slow page does not decide the mode after it has already arrived.
++        val probe = panorama()
++        val result = delegate.load(params)
++        if (result is LoadResult.Page && probe) {
++            val http = httpSource()
++            if (http != null) {
++                try {
++                    when (params) {
++                        is LoadParams.Refresh -> {
++                            HarmonyCoverHeaderProbe.probePage(result.data, http.client, http.headers)
++                        }
++                        is LoadParams.Append, is LoadParams.Prepend -> {
++                            val page = result.data
++                            probeScope.launch {
++                                try {
++                                    HarmonyCoverHeaderProbe.probePage(
++                                        items = page,
++                                        client = http.client,
++                                        headers = http.headers,
++                                        budget = 2.seconds,
++                                    )
++                                } catch (e: CancellationException) {
++                                    throw e
++                                } catch (_: Exception) {
++                                    // Appended rows keep the placeholder until a later probe lands.
++                                }
++                            }
++                        }
++                    }
++                } catch (e: CancellationException) {
++                    throw e
++                } catch (_: Exception) {
++                    // The page is still shown. Covers that were not probed keep the placeholder shape.
++                }
++            }
++        }
++        return result
++    }
++
++    override fun getRefreshKey(state: PagingState<Long, Manga>): Long? {
++        return delegate.getRefreshKey(state)
++    }
++
++    override val jumpingSupported: Boolean
++        get() = delegate.jumpingSupported
++
++    override val keyReuseSupported: Boolean
++        get() = delegate.keyReuseSupported
++}
+diff --git a/app/src/main/java/eu/kanade/tachiyomi/util/system/HarmonyCoverHeaderProbe.kt b/app/src/main/java/eu/kanade/tachiyomi/util/system/HarmonyCoverHeaderProbe.kt
+new file mode 100644
+index 0000000..705c0a1
+--- /dev/null
++++ b/app/src/main/java/eu/kanade/tachiyomi/util/system/HarmonyCoverHeaderProbe.kt
+@@ -0,0 +1,466 @@
++package eu.kanade.tachiyomi.util.system
++
++import eu.kanade.presentation.library.components.PanoramaCoverShapes
++import kotlinx.coroutines.CancellationException
++import kotlinx.coroutines.Dispatchers
++import kotlinx.coroutines.Job
++import kotlinx.coroutines.coroutineScope
++import kotlinx.coroutines.currentCoroutineContext
++import kotlinx.coroutines.ensureActive
++import kotlinx.coroutines.launch
++import kotlinx.coroutines.suspendCancellableCoroutine
++import kotlinx.coroutines.sync.Semaphore
++import kotlinx.coroutines.sync.withPermit
++import kotlinx.coroutines.withContext
++import kotlinx.coroutines.withTimeoutOrNull
++import okhttp3.CacheControl
++import okhttp3.Call
++import okhttp3.Callback
++import okhttp3.Headers
++import okhttp3.OkHttpClient
++import okhttp3.Request
++import okhttp3.Response
++import okhttp3.ResponseBody
++import tachiyomi.domain.manga.model.Manga
++import java.io.IOException
++import kotlin.coroutines.resume
++import kotlin.coroutines.resumeWithException
++import kotlin.time.Duration.Companion.milliseconds
++
++/**
++ * Reads cover width and height from a short HTTP prefix so a panorama cell can be
++ * placed at its final ratio. Unknown covers stay on the placeholder.
++ *
++ * JPEG is walked by segment length, so an EXIF thumbnail inside APP1 is skipped.
++ * EXIF orientation 5–8 is not applied: the tag lives in that same APP1 segment,
++ * and a swapped ratio only lasts until a visible decode stores the oriented size.
++ * AVIF, JXL and HEIF return null.
++ */
++object HarmonyCoverHeaderProbe {
++
++    private const val HTTP_OK = 200
++    private const val HTTP_PARTIAL = 206
++    private const val FIRST_BYTES = 32 * 1024
++    private const val MAX_BYTES = 128 * 1024
++    private const val PROBE_CONCURRENCY = 6
++
++    private val callTimeout = 400.milliseconds
++    private val pageBudget = 400.milliseconds
++    private val noStore = CacheControl.Builder().noStore().build()
++
++    /**
++     * Width then height, from the first [length] bytes of [bytes].
++     * Returns null when the format is unknown or the header is not in the buffer.
++     */
++    fun parseImageSize(bytes: ByteArray, length: Int): Pair<Int, Int>? {
++        val size = parseHeader(bytes, length) as? ImageSize ?: return null
++        return size.width to size.height
++    }
++
++    /**
++     * GET [url] with `Range: bytes=0-32767`, using [headers] unchanged apart from
++     * Range and `Accept-Encoding: identity` (source headers carry Referer).
++     * At most 32 KB is read; a 200 that ignored Range is closed without draining.
++     * When the JPEG segment lengths put SOF past that window, one follow-up
++     * reads `bytes=0-131071`. The call is cancelled with the coroutine.
++     * Nothing is written to Coil, and [client]'s cache is not used.
++     */
++    suspend fun probe(client: OkHttpClient, url: String, headers: Headers): Pair<Int, Int>? {
++        val timed = client.newBuilder()
++            .cache(null)
++            .callTimeout(callTimeout)
++            .build()
++        return withContext(Dispatchers.IO) {
++            try {
++                readSize(timed, url, headers)
++            } catch (e: CancellationException) {
++                throw e
++            } catch (_: Exception) {
++                ensureActive()
++                null
++            }
++        }
++    }
++
++    /**
++     * Probes covers that are not already in [PanoramaCoverShapes], [PROBE_CONCURRENCY]
++     * at a time, and gives the whole page [pageBudget]. Each ratio is stored as it
++     * arrives (height / width). Unfinished calls are cancelled and those covers stay unknown.
++     */
++    suspend fun probePage(
++        items: List<Manga>,
++        client: OkHttpClient,
++        headers: Headers,
++        budget: kotlin.time.Duration = pageBudget,
++    ) {
++        if (items.isEmpty()) return
++        val pending = ArrayList<Manga>(items.size)
++        for (manga in items) {
++            val url = manga.thumbnailUrl
++            if (url.isNullOrBlank() || !url.startsWith("http", ignoreCase = true)) continue
++            if (PanoramaCoverShapes.get(manga.id) != null) continue
++            pending.add(manga)
++        }
++        if (pending.isEmpty()) return
++        withTimeoutOrNull(budget) {
++            coroutineScope {
++                val gate = Semaphore(PROBE_CONCURRENCY)
++                for (manga in pending) {
++                    val url = manga.thumbnailUrl ?: continue
++                    val mangaId = manga.id
++                    launch {
++                        gate.withPermit {
++                            try {
++                                if (PanoramaCoverShapes.get(mangaId) != null) return@withPermit
++                                val size = probe(client, url, headers) ?: return@withPermit
++                                val (width, height) = size
++                                if (width <= 0 || height <= 0) return@withPermit
++                                PanoramaCoverShapes.put(mangaId, height.toFloat() / width.toFloat())
++                            } catch (e: CancellationException) {
++                                throw e
++                            } catch (_: Exception) {
++                                // This cover stays unknown.
++                            }
++                        }
++                    }
++                }
++            }
++        }
++    }
++
++    private suspend fun readSize(client: OkHttpClient, url: String, headers: Headers): Pair<Int, Int>? {
++        val first = fetch(client, url, headers, start = 0, endInclusive = FIRST_BYTES - 1L) ?: return null
++        if (first.offset != 0L) return null
++        when (val parsed = parseHeader(first.bytes, first.bytes.size)) {
++            is ImageSize -> return parsed.width to parsed.height
++            HeaderParse.NotImage -> return null
++            HeaderParse.JpegNeedsMore -> if (!first.hitCap) return null
++        }
++        // SOF is past the first window. One more range, still capped at 128 KB.
++        val more = fetch(client, url, headers, start = 0, endInclusive = MAX_BYTES - 1L) ?: return null
++        if (more.offset != 0L) return null
++        return parseImageSize(more.bytes, more.bytes.size)
++    }
++
++    private suspend fun fetch(
++        client: OkHttpClient,
++        url: String,
++        headers: Headers,
++        start: Long,
++        endInclusive: Long,
++    ): Slice? {
++        val request = Request.Builder()
++            .url(url)
++            .headers(headers)
++            .header("Range", "bytes=$start-$endInclusive")
++            .header("Accept-Encoding", "identity")
++            .cacheControl(noStore)
++            .build()
++        val call = client.newCall(request)
++        // invokeOnCompletion runs only after the job finishes, so a blocked execute() never saw it.
++        // onCancelling fires when the coroutine is cancelled, including during the body read.
++        val cancelOnExit = currentCoroutineContext()[Job]?.invokeOnCompletion(onCancelling = true) { cause ->
++            if (cause is CancellationException) {
++                try {
++                    call.cancel()
++                } catch (_: Throwable) {
++                }
++            }
++        }
++        try {
++            currentCoroutineContext().ensureActive()
++            // Registered before the call runs. Cancellation cancels it instead of waiting out execute.
++            val response = call.awaitResponse()
++            try {
++                if (response.code != HTTP_OK && response.code != HTTP_PARTIAL) return null
++                val requested = (endInclusive - start + 1).coerceAtMost(MAX_BYTES.toLong()).toInt()
++                // A 200 ignored Range. Stop at the window. Cancel so close() does not discard the rest.
++                val cap = if (response.code == HTTP_OK) minOf(requested, MAX_BYTES) else requested
++                val bytes = readAtMost(response.body, cap)
++                val hitCap = bytes.size >= cap
++                if (response.code == HTTP_OK && hitCap) {
++                    // close() otherwise discards the unread body for 100 ms. Cancel first so that
++                    // read fails instead of pulling down a 200 that ignored Range.
++                    call.cancel()
++                }
++                val offset = if (response.code == HTTP_PARTIAL) {
++                    contentRangeStart(response.header("Content-Range")) ?: start
++                } else {
++                    0L
++                }
++                return Slice(bytes = bytes, offset = offset, hitCap = hitCap)
++            } finally {
++                try {
++                    response.close()
++                } catch (e: CancellationException) {
++                    throw e
++                } catch (_: Exception) {
++                    currentCoroutineContext().ensureActive()
++                }
++            }
++        } finally {
++            cancelOnExit?.dispose()
++        }
++    }
++
++    /**
++     * Headers for [this], cancelled with the coroutine.
++     * The continuation is suspended before the response arrives, so [invokeOnCancellation] can
++     * [Call.cancel] a call that would otherwise stay blocked inside execute.
++     */
++    private suspend fun Call.awaitResponse(): Response = suspendCancellableCoroutine { continuation ->
++        continuation.invokeOnCancellation {
++            try {
++                cancel()
++            } catch (_: Throwable) {
++            }
++        }
++        enqueue(object : Callback {
++            override fun onFailure(call: Call, e: IOException) {
++                if (continuation.isCancelled) return
++                continuation.resumeWithException(e)
++            }
++
++            override fun onResponse(call: Call, response: Response) {
++                continuation.resume(response) { _, value, _ ->
++                    try {
++                        value.close()
++                    } catch (_: Throwable) {
++                    }
++                }
++            }
++        })
++    }
++
++    private suspend fun readAtMost(body: ResponseBody, max: Int): ByteArray {
++        if (max <= 0) return ByteArray(0)
++        val source = body.source()
++        val out = ByteArray(max)
++        var offset = 0
++        while (offset < max) {
++            currentCoroutineContext().ensureActive()
++            val count = source.read(out, offset, max - offset)
++            if (count < 0) break
++            offset += count
++        }
++        return if (offset == max) out else out.copyOf(offset)
++    }
++
++    private fun parseHeader(bytes: ByteArray, length: Int): HeaderParse {
++        val n = if (length < 0) 0 else minOf(length, bytes.size)
++        if (n <= 0) return HeaderParse.NotImage
++        parsePng(bytes, n)?.let { return it }
++        parseGif(bytes, n)?.let { return it }
++        parseWebp(bytes, n)?.let { return it }
++        parseBmp(bytes, n)?.let { return it }
++        if (n >= 2 && u8(bytes, 0) == 0xFF && u8(bytes, 1) == 0xD8) return parseJpeg(bytes, n)
++        return HeaderParse.NotImage
++    }
++
++    private fun parsePng(bytes: ByteArray, n: Int): ImageSize? {
++        if (n < 24) return null
++        if (u8(bytes, 0) != 0x89 || u8(bytes, 1) != 0x50 || u8(bytes, 2) != 0x4E || u8(bytes, 3) != 0x47) {
++            return null
++        }
++        if (u8(bytes, 4) != 0x0D || u8(bytes, 5) != 0x0A || u8(bytes, 6) != 0x1A || u8(bytes, 7) != 0x0A) {
++            return null
++        }
++        if (!ascii(bytes, n, 12, "IHDR")) return null
++        return imageSize(u32be(bytes, 16), u32be(bytes, 20))
++    }
++
++    private fun parseGif(bytes: ByteArray, n: Int): ImageSize? {
++        if (n < 10) return null
++        if (!ascii(bytes, n, 0, "GIF87a") && !ascii(bytes, n, 0, "GIF89a")) return null
++        return imageSize(u16le(bytes, 6), u16le(bytes, 8))
++    }
++
++    private fun parseWebp(bytes: ByteArray, n: Int): ImageSize? {
++        if (n < 12 || !ascii(bytes, n, 0, "RIFF") || !ascii(bytes, n, 8, "WEBP")) return null
++        var pos = 12
++        while (pos + 8 <= n) {
++            val kind = fourCc(bytes, pos)
++            val chunkSize = u32le(bytes, pos + 4)
++            val data = pos + 8
++            if (chunkSize > Int.MAX_VALUE) return null
++            when (kind) {
++                "VP8 " -> return parseVp8(bytes, n, data)
++                "VP8L" -> return parseVp8L(bytes, n, data)
++                "VP8X" -> return parseVp8X(bytes, n, data)
++            }
++            val padded = chunkSize + (chunkSize and 1L)
++            val next = data.toLong() + padded
++            if (next > n || next <= pos) return null
++            pos = next.toInt()
++        }
++        return null
++    }
++
++    private fun parseVp8(bytes: ByteArray, n: Int, data: Int): ImageSize? {
++        if (data < 0 || data + 10 > n) return null
++        // Inter frames carry no size. Key frames start 9D 01 2A, then 14-bit width and height.
++        if (u8(bytes, data) and 0x01 != 0) return null
++        if (u8(bytes, data + 3) != 0x9D || u8(bytes, data + 4) != 0x01 || u8(bytes, data + 5) != 0x2A) {
++            return null
++        }
++        val width = u16le(bytes, data + 6) and 0x3FFF
++        val height = u16le(bytes, data + 8) and 0x3FFF
++        return imageSize(width, height)
++    }
++
++    private fun parseVp8L(bytes: ByteArray, n: Int, data: Int): ImageSize? {
++        if (data < 0 || data + 5 > n) return null
++        if (u8(bytes, data) != 0x2F) return null
++        val bits = u32le(bytes, data + 1)
++        val width = (bits and 0x3FFF) + 1
++        val height = ((bits shr 14) and 0x3FFF) + 1
++        return imageSize(width, height)
++    }
++
++    private fun parseVp8X(bytes: ByteArray, n: Int, data: Int): ImageSize? {
++        if (data < 0 || data + 10 > n) return null
++        val width = u24le(bytes, data + 4) + 1
++        val height = u24le(bytes, data + 7) + 1
++        return imageSize(width, height)
++    }
++
++    private fun parseBmp(bytes: ByteArray, n: Int): ImageSize? {
++        if (n < 26 || u8(bytes, 0) != 'B'.code || u8(bytes, 1) != 'M'.code) return null
++        val headerSize = u32le(bytes, 14)
++        if (headerSize == 12L) {
++            if (n < 22) return null
++            return imageSize(u16le(bytes, 18), u16le(bytes, 20))
++        }
++        val width = i32le(bytes, 18)
++        val height = i32le(bytes, 22)
++        if (width <= 0 || height == 0 || height == Int.MIN_VALUE) return null
++        return imageSize(width, if (height < 0) -height else height)
++    }
++
++    private fun parseJpeg(bytes: ByteArray, n: Int): HeaderParse {
++        var i = 2
++        while (i < n) {
++            if (u8(bytes, i) != 0xFF) return HeaderParse.NotImage
++            while (i < n && u8(bytes, i) == 0xFF) i++
++            if (i >= n) return HeaderParse.JpegNeedsMore
++            val marker = u8(bytes, i)
++            i++
++            // Standalone markers have no length. RST and fill bytes show up in front of SOF.
++            when (marker) {
++                0x00 -> return HeaderParse.NotImage
++                0xD9 -> return HeaderParse.NotImage
++                0x01 -> continue
++                0xD8 -> continue
++                in 0xD0..0xD7 -> continue
++                // SOS payload is entropy-coded and is not bounded by its length field.
++                0xDA -> return HeaderParse.NotImage
++            }
++            if (i + 2 > n) return HeaderParse.JpegNeedsMore
++            val segLen = u16be(bytes, i)
++            if (segLen < 2) return HeaderParse.NotImage
++            val next = i.toLong() + segLen
++            if (isSof(marker)) {
++                // Precision, height, width need 5 bytes after the length field (segLen >= 7).
++                if (segLen < 7) return HeaderParse.NotImage
++                if (i + 7 > n) return HeaderParse.JpegNeedsMore
++                val height = u16be(bytes, i + 3)
++                val width = u16be(bytes, i + 5)
++                return imageSize(width, height) ?: HeaderParse.NotImage
++            }
++            if (next > n) return HeaderParse.JpegNeedsMore
++            i = next.toInt()
++        }
++        return HeaderParse.JpegNeedsMore
++    }
++
++    private fun isSof(marker: Int): Boolean {
++        // SOF0–SOF15 except DHT (C4), JPG (C8) and DAC (CC).
++        return marker in 0xC0..0xCF && marker != 0xC4 && marker != 0xC8 && marker != 0xCC
++    }
++
++    private fun contentRangeStart(header: String?): Long? {
++        if (header.isNullOrBlank()) return null
++        val spec = header.trim()
++        val rest = when {
++            spec.startsWith("bytes ") -> spec.substring(6)
++            spec.startsWith("bytes=") -> spec.substring(6)
++            else -> return null
++        }
++        val start = rest.substringBefore('-').trim()
++        if (start.isEmpty() || start == "*") return null
++        return start.toLongOrNull()
++    }
++
++    private fun imageSize(width: Long, height: Long): ImageSize? {
++        if (width <= 0L || height <= 0L || width > Int.MAX_VALUE || height > Int.MAX_VALUE) return null
++        return ImageSize(width.toInt(), height.toInt())
++    }
++
++    private fun imageSize(width: Int, height: Int): ImageSize? {
++        if (width <= 0 || height <= 0) return null
++        return ImageSize(width, height)
++    }
++
++    private fun ascii(bytes: ByteArray, n: Int, offset: Int, text: String): Boolean {
++        if (offset < 0 || text.length > n - offset) return false
++        for (index in text.indices) {
++            if (bytes[offset + index].toInt() != text[index].code) return false
++        }
++        return true
++    }
++
++    private fun fourCc(bytes: ByteArray, offset: Int): String {
++        return charArrayOf(
++            bytes[offset].toInt().toChar(),
++            bytes[offset + 1].toInt().toChar(),
++            bytes[offset + 2].toInt().toChar(),
++            bytes[offset + 3].toInt().toChar(),
++        ).concatToString()
++    }
++
++    private fun u8(bytes: ByteArray, index: Int): Int = bytes[index].toInt() and 0xFF
++
++    private fun u16be(bytes: ByteArray, index: Int): Int {
++        return (u8(bytes, index) shl 8) or u8(bytes, index + 1)
++    }
++
++    private fun u16le(bytes: ByteArray, index: Int): Int {
++        return u8(bytes, index) or (u8(bytes, index + 1) shl 8)
++    }
++
++    private fun u24le(bytes: ByteArray, index: Int): Int {
++        return u8(bytes, index) or (u8(bytes, index + 1) shl 8) or (u8(bytes, index + 2) shl 16)
++    }
++
++    private fun u32be(bytes: ByteArray, index: Int): Long {
++        return (u8(bytes, index).toLong() shl 24) or
++            (u8(bytes, index + 1).toLong() shl 16) or
++            (u8(bytes, index + 2).toLong() shl 8) or
++            u8(bytes, index + 3).toLong()
++    }
++
++    private fun u32le(bytes: ByteArray, index: Int): Long {
++        return u8(bytes, index).toLong() or
++            (u8(bytes, index + 1).toLong() shl 8) or
++            (u8(bytes, index + 2).toLong() shl 16) or
++            (u8(bytes, index + 3).toLong() shl 24)
++    }
++
++    private fun i32le(bytes: ByteArray, index: Int): Int = u32le(bytes, index).toInt()
++
++    private class Slice(
++        val bytes: ByteArray,
++        val offset: Long,
++        val hitCap: Boolean,
++    )
++
++    private class ImageSize(
++        val width: Int,
++        val height: Int,
++    ) : HeaderParse
++
++    private sealed interface HeaderParse {
++        data object NotImage : HeaderParse
++        data object JpegNeedsMore : HeaderParse
++    }
++}
+diff --git a/app/src/test/java/eu/kanade/tachiyomi/util/system/HarmonyCoverHeaderProbeTest.kt b/app/src/test/java/eu/kanade/tachiyomi/util/system/HarmonyCoverHeaderProbeTest.kt
+new file mode 100644
+index 0000000..d23ac7f
+--- /dev/null
++++ b/app/src/test/java/eu/kanade/tachiyomi/util/system/HarmonyCoverHeaderProbeTest.kt
+@@ -0,0 +1,370 @@
++package eu.kanade.tachiyomi.util.system
++
++import com.sun.net.httpserver.HttpExchange
++import com.sun.net.httpserver.HttpServer
++import kotlinx.coroutines.runBlocking
++import okhttp3.Headers
++import okhttp3.OkHttpClient
++import okhttp3.Protocol
++import org.junit.jupiter.api.Assertions.assertEquals
++import org.junit.jupiter.api.Assertions.assertNull
++import org.junit.jupiter.api.Assertions.assertTrue
++import org.junit.jupiter.api.Test
++import java.net.InetSocketAddress
++import java.util.concurrent.CopyOnWriteArrayList
++import java.util.concurrent.Executors
++import java.util.concurrent.atomic.AtomicInteger
++
++class HarmonyCoverHeaderProbeTest {
++
++    private val client = OkHttpClient.Builder()
++        .protocols(listOf(Protocol.HTTP_1_1))
++        .retryOnConnectionFailure(false)
++        .build()
++
++    private val headers = Headers.Builder()
++        .add("Referer", "https://example.test/browse")
++        .add("User-Agent", "cover-probe-test")
++        .build()
++
++    @Test
++    fun `png reads IHDR`() {
++        val png = png(width = 32, height = 48)
++        assertEquals(32 to 48, HarmonyCoverHeaderProbe.parseImageSize(png, png.size))
++        assertEquals(32 to 48, HarmonyCoverHeaderProbe.parseImageSize(png + byteArrayOf(1, 2), png.size))
++        assertNull(HarmonyCoverHeaderProbe.parseImageSize(png, 16))
++    }
++
++    @Test
++    fun `gif reads the logical screen`() {
++        val gif89 = gif(version = "GIF89a", width = 100, height = 40)
++        val gif87 = gif(version = "GIF87a", width = 7, height = 9)
++        assertEquals(100 to 40, HarmonyCoverHeaderProbe.parseImageSize(gif89, gif89.size))
++        assertEquals(7 to 9, HarmonyCoverHeaderProbe.parseImageSize(gif87, gif87.size))
++    }
++
++    @Test
++    fun `webp vp8 reads the keyframe size`() {
++        val image = vp8(width = 320, height = 180)
++        assertEquals(320 to 180, HarmonyCoverHeaderProbe.parseImageSize(image, image.size))
++    }
++
++    @Test
++    fun `webp vp8l reads the lossless size`() {
++        val image = vp8l(width = 100, height = 50)
++        assertEquals(100 to 50, HarmonyCoverHeaderProbe.parseImageSize(image, image.size))
++        val wide = vp8l(width = 200, height = 300)
++        assertEquals(200 to 300, HarmonyCoverHeaderProbe.parseImageSize(wide, wide.size))
++    }
++
++    @Test
++    fun `webp vp8x reads the canvas size`() {
++        val image = vp8x(width = 400, height = 300)
++        assertEquals(400 to 300, HarmonyCoverHeaderProbe.parseImageSize(image, image.size))
++    }
++
++    @Test
++    fun `bmp reads the dib size and a negative height`() {
++        val image = bmp(width = 64, height = 48)
++        assertEquals(64 to 48, HarmonyCoverHeaderProbe.parseImageSize(image, image.size))
++        val topDown = bmp(width = 64, height = -48)
++        assertEquals(64 to 48, HarmonyCoverHeaderProbe.parseImageSize(topDown, topDown.size))
++    }
++
++    @Test
++    fun `jpeg skips an APP1 exif segment that contains a thumbnail`() {
++        val image = jpegWithExifThumbnail(
++            thumbWidth = 10,
++            thumbHeight = 20,
++            width = 480,
++            height = 640,
++            padding = 12_000,
++        )
++        assertEquals(480 to 640, HarmonyCoverHeaderProbe.parseImageSize(image, image.size))
++        // The thumbnail SOF is inside the buffer, but the APP1 length is not finished.
++        val cut = image.copyOf(8_000)
++        assertNull(HarmonyCoverHeaderProbe.parseImageSize(cut, cut.size))
++    }
++
++    @Test
++    fun `jpeg truncated before SOF is null`() {
++        val partial = (soi() + segment(0xE0, ByteArray(200))).copyOf(40)
++        assertNull(HarmonyCoverHeaderProbe.parseImageSize(partial, partial.size))
++        assertNull(HarmonyCoverHeaderProbe.parseImageSize(soi(), soi().size))
++    }
++
++    @Test
++    fun `jpeg does not treat DHT JPG or DAC as SOF and skips fill bytes`() {
++        val fakeSof = byteArrayOf(
++            0x00,
++            0xFF.toByte(),
++            0xC0.toByte(),
++            0x00,
++            0x0B,
++            8,
++            0,
++            1,
++            0,
++            1,
++            1,
++            1,
++            0x11,
++            0,
++        )
++        val withDht = soi() + segment(0xC4, fakeSof) + sof(marker = 0xC0, width = 80, height = 90)
++        assertEquals(80 to 90, HarmonyCoverHeaderProbe.parseImageSize(withDht, withDht.size))
++        for (marker in intArrayOf(0xC4, 0xC8, 0xCC)) {
++            val only = soi() + sof(marker = marker, width = 64, height = 64)
++            assertNull(HarmonyCoverHeaderProbe.parseImageSize(only, only.size))
++        }
++        val progressive = soi() + byteArrayOf(0xFF.toByte()) + sof(marker = 0xC2, width = 30, height = 40)
++        assertEquals(30 to 40, HarmonyCoverHeaderProbe.parseImageSize(progressive, progressive.size))
++    }
++
++    @Test
++    fun `garbage and unknown containers are null`() {
++        assertNull(HarmonyCoverHeaderProbe.parseImageSize(byteArrayOf(0, 1, 2, 3, 4, 5), 6))
++        assertNull(HarmonyCoverHeaderProbe.parseImageSize("ftypavif".encodeToByteArray(), 8))
++        assertNull(HarmonyCoverHeaderProbe.parseImageSize("ftypjxl ".encodeToByteArray(), 8))
++        assertNull(HarmonyCoverHeaderProbe.parseImageSize(ByteArray(0), 0))
++        assertNull(HarmonyCoverHeaderProbe.parseImageSize(byteArrayOf(0xFF.toByte(), 0xD8.toByte(), 0x00), 3))
++    }
++
++    @Test
++    fun `a 200 that ignores Range is not drained`() = runBlocking {
++        val png = png(width = 18, height = 27)
++        val payload = png + ByteArray(256 * 1024)
++        val written = AtomicInteger()
++        val ranges = CopyOnWriteArrayList<String?>()
++        val referers = CopyOnWriteArrayList<String?>()
++        val encodings = CopyOnWriteArrayList<String?>()
++        val server = server { exchange ->
++            try {
++                ranges += exchange.requestHeaders.getFirst("Range")
++                referers += exchange.requestHeaders.getFirst("Referer")
++                encodings += exchange.requestHeaders.getFirst("Accept-Encoding")
++                exchange.sendResponseHeaders(200, payload.size.toLong())
++                val out = exchange.responseBody
++                var offset = 0
++                var paused = false
++                while (offset < payload.size) {
++                    val count = minOf(8 * 1024, payload.size - offset)
++                    out.write(payload, offset, count)
++                    out.flush()
++                    written.addAndGet(count)
++                    offset += count
++                    // Past the header window, wait so an aborted client closes before the rest is sent.
++                    if (!paused && offset >= 64 * 1024) {
++                        paused = true
++                        Thread.sleep(300)
++                    }
++                }
++            } catch (_: Exception) {
++                // The client closed after the header window.
++            }
++        }
++        try {
++            val size = HarmonyCoverHeaderProbe.probe(client, url(server), headers)
++            assertEquals(18 to 27, size)
++            assertEquals(listOf("bytes=0-32767"), ranges)
++            assertEquals(listOf("https://example.test/browse"), referers)
++            assertEquals(listOf("identity"), encodings)
++            val sent = written.get()
++            assertTrue(sent > 0) { "sent=$sent" }
++            assertTrue(sent < payload.size / 2) { "sent=$sent payload=${payload.size}" }
++        } finally {
++            server.stop(0)
++        }
++    }
++
++    @Test
++    fun `jpeg whose SOF is past 32 KB does one follow-up range`() = runBlocking {
++        val image = jpegWithExifThumbnail(
++            thumbWidth = 8,
++            thumbHeight = 8,
++            width = 300,
++            height = 400,
++            padding = 40_000,
++        )
++        val ranges = CopyOnWriteArrayList<String?>()
++        val server = server { exchange ->
++            val range = exchange.requestHeaders.getFirst("Range")
++            ranges += range
++            val spec = range!!.removePrefix("bytes=")
++            val start = spec.substringBefore('-').toInt()
++            val end = spec.substringAfter('-').toInt().coerceAtMost(image.size - 1)
++            val count = end - start + 1
++            exchange.responseHeaders.add("Content-Range", "bytes $start-$end/${image.size}")
++            exchange.sendResponseHeaders(206, count.toLong())
++            exchange.responseBody.write(image, start, count)
++        }
++        try {
++            val size = HarmonyCoverHeaderProbe.probe(client, url(server), headers)
++            assertEquals(300 to 400, size)
++            assertEquals(listOf("bytes=0-32767", "bytes=0-131071"), ranges)
++        } finally {
++            server.stop(0)
++        }
++    }
++
++    private fun url(server: HttpServer) = "http://127.0.0.1:${server.address.port}/cover"
++
++    private fun server(handler: (HttpExchange) -> Unit): HttpServer {
++        val http = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
++        http.createContext("/cover") { exchange ->
++            try {
++                handler(exchange)
++            } finally {
++                exchange.close()
++            }
++        }
++        http.executor = Executors.newCachedThreadPool { runnable ->
++            Thread(runnable, "cover-probe-test").apply { isDaemon = true }
++        }
++        http.start()
++        return http
++    }
++
++    private fun png(width: Int, height: Int): ByteArray {
++        val data = ByteArray(13)
++        putBe32(data, 0, width)
++        putBe32(data, 4, height)
++        return byteArrayOf(0x89.toByte(), 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A) +
++            byteArrayOf(0, 0, 0, 13) +
++            "IHDR".encodeToByteArray() +
++            data +
++            byteArrayOf(0, 0, 0, 0)
++    }
++
++    private fun gif(version: String, width: Int, height: Int): ByteArray {
++        return version.encodeToByteArray() + le16(width) + le16(height) + byteArrayOf(0)
++    }
++
++    private fun webp(fourCc: String, payload: ByteArray): ByteArray {
++        val riffSize = 4 + 8 + payload.size
++        return "RIFF".encodeToByteArray() +
++            le32(riffSize) +
++            "WEBP".encodeToByteArray() +
++            fourCc.encodeToByteArray() +
++            le32(payload.size) +
++            payload
++    }
++
++    private fun vp8(width: Int, height: Int): ByteArray {
++        val payload = ByteArray(10)
++        payload[3] = 0x9D.toByte()
++        payload[4] = 0x01
++        payload[5] = 0x2A
++        payload[6] = width.toByte()
++        payload[7] = (width ushr 8).toByte()
++        payload[8] = height.toByte()
++        payload[9] = (height ushr 8).toByte()
++        return webp("VP8 ", payload)
++    }
++
++    private fun vp8l(width: Int, height: Int): ByteArray {
++        val bits = (width - 1) or ((height - 1) shl 14)
++        return webp(
++            "VP8L",
++            byteArrayOf(
++                0x2F,
++                bits.toByte(),
++                (bits ushr 8).toByte(),
++                (bits ushr 16).toByte(),
++                (bits ushr 24).toByte(),
++            ),
++        )
++    }
++
++    private fun vp8x(width: Int, height: Int): ByteArray {
++        val canvasWidth = width - 1
++        val canvasHeight = height - 1
++        val payload = ByteArray(10)
++        payload[4] = canvasWidth.toByte()
++        payload[5] = (canvasWidth ushr 8).toByte()
++        payload[6] = (canvasWidth ushr 16).toByte()
++        payload[7] = canvasHeight.toByte()
++        payload[8] = (canvasHeight ushr 8).toByte()
++        payload[9] = (canvasHeight ushr 16).toByte()
++        return webp("VP8X", payload)
++    }
++
++    private fun bmp(width: Int, height: Int): ByteArray {
++        val bytes = ByteArray(26)
++        bytes[0] = 'B'.code.toByte()
++        bytes[1] = 'M'.code.toByte()
++        bytes[14] = 40
++        putLe32(bytes, 18, width)
++        putLe32(bytes, 22, height)
++        return bytes
++    }
++
++    private fun jpegWithExifThumbnail(
++        thumbWidth: Int,
++        thumbHeight: Int,
++        width: Int,
++        height: Int,
++        padding: Int,
++    ): ByteArray {
++        val thumbnail = soi() + sof(marker = 0xC0, width = thumbWidth, height = thumbHeight)
++        val payload = "Exif\u0000\u0000".encodeToByteArray() + thumbnail + ByteArray(padding)
++        return soi() + segment(marker = 0xE1, payload) + sof(marker = 0xC0, width = width, height = height)
++    }
++
++    private fun soi(): ByteArray = byteArrayOf(0xFF.toByte(), 0xD8.toByte())
++
++    private fun sof(marker: Int, width: Int, height: Int): ByteArray {
++        return segment(
++            marker = marker,
++            payload = byteArrayOf(
++                8,
++                (height ushr 8).toByte(),
++                (height and 0xFF).toByte(),
++                (width ushr 8).toByte(),
++                (width and 0xFF).toByte(),
++                1,
++                1,
++                0x11,
++                0,
++            ),
++        )
++    }
++
++    private fun segment(marker: Int, payload: ByteArray): ByteArray {
++        val length = payload.size + 2
++        require(length <= 0xFFFF)
++        return byteArrayOf(
++            0xFF.toByte(),
++            marker.toByte(),
++            (length ushr 8).toByte(),
++            (length and 0xFF).toByte(),
++        ) + payload
++    }
++
++    private fun le16(value: Int): ByteArray {
++        return byteArrayOf(value.toByte(), (value ushr 8).toByte())
++    }
++
++    private fun le32(value: Int): ByteArray {
++        return byteArrayOf(
++            value.toByte(),
++            (value ushr 8).toByte(),
++            (value ushr 16).toByte(),
++            (value ushr 24).toByte(),
++        )
++    }
++
++    private fun putBe32(bytes: ByteArray, offset: Int, value: Int) {
++        bytes[offset] = (value ushr 24).toByte()
++        bytes[offset + 1] = (value ushr 16).toByte()
++        bytes[offset + 2] = (value ushr 8).toByte()
++        bytes[offset + 3] = value.toByte()
++    }
++
++    private fun putLe32(bytes: ByteArray, offset: Int, value: Int) {
++        bytes[offset] = value.toByte()
++        bytes[offset + 1] = (value ushr 8).toByte()
++        bytes[offset + 2] = (value ushr 16).toByte()
++        bytes[offset + 3] = (value ushr 24).toByte()
++    }
++}
