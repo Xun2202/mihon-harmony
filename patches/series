@@ -34,3 +34,7 @@
 0034-presentation-panorama-exact-scroll-delta.patch
 0035-presentation-fast-scroller-hold-to-grab.patch
 0036-app-scroll-performance-recorder.patch
+0037-app-scroll-recorder-drop-counts-and-toggles.patch
+0038-presentation-panorama-defer-shapes-while-scrolling.patch
+0039-presentation-panorama-prefetch-cover-headers.patch
+0040-presentation-panorama-masonry-append-pages.patch

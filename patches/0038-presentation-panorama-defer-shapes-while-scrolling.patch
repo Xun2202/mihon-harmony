@@ -1,0 +1,313 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Xun2202 <98207886+Xun2202@users.noreply.github.com>
+Date: Wed, 14 Oct 2026 15:04:43 +0000
+Subject: [PATCH] presentation: panorama shapes learnt while scrolling wait for
+ the grid to settle
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+A browse fling through covers that have not been seen before commits each
+tall ratio as soon as Coil reports it. The placeholder is 9/16, which is
+wide, so the first tall commit bumped PanoramaMasonryContentEpoch while
+the finger was still down. Each bump is a structural masonry relayout,
+16-20 ms, and the frames dropped to 53-62% of animation ticks while new
+covers loaded. Several Coil callbacks in one frame each wrote the epoch.
+
+A first commit whose band differs from that placeholder now waits in
+pendingCross until every panorama grid has settled, then one flush
+commits them and bumps the epoch once. A first commit on the same side
+of 0.75 still commits immediately and does not bump. When no grid is
+scrolling, a first tall commit still commits in that flush.
+
+Flushes are posted instead of run inline. The Android dispatcher posts
+one main-looper message; further puts in that burst see flushQueued and
+do not post again. Tests install a dispatcher whose post runs the block
+immediately, or queues it, so the flush stays deterministic.
+
+与 anikku-harmony 0025 / 0027 同一段代码，Anikku 侧待移植。
+---
+ .../library/components/PanoramaCoverShapes.kt | 84 ++++++++++++++++---
+ .../components/PanoramaCoverShapesTest.kt     | 77 +++++++++++++++++
+ 2 files changed, 149 insertions(+), 12 deletions(-)
+
+diff --git a/app/src/main/java/eu/kanade/presentation/library/components/PanoramaCoverShapes.kt b/app/src/main/java/eu/kanade/presentation/library/components/PanoramaCoverShapes.kt
+index 2f6ada6..c039695 100644
+--- a/app/src/main/java/eu/kanade/presentation/library/components/PanoramaCoverShapes.kt
++++ b/app/src/main/java/eu/kanade/presentation/library/components/PanoramaCoverShapes.kt
+@@ -1,6 +1,7 @@
+ package eu.kanade.presentation.library.components
+ 
+ import android.graphics.BitmapFactory
++import android.os.Handler
+ import android.os.Looper
+ import androidx.compose.runtime.Composable
+ import androidx.compose.runtime.DisposableEffect
+@@ -12,6 +13,7 @@ import androidx.compose.runtime.mutableIntStateOf
+ import androidx.compose.runtime.mutableStateOf
+ import androidx.compose.runtime.remember
+ import androidx.compose.runtime.rememberUpdatedState
++import androidx.compose.runtime.setValue
+ import androidx.compose.runtime.snapshotFlow
+ import androidx.compose.ui.platform.LocalContext
+ import coil3.imageLoader
+@@ -119,13 +121,18 @@ internal interface PanoramaSnapshotDispatcher {
+ }
+ 
+ private object AndroidSnapshotDispatcher : PanoramaSnapshotDispatcher {
++    // Harmony: created on first flush. Touching Looper at class init breaks JVM unit tests.
++    private val mainHandler by lazy { Handler(Looper.getMainLooper()) }
++
+     override fun isOwnerThread(): Boolean {
+         val looper = Looper.myLooper()
+         return looper != null && looper === Looper.getMainLooper()
+     }
+ 
+     override fun post(block: () -> Unit) {
+-        PanoramaCoverShapes.postToOwner(block)
++        // One looper message per flush. Further puts see flushQueued and do not post again,
++        // so a burst of Coil callbacks becomes a single epoch write.
++        mainHandler.post(block)
+     }
+ }
+ 
+@@ -135,7 +142,18 @@ object PanoramaCoverShapes {
+     private val pendingCross = HashMap<Long, Float>()
+     private val pendingIds = LinkedHashSet<Long>()
+     private val scrollingGrids = HashSet<Any>()
++
++    /** Live isScrollInProgress, read at flush time. The settled flag lags that by a frame. */
++    private val scrollProbes = HashMap<Any, () -> Boolean>()
+     private val stored = LinkedHashMap<Long, Float>()
++
++    /**
++     * True while any panorama grid has not settled. Prefetch reads this so it can pause
++     * enqueueing for the whole gesture, including the settle delay.
++     */
++    internal var anyGridScrolling by mutableStateOf(false)
++        private set
++
+     private val gate = Any()
+     private val ready = CompletableDeferred<Unit>()
+     private val earlyFlush = ArrayList<() -> Unit>()
+@@ -255,14 +273,29 @@ object PanoramaCoverShapes {
+     }
+ 
+     internal fun setGridScrolling(token: Any, scrolling: Boolean) {
+-        val flush = synchronized(gate) {
++        val (flush, scrollingNow) = synchronized(gate) {
+             val wasSettled = scrollingGrids.isEmpty()
+             if (scrolling) scrollingGrids.add(token) else scrollingGrids.remove(token)
+-            !wasSettled && scrollingGrids.isEmpty()
++            val nowScrolling = scrollingGrids.isNotEmpty()
++            (!wasSettled && !nowScrolling) to nowScrolling
+         }
++        if (anyGridScrolling != scrollingNow) anyGridScrolling = scrollingNow
+         if (flush) scheduleFlush()
+     }
+ 
++    /**
++     * [scrollingNow] is read on the owner thread from [runFlush]. It must not re-enter
++     * [PanoramaCoverShapes]. A true result holds a cross-band commit the same way a scrolling
++     * grid does, including the frame before [setGridScrolling] has seen the gesture.
++     */
++    internal fun attachScrollProbe(token: Any, scrollingNow: () -> Boolean) {
++        synchronized(gate) { scrollProbes[token] = scrollingNow }
++    }
++
++    internal fun detachScrollProbe(token: Any) {
++        synchronized(gate) { scrollProbes.remove(token) }
++    }
++
+     internal fun resetForTest() {
+         synchronized(gate) {
+             learnt.clear()
+@@ -270,6 +303,7 @@ object PanoramaCoverShapes {
+             pendingCross.clear()
+             pendingIds.clear()
+             scrollingGrids.clear()
++            scrollProbes.clear()
+             stored.clear()
+             earlyFlush.clear()
+             flushQueued = false
+@@ -281,6 +315,7 @@ object PanoramaCoverShapes {
+             persistJob = null
+             persistScope = null
+         }
++        anyGridScrolling = false
+         snapshotDispatcher = AndroidSnapshotDispatcher
+         PanoramaMasonryContentEpoch.intValue = 0
+         committedShapeVersion.intValue = 0
+@@ -424,18 +459,16 @@ object PanoramaCoverShapes {
+             if (flushQueued) return
+             flushQueued = true
+         }
+-        val dispatcher = snapshotDispatcher
+-        if (dispatcher.isOwnerThread()) {
+-            runFlush()
+-        } else {
+-            dispatcher.post { runFlush() }
+-        }
++        // Harmony: never run the flush inline. Tests install a dispatcher whose post runs
++        // the block immediately, so they stay deterministic. Production posts one main-looper
++        // message and collapses every other put until that message runs.
++        snapshotDispatcher.post { runFlush() }
+     }
+ 
+     private fun runFlush() {
+         val bump = synchronized(gate) {
+             flushQueued = false
+-            applyPending(scrollingGrids.isEmpty())
++            applyPending(!gridScrollingNow())
+         }
+         // Harmony: one epoch for the whole batch. Same-band edits do not reach this write.
+         if (bump) PanoramaMasonryContentEpoch.intValue++
+@@ -443,6 +476,15 @@ object PanoramaCoverShapes {
+         committedShapeVersion.intValue++
+     }
+ 
++    /** Caller holds [gate]. A probe reads scroll state and must not re-enter. */
++    private fun gridScrollingNow(): Boolean {
++        if (scrollingGrids.isNotEmpty()) return true
++        for (probe in scrollProbes.values) {
++            if (probe()) return true
++        }
++        return false
++    }
++
+     /** Caller holds [gate]. Returns whether a wide/tall band changed. */
+     private fun applyPending(settled: Boolean): Boolean {
+         var bump = false
+@@ -452,10 +494,21 @@ object PanoramaCoverShapes {
+             val known = learnt[id] ?: continue
+             val current = committed[id]
+             if (current == null) {
+-                committed[id] = known
+-                if (!sameBand(known, WIDE_COVER_RATIO)) bump = true
++                // Harmony: the cell is still the wide placeholder. Committing a tall ratio here
++                // bumps the layout epoch and relayouts every lane under the finger.
++                if (sameBand(known, WIDE_COVER_RATIO)) {
++                    committed[id] = known
++                    pendingCross.remove(id)
++                } else if (settled) {
++                    committed[id] = known
++                    pendingCross.remove(id)
++                    bump = true
++                } else {
++                    pendingCross[id] = known
++                }
+             } else if (sameBand(current, known)) {
+                 committed[id] = known
++                pendingCross.remove(id)
+             } else if (settled) {
+                 committed[id] = known
+                 pendingCross.remove(id)
+@@ -523,6 +576,13 @@ object PanoramaCoverShapes {
+ fun rememberPanoramaGridSettled(isScrollInProgress: () -> Boolean): () -> Boolean {
+     val settled = remember { mutableStateOf(true) }
+     val scrolling by rememberUpdatedState(isScrollInProgress)
++    val token = remember { Any() }
++    // Settled follows isScrollInProgress by a frame, then the settle delay. The probe is the
++    // scroll state itself, so a flush posted in that gap still sees the gesture.
++    DisposableEffect(token) {
++        PanoramaCoverShapes.attachScrollProbe(token) { scrolling() }
++        onDispose { PanoramaCoverShapes.detachScrollProbe(token) }
++    }
+     LaunchedEffect(Unit) {
+         snapshotFlow { scrolling() }.collectLatest { inProgress ->
+             if (inProgress) {
+diff --git a/app/src/test/java/eu/kanade/presentation/library/components/PanoramaCoverShapesTest.kt b/app/src/test/java/eu/kanade/presentation/library/components/PanoramaCoverShapesTest.kt
+index 195c478..9034e10 100644
+--- a/app/src/test/java/eu/kanade/presentation/library/components/PanoramaCoverShapesTest.kt
++++ b/app/src/test/java/eu/kanade/presentation/library/components/PanoramaCoverShapesTest.kt
+@@ -2,6 +2,7 @@ package eu.kanade.presentation.library.components
+ 
+ import org.junit.jupiter.api.Assertions.assertEquals
+ import org.junit.jupiter.api.Assertions.assertFalse
++import org.junit.jupiter.api.Assertions.assertNull
+ import org.junit.jupiter.api.Assertions.assertTrue
+ import org.junit.jupiter.api.BeforeEach
+ import org.junit.jupiter.api.Test
+@@ -63,6 +64,82 @@ class PanoramaCoverShapesTest {
+         assertEquals(epoch + 1, PanoramaMasonryContentEpoch.intValue)
+         assertFalse(committedCoverIsWide(3L))
+     }
++
++    @Test
++    fun `a first tall commit while scrolling waits for settle and bumps once`() {
++        val epoch = PanoramaMasonryContentEpoch.intValue
++        val token = Any()
++        PanoramaCoverShapes.setGridScrolling(token, scrolling = true)
++        PanoramaCoverShapes.put(4L, 1.50f)
++        PanoramaCoverShapes.put(5L, 1.70f)
++        PanoramaCoverShapes.put(6L, 0.50f)
++        assertEquals(epoch, PanoramaMasonryContentEpoch.intValue)
++        assertNull(PanoramaCoverShapes.committedRatioOrNull(4L))
++        assertNull(PanoramaCoverShapes.committedRatioOrNull(5L))
++        assertEquals(WIDE_COVER_RATIO, PanoramaCoverShapes.committedRatio(4L))
++        assertEquals(WIDE_COVER_RATIO, PanoramaCoverShapes.committedRatio(5L))
++        assertTrue(committedCoverIsWide(4L))
++        assertTrue(committedCoverIsWide(5L))
++        assertEquals(0.50f, PanoramaCoverShapes.committedRatio(6L))
++        assertTrue(committedCoverIsWide(6L))
++
++        PanoramaCoverShapes.setGridScrolling(token, scrolling = false)
++        assertEquals(epoch + 1, PanoramaMasonryContentEpoch.intValue)
++        assertEquals(1.50f, PanoramaCoverShapes.committedRatio(4L))
++        assertEquals(1.70f, PanoramaCoverShapes.committedRatio(5L))
++        assertFalse(committedCoverIsWide(4L))
++        assertFalse(committedCoverIsWide(5L))
++    }
++
++    @Test
++    fun `a first tall commit while no grid is scrolling commits immediately`() {
++        val epoch = PanoramaMasonryContentEpoch.intValue
++        PanoramaCoverShapes.put(7L, 1.40f)
++        assertEquals(epoch + 1, PanoramaMasonryContentEpoch.intValue)
++        assertEquals(1.40f, PanoramaCoverShapes.committedRatio(7L))
++        assertFalse(committedCoverIsWide(7L))
++    }
++
++    @Test
++    fun `puts on the owner thread collapse into one flush`() {
++        val posted = ArrayList<() -> Unit>()
++        PanoramaCoverShapes.snapshotDispatcher = object : PanoramaSnapshotDispatcher {
++            override fun isOwnerThread(): Boolean = true
++
++            override fun post(block: () -> Unit) {
++                posted.add(block)
++            }
++        }
++        PanoramaCoverShapes.put(8L, 1.50f)
++        PanoramaCoverShapes.put(9L, 1.60f)
++        assertEquals(1, posted.size)
++        assertTrue(committedCoverIsWide(8L))
++        assertTrue(committedCoverIsWide(9L))
++        val epoch = PanoramaMasonryContentEpoch.intValue
++        posted.single().invoke()
++        assertEquals(epoch + 1, PanoramaMasonryContentEpoch.intValue)
++        assertEquals(1.50f, PanoramaCoverShapes.committedRatio(8L))
++        assertEquals(1.60f, PanoramaCoverShapes.committedRatio(9L))
++    }
++
++    @Test
++    fun `a live scroll probe holds a tall commit before the settled flag flips`() {
++        val epoch = PanoramaMasonryContentEpoch.intValue
++        var inProgress = true
++        val token = Any()
++        PanoramaCoverShapes.attachScrollProbe(token) { inProgress }
++        PanoramaCoverShapes.put(20L, 1.55f)
++        assertEquals(epoch, PanoramaMasonryContentEpoch.intValue)
++        assertNull(PanoramaCoverShapes.committedRatioOrNull(20L))
++        assertTrue(committedCoverIsWide(20L))
++
++        inProgress = false
++        PanoramaCoverShapes.put(21L, 0.40f)
++        assertEquals(epoch + 1, PanoramaMasonryContentEpoch.intValue)
++        assertEquals(1.55f, PanoramaCoverShapes.committedRatio(20L))
++        assertFalse(committedCoverIsWide(20L))
++        assertEquals(0.40f, PanoramaCoverShapes.committedRatio(21L))
++    }
+ }
+ 
+ private object ImmediateSnapshotDispatcher : PanoramaSnapshotDispatcher {

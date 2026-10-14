@@ -1,0 +1,562 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Xun2202 <98207886+Xun2202@users.noreply.github.com>
+Date: Wed, 14 Oct 2026 15:05:24 +0000
+Subject: [PATCH] presentation: panorama masonry appends pages without a full
+ relayout
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Each paging page builds a new items lambda. The layout epoch mixed the
+shape-table version with that lambda's identity, so the cache could not
+append: every page, and every loading-footer add or remove, rebuilt the
+whole shelf. That structural relayout was 16-20 ms mid-fling, and frames
+dropped to 53-62% of animation ticks while new covers loaded.
+
+The high 32 bits stay the shape table. A longer list with those bits
+unchanged appends when the keys already laid out still match, even if
+the lambda is a new instance. One changed key at the old end, the
+loading footer swapping for the next page, is placed again and the cells
+above it stay. A change before that prefix rebuilds. The same count with
+a new lambda still rebuilds, so a lambda on every coast frame keeps
+eating the fling.
+
+与 anikku-harmony 0030 同一段代码，Anikku 侧待移植。
+---
+ .../core/components/PanoramaMasonry.kt        |  42 ++++
+ .../core/components/PanoramaMasonryLayout.kt  | 147 ++++++++++-
+ .../components/PanoramaMasonryLayoutTest.kt   | 236 ++++++++++++++++++
+ 3 files changed, 418 insertions(+), 7 deletions(-)
+
+diff --git a/presentation-core/src/main/java/tachiyomi/presentation/core/components/PanoramaMasonry.kt b/presentation-core/src/main/java/tachiyomi/presentation/core/components/PanoramaMasonry.kt
+index 2db5ef0..e051967 100644
+--- a/presentation-core/src/main/java/tachiyomi/presentation/core/components/PanoramaMasonry.kt
++++ b/presentation-core/src/main/java/tachiyomi/presentation/core/components/PanoramaMasonry.kt
+@@ -147,6 +147,10 @@ class PanoramaMasonryState {
+     var firstVisibleItemIndex by mutableIntStateOf(0)
+         internal set
+ 
++    /** Last cell index that intersects the viewport, inclusive. */
++    var lastVisibleItemIndex by mutableIntStateOf(0)
++        internal set
++
+     var firstVisibleItemScrollOffset by mutableIntStateOf(0)
+         internal set
+ 
+@@ -280,6 +284,13 @@ class PanoramaMasonryState {
+             firstVisibleItemIndex = 0
+             firstVisibleItemScrollOffset = 0
+         }
++        lastVisibleItemIndex = lastVisibleItemIndex(
++            rects = rects,
++            scrollPx = scrollPx,
++            viewport = viewport,
++            topPadding = topPadding,
++            firstVisible = firstVisibleItemIndex,
++        )
+         canScrollBackward = scroll > 0.5f
+         canScrollForward = scroll < max - 0.5f
+     }
+@@ -450,11 +461,36 @@ private object RestoreIndexOnly
+ /**
+  * High 32 bits are the shape-table version. Low 32 bits are the items-lambda identity.
+  * Lane widths are not included; the layout cache compares them on their own.
++ *
++ * Harmony: a longer list whose shape bits match can append when the laid-out prefix keys still
++ * match, even if the lambda is a new instance. The same count with a new identity is still a new
++ * epoch and is laid out again.
+  */
+ internal fun panoramaContentEpoch(shapeEpoch: Int, intervals: Any): Long {
+     return (shapeEpoch.toLong() shl 32) xor System.identityHashCode(intervals).toLong().and(0xffffffffL)
+ }
+ 
++/** Largest index whose cell intersects the viewport, or [firstVisible] when none does. */
++private fun lastVisibleItemIndex(
++    rects: List<PanoramaMasonryRect>,
++    scrollPx: Int,
++    viewport: Int,
++    topPadding: Int,
++    firstVisible: Int,
++): Int {
++    if (rects.isEmpty()) return firstVisible
++    val viewBottom = scrollPx + viewport
++    var last = firstVisible
++    for (rect in rects) {
++        val top = topPadding + rect.y
++        val bottom = top + rect.height
++        if (bottom > scrollPx && top < viewBottom && rect.index > last) {
++            last = rect.index
++        }
++    }
++    return last
++}
++
+ private fun sameKeyList(left: List<Any>, right: List<Any>): Boolean {
+     if (left === right) return true
+     if (left.size != right.size) return false
+@@ -687,6 +723,8 @@ private fun LazyLayoutMeasureScope.measureMasonry(
+     }
+ 
+     val rtl = direction == LayoutDirection.Rtl
++    // Harmony: previous frame's keys. A new items lambda can append when this prefix still matches.
++    val previousKeys = state.lastKeys
+     val masonry = if (laneCount == 0 || count == 0) {
+         state.layoutCache.layout(
+             count = 0,
+@@ -696,6 +734,8 @@ private fun LazyLayoutMeasureScope.measureMasonry(
+             verticalSpacing = verticalPx,
+             horizontalSpacing = horizontalPx,
+             rtl = rtl,
++            keyAt = { index -> intervals.getKey(index) },
++            previousKeys = previousKeys,
+         )
+     } else {
+         state.layoutCache.layout(
+@@ -707,6 +747,8 @@ private fun LazyLayoutMeasureScope.measureMasonry(
+             verticalSpacing = verticalPx,
+             horizontalSpacing = horizontalPx,
+             rtl = rtl,
++            keyAt = { index -> intervals.getKey(index) },
++            previousKeys = previousKeys,
+         )
+     }
+ 
+diff --git a/presentation-core/src/main/java/tachiyomi/presentation/core/components/PanoramaMasonryLayout.kt b/presentation-core/src/main/java/tachiyomi/presentation/core/components/PanoramaMasonryLayout.kt
+index 3d0c696..8de0b7a 100644
+--- a/presentation-core/src/main/java/tachiyomi/presentation/core/components/PanoramaMasonryLayout.kt
++++ b/presentation-core/src/main/java/tachiyomi/presentation/core/components/PanoramaMasonryLayout.kt
+@@ -399,17 +399,97 @@ fun appendPanoramaMasonry(
+     )
+ }
+ 
++/**
++ * Keeps [previous] through [fromIndex] and places the rest again.
++ * Lane bottoms are rebuilt from the kept rectangles, so a trailing footer can be replaced
++ * without moving the cells above it.
++ */
++private fun relayoutPanoramaTail(
++    previous: PanoramaMasonryLayout,
++    fromIndex: Int,
++    count: Int,
++    spanOf: (Int) -> PanoramaSpan,
++    heightOf: (index: Int, widthPx: Int) -> Int,
++    pairPick: PanoramaPairPick = PANORAMA_PAIR_PICK,
++): PanoramaMasonryLayout {
++    val kept = fromIndex.coerceIn(0, previous.rects.size)
++    val rects = ArrayList<PanoramaMasonryRect>(count)
++    var contentHeight = 0
++    for (index in 0 until kept) {
++        val rect = previous.rects[index]
++        rects.add(rect)
++        val bottom = rect.y + rect.height
++        if (bottom > contentHeight) contentHeight = bottom
++    }
++    val bottoms = laneBottomsBefore(previous, kept)
++    val contentWidth = previous.contentWidth
++    for (index in kept until count) {
++        val rect = placeItem(
++            index = index,
++            span = spanOf(index),
++            heightOf = heightOf,
++            laneWidths = previous.laneWidths,
++            offsets = previous.laneOffsets,
++            bottoms = bottoms,
++            contentWidth = contentWidth,
++            verticalSpacing = previous.verticalSpacing,
++            horizontalSpacing = previous.horizontalSpacing,
++            pairPick = pairPick,
++        )
++        rects.add(rect)
++        val bottom = rect.y + rect.height
++        if (bottom > contentHeight) contentHeight = bottom
++    }
++    return PanoramaMasonryLayout(
++        laneWidths = previous.laneWidths,
++        laneOffsets = previous.laneOffsets,
++        verticalSpacing = previous.verticalSpacing,
++        horizontalSpacing = previous.horizontalSpacing,
++        rtl = previous.rtl,
++        rects = rects,
++        laneBottoms = bottoms,
++        contentHeight = contentHeight,
++    )
++}
++
++/** Lane bottoms after [end] items, including the spacing that follows each lane's last item. */
++private fun laneBottomsBefore(previous: PanoramaMasonryLayout, end: Int): IntArray {
++    val bottoms = IntArray(previous.laneWidths.size)
++    val spacing = previous.verticalSpacing
++    val limit = end.coerceIn(0, previous.rects.size)
++    for (index in 0 until limit) {
++        val rect = previous.rects[index]
++        val laneEnd = rect.y + rect.height + spacing
++        if (rect.fullLine) {
++            for (lane in bottoms.indices) bottoms[lane] = laneEnd
++            continue
++        }
++        val occupied = panoramaLaneSpan(rect.span, bottoms.size).coerceAtLeast(1)
++        for (offset in 0 until occupied) {
++            val lane = rect.lane + offset
++            if (lane in bottoms.indices && laneEnd > bottoms[lane]) bottoms[lane] = laneEnd
++        }
++    }
++    return bottoms
++}
++
+ /**
+  * Remembers a layout.
+  *
+  * Same [contentEpoch], lane geometry, and [count] returns the previous layout and does not call
+- * [heightOf] or [spanOf]. A longer list with that same epoch appends. Anything else rebuilds and
+- * reports [structuralChange] so the viewport can stay on its anchor in the same measure.
++ * [heightOf] or [spanOf]. A longer list with that same epoch appends when [keyAt] and
++ * [previousKeys] are not passed, or when those keys still match the prefix. A changed prefix
++ * rebuilds. Anything else rebuilds and reports [structuralChange] so the viewport can stay on its
++ * anchor in the same measure.
+  *
+- * Harmony: the epoch replaces the per-item prefix check. Scroll frames keep the epoch, so a large
+- * shelf does not allocate a height for every row. Callers bump it when a committed cover crosses
+- * the wide/tall band or the items lambda changes. Lane widths are compared on their own and always
+- * rebuild, including when a wide cover starts or stops spanning two lanes.
++ * Harmony: the high 32 bits of [contentEpoch] are the shape table and the low 32 bits are the
++ * items-lambda identity. Scroll frames keep both, so a large shelf does not allocate a height for
++ * every row. A longer list with the same shape bits appends when [previousKeys] still match the
++ * keys [keyAt] reports for that prefix, so a new paging lambda does not relayout the cells already
++ * placed. One changed key at the old end (a loading footer swapping for the next page) is placed
++ * again; a change before that rebuilds. The same count with a new identity still rebuilds.
++ * Lane widths are compared on their own and always rebuild, including when a wide cover starts
++ * or stops spanning two lanes.
+  */
+ class PanoramaMasonryLayoutCache {
+     private var layout: PanoramaMasonryLayout? = null
+@@ -432,6 +512,8 @@ class PanoramaMasonryLayoutCache {
+         verticalSpacing: Int,
+         horizontalSpacing: Int,
+         rtl: Boolean,
++        keyAt: ((Int) -> Any)? = null,
++        previousKeys: List<Any>? = null,
+     ): PanoramaMasonryLayout {
+         val previous = layout
+         val sameGeometry = previous != null &&
+@@ -440,15 +522,39 @@ class PanoramaMasonryLayoutCache {
+             rtl == this.rtl &&
+             this.laneWidths.contentEquals(laneWidths)
+         val sameEpoch = previous != null && contentEpoch == this.contentEpoch
++        val sameShape = previous != null && shapeEpoch(contentEpoch) == shapeEpoch(this.contentEpoch)
+         val result = when {
+             previous != null && sameGeometry && sameEpoch && count == this.count -> {
+                 structuralChange = false
+                 previous
+             }
+-            previous != null && sameGeometry && sameEpoch && count > previous.rects.size -> {
++            previous != null && sameGeometry && sameEpoch && count > previous.rects.size &&
++                (keyAt == null || previousKeys == null) -> {
+                 structuralChange = false
+                 appendPanoramaMasonry(previous, count, spanOf, heightOf)
+             }
++            previous != null && sameGeometry && sameShape && count > previous.rects.size -> {
++                val from = restartIndex(previous, previousKeys, keyAt)
++                if (from > 0) {
++                    structuralChange = false
++                    if (from >= previous.rects.size) {
++                        appendPanoramaMasonry(previous, count, spanOf, heightOf)
++                    } else {
++                        relayoutPanoramaTail(previous, from, count, spanOf, heightOf)
++                    }
++                } else {
++                    structuralChange = true
++                    layoutPanoramaMasonry(
++                        count = count,
++                        spanOf = spanOf,
++                        heightOf = heightOf,
++                        laneWidths = laneWidths,
++                        verticalSpacing = verticalSpacing,
++                        horizontalSpacing = horizontalSpacing,
++                        rtl = rtl,
++                    )
++                }
++            }
+             else -> {
+                 structuralChange = previous != null
+                 layoutPanoramaMasonry(
+@@ -473,6 +579,33 @@ class PanoramaMasonryLayoutCache {
+     }
+ }
+ 
++/** High 32 bits of [panoramaContentEpoch]. Small test epochs share shape 0. */
++private fun shapeEpoch(contentEpoch: Long): Long = contentEpoch ushr 32
++
++/**
++ * Index to place from, or -1 when the prefix is not reusable.
++ * [previousKeys] is the list aligned with [previous].rects. A full match appends after it.
++ * A mismatch only on the last key redoes that one cell. Anything earlier rebuilds.
++ */
++private fun restartIndex(
++    previous: PanoramaMasonryLayout,
++    previousKeys: List<Any>?,
++    keyAt: ((Int) -> Any)?,
++): Int {
++    if (previousKeys == null || keyAt == null) return -1
++    val oldCount = previous.rects.size
++    if (oldCount == 0 || previousKeys.size != oldCount) return -1
++    var mismatch = oldCount
++    for (index in 0 until oldCount) {
++        if (keyAt(index) != previousKeys[index]) {
++            mismatch = index
++            break
++        }
++    }
++    if (mismatch < oldCount - 1) return -1
++    return mismatch
++}
++
+ /**
+  * First item, in index order, whose bottom is past the viewport top.
+  */
+diff --git a/presentation-core/src/test/java/tachiyomi/presentation/core/components/PanoramaMasonryLayoutTest.kt b/presentation-core/src/test/java/tachiyomi/presentation/core/components/PanoramaMasonryLayoutTest.kt
+index 15d437a..3e45768 100644
+--- a/presentation-core/src/test/java/tachiyomi/presentation/core/components/PanoramaMasonryLayoutTest.kt
++++ b/presentation-core/src/test/java/tachiyomi/presentation/core/components/PanoramaMasonryLayoutTest.kt
+@@ -164,6 +164,242 @@ class PanoramaMasonryLayoutTest {
+         assertEquals(first.rects.map { it.y }, appended.rects.take(head.size).map { it.y })
+     }
+ 
++    @Test
++    fun `rows inserted at the front with the same epoch rebuild instead of appending`() {
++        val cache = PanoramaMasonryLayoutCache()
++        val lanes = intArrayOf(100, 100)
++        val epoch = 11L
++        val firstKeys = listOf("a", "b", "c", "d")
++        cache.layout(
++            count = firstKeys.size,
++            contentEpoch = epoch,
++            heightOf = { _, _ -> 100 },
++            laneWidths = lanes,
++            verticalSpacing = 0,
++            horizontalSpacing = 0,
++            rtl = false,
++            keyAt = { firstKeys[it] },
++        )
++        assertFalse(cache.structuralChange)
++        val secondKeys = listOf("new", "a", "b", "c", "d")
++        fun height(index: Int): Int = if (index == 0) 200 else 100
++        var probedFirst = false
++        val rebuilt = cache.layout(
++            count = secondKeys.size,
++            contentEpoch = epoch,
++            heightOf = { index, _ ->
++                if (index == 0) probedFirst = true
++                height(index)
++            },
++            laneWidths = lanes,
++            verticalSpacing = 0,
++            horizontalSpacing = 0,
++            rtl = false,
++            keyAt = { secondKeys[it] },
++            previousKeys = firstKeys,
++        )
++        assertTrue(cache.structuralChange)
++        assertTrue(probedFirst)
++        assertEquals(200, rebuilt.rects[0].height)
++        val full = layoutPanoramaMasonry(
++            count = secondKeys.size,
++            heightOf = { index, _ -> height(index) },
++            laneWidths = lanes,
++            verticalSpacing = 0,
++            horizontalSpacing = 0,
++        )
++        assertEquals(full.rects.map { it.y }, rebuilt.rects.map { it.y })
++        assertEquals(full.rects.map { it.height }, rebuilt.rects.map { it.height })
++    }
++
++    @Test
++    fun `appending items with a new lambda keeps the prefix and is not structural`() {
++        val head = intArrayOf(252, 112, 112, 252)
++        val tail = intArrayOf(112, 252, 112, 112)
++        val all = head + tail
++        val keys = List(all.size) { "item-$it" }
++        val shape = 4
++        val firstEpoch = panoramaContentEpoch(shape, Any())
++        val secondEpoch = panoramaContentEpoch(shape, Any())
++        assertNotEquals(firstEpoch, secondEpoch)
++        assertEquals(firstEpoch ushr 32, secondEpoch ushr 32)
++        val cache = PanoramaMasonryLayoutCache()
++        val lanes = intArrayOf(100, 100)
++        var probedBeforeEnd = 0
++        val first = cache.layout(
++            count = head.size,
++            contentEpoch = firstEpoch,
++            heightOf = { index, _ -> head[index] },
++            laneWidths = lanes,
++            verticalSpacing = 4,
++            horizontalSpacing = 4,
++            rtl = false,
++            keyAt = { keys[it] },
++        )
++        assertFalse(cache.structuralChange)
++        val appended = cache.layout(
++            count = all.size,
++            contentEpoch = secondEpoch,
++            heightOf = { index, _ ->
++                if (index < head.size) probedBeforeEnd++
++                all[index]
++            },
++            laneWidths = lanes,
++            verticalSpacing = 4,
++            horizontalSpacing = 4,
++            rtl = false,
++            keyAt = { keys[it] },
++            previousKeys = keys.take(head.size),
++        )
++        assertFalse(cache.structuralChange)
++        assertEquals(0, probedBeforeEnd)
++        val full = layoutFixed(all, lanes = 2, spacing = 4)
++        assertEquals(full.contentHeight, appended.contentHeight)
++        assertEquals(full.rects.map { it.y }, appended.rects.map { it.y })
++        assertEquals(first.rects.map { it.y }, appended.rects.take(head.size).map { it.y })
++    }
++
++    @Test
++    fun `a new lambda that replaces the trailing footer keeps the cells above it`() {
++        val firstKeys = listOf("a", "b", "c", "footer")
++        val secondKeys = listOf("a", "b", "c", "d", "e", "footer")
++        fun height(key: String): Int = if (key == "footer") 72 else 140
++        val shape = 2
++        val cache = PanoramaMasonryLayoutCache()
++        val lanes = intArrayOf(100, 100)
++        val first = cache.layout(
++            count = firstKeys.size,
++            contentEpoch = panoramaContentEpoch(shape, Any()),
++            heightOf = { index, _ -> height(firstKeys[index]) },
++            laneWidths = lanes,
++            verticalSpacing = 4,
++            horizontalSpacing = 4,
++            rtl = false,
++            keyAt = { firstKeys[it] },
++        )
++        var probedAbove = 0
++        val replaced = cache.layout(
++            count = secondKeys.size,
++            contentEpoch = panoramaContentEpoch(shape, Any()),
++            heightOf = { index, _ ->
++                if (index < 3) probedAbove++
++                height(secondKeys[index])
++            },
++            laneWidths = lanes,
++            verticalSpacing = 4,
++            horizontalSpacing = 4,
++            rtl = false,
++            keyAt = { secondKeys[it] },
++            previousKeys = firstKeys,
++        )
++        assertFalse(cache.structuralChange)
++        assertEquals(0, probedAbove)
++        assertEquals(first.rects.take(3).map { it.y }, replaced.rects.take(3).map { it.y })
++        val full = layoutPanoramaMasonry(
++            count = secondKeys.size,
++            heightOf = { index, _ -> height(secondKeys[index]) },
++            laneWidths = lanes,
++            verticalSpacing = 4,
++            horizontalSpacing = 4,
++        )
++        assertEquals(full.rects.map { it.y }, replaced.rects.map { it.y })
++        assertEquals(full.rects.map { it.height }, replaced.rects.map { it.height })
++    }
++
++    @Test
++    fun `a new lambda that changes an earlier key relayouts`() {
++        val cache = PanoramaMasonryLayoutCache()
++        val lanes = intArrayOf(80, 80)
++        val shape = 1
++        cache.layout(
++            count = 4,
++            contentEpoch = panoramaContentEpoch(shape, Any()),
++            heightOf = { _, _ -> 100 },
++            laneWidths = lanes,
++            verticalSpacing = 0,
++            horizontalSpacing = 0,
++            rtl = false,
++            keyAt = { it },
++        )
++        var probed = false
++        cache.layout(
++            count = 6,
++            contentEpoch = panoramaContentEpoch(shape, Any()),
++            heightOf = { index, _ ->
++                if (index == 0) probed = true
++                100
++            },
++            laneWidths = lanes,
++            verticalSpacing = 0,
++            horizontalSpacing = 0,
++            rtl = false,
++            keyAt = { if (it == 0) "changed" else it },
++            previousKeys = listOf(0, 1, 2, 3),
++        )
++        assertTrue(cache.structuralChange)
++        assertTrue(probed)
++    }
++
++    @Test
++    fun `a new lambda with the same count is a structural relayout`() {
++        val cache = PanoramaMasonryLayoutCache()
++        val lanes = intArrayOf(80, 80)
++        val keys = List(8) { it }
++        val shape = 6
++        cache.layout(
++            count = keys.size,
++            contentEpoch = panoramaContentEpoch(shape, Any()),
++            heightOf = { _, _ -> 90 },
++            laneWidths = lanes,
++            verticalSpacing = 0,
++            horizontalSpacing = 0,
++            rtl = false,
++            keyAt = { keys[it] },
++        )
++        cache.layout(
++            count = keys.size,
++            contentEpoch = panoramaContentEpoch(shape, Any()),
++            heightOf = { _, _ -> 90 },
++            laneWidths = lanes,
++            verticalSpacing = 0,
++            horizontalSpacing = 0,
++            rtl = false,
++            keyAt = { keys[it] },
++            previousKeys = keys,
++        )
++        assertTrue(cache.structuralChange)
++    }
++
++    @Test
++    fun `a shape epoch change relayouts even when the list only grew`() {
++        val cache = PanoramaMasonryLayoutCache()
++        val token = Any()
++        val lanes = intArrayOf(80, 80)
++        val keys = List(6) { "k$it" }
++        cache.layout(
++            count = 4,
++            contentEpoch = panoramaContentEpoch(1, token),
++            heightOf = { _, _ -> 100 },
++            laneWidths = lanes,
++            verticalSpacing = 0,
++            horizontalSpacing = 0,
++            rtl = false,
++            keyAt = { keys[it] },
++        )
++        cache.layout(
++            count = keys.size,
++            contentEpoch = panoramaContentEpoch(2, token),
++            heightOf = { _, _ -> 120 },
++            laneWidths = lanes,
++            verticalSpacing = 0,
++            horizontalSpacing = 0,
++            rtl = false,
++            keyAt = { keys[it] },
++            previousKeys = keys.take(4),
++        )
++        assertTrue(cache.structuralChange)
++    }
++
+     @Test
+     fun `a height change replaces the layout`() {
+         val cache = PanoramaMasonryLayoutCache()

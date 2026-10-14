@@ -1,0 +1,485 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Xun2202 <98207886+Xun2202@users.noreply.github.com>
+Date: Wed, 14 Oct 2026 15:05:14 +0000
+Subject: [PATCH] presentation: browse panorama prefetch reads cover headers
+ ahead of the viewport
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The browse grid prefetched every loaded row by decoding a 128 px hardware
+bitmap, with the memory cache off, then threw the bitmap away. Those
+requests shared Coil's 3 decoder slots with the covers on screen, so the
+visible cells decoded again from disk. The queue started over at index 0
+on every paging append and never cancelled rows that had scrolled away.
+While those new covers loaded, frames dropped to 53-62% of animation ticks,
+and each newly learnt tall cover could still force a 16-20 ms structural
+relayout if it committed mid-fling.
+
+The default arm now asks Coil only to fetch the file, then a request
+decoder reads the header with inJustDecodeBounds and returns a 1x1
+ColorImage. Coil runs that factory before the loader's decoders, and the
+request uses Dispatchers.IO, so it does not take a decoder slot or a
+hardware bitmap. A header BitmapFactory cannot read is left unknown.
+
+Only the rows from the first visible cell through two viewports ahead are
+queued, two at a time. Enqueueing pauses while any panorama grid is
+scrolling and resumes when it settles. A request more than one window
+behind is cancelled. Finished ids are remembered, so a new page does not
+restart at 0.
+
+DECODE keeps the old 128 px path. OFF prefetches nothing. The mode is
+read in composition.
+
+Grid covers honor the crossfade and hardware toggles. Both defaults still
+pass the MangaCover model through unchanged, so the memory-cache key and
+CoverRequestInterceptor see the same data.
+
+与 anikku-harmony 0027 同一段代码，Anikku 侧待移植。
+---
+ .../components/BrowseSourceComfortableGrid.kt |   7 +-
+ .../components/BrowseSourceCompactGrid.kt     |   7 +-
+ .../library/components/PanoramaCoverShapes.kt | 257 ++++++++++++++++--
+ .../manga/components/MangaCover.kt            |  33 ++-
+ 4 files changed, 277 insertions(+), 27 deletions(-)
+
+diff --git a/app/src/main/java/eu/kanade/presentation/browse/components/BrowseSourceComfortableGrid.kt b/app/src/main/java/eu/kanade/presentation/browse/components/BrowseSourceComfortableGrid.kt
+index 0d60784..b674c8d 100644
+--- a/app/src/main/java/eu/kanade/presentation/browse/components/BrowseSourceComfortableGrid.kt
++++ b/app/src/main/java/eu/kanade/presentation/browse/components/BrowseSourceComfortableGrid.kt
+@@ -53,7 +53,12 @@ fun BrowseSourceComfortableGrid(
+         // The grid owns the scroll state: a cross-band shape commit remeasures every lane.
+         val state = rememberPanoramaMasonryState()
+         val settled = rememberPanoramaGridSettled { state.isScrollInProgress }
+-        PrefetchPanoramaCoverShapes(mangaList.itemCount) { mangaList.peek(it)?.value }
++        PrefetchPanoramaCoverShapes(
++            itemCount = mangaList.itemCount,
++            mangaAt = { mangaList.peek(it)?.value },
++            firstVisibleIndex = { state.firstVisibleItemIndex },
++            lastVisibleIndex = { state.lastVisibleItemIndex },
++        )
+         val shapeMode = rememberPanoramaShapeModeState()
+         CompositionLocalProvider(LocalPanoramaGridSettled provides settled) {
+             TrackPanoramaCoverShapes(mangaList.itemCount, shapeMode) { mangaList.peek(it)?.value?.id }
+diff --git a/app/src/main/java/eu/kanade/presentation/browse/components/BrowseSourceCompactGrid.kt b/app/src/main/java/eu/kanade/presentation/browse/components/BrowseSourceCompactGrid.kt
+index cf04e10..c16d813 100644
+--- a/app/src/main/java/eu/kanade/presentation/browse/components/BrowseSourceCompactGrid.kt
++++ b/app/src/main/java/eu/kanade/presentation/browse/components/BrowseSourceCompactGrid.kt
+@@ -53,7 +53,12 @@ fun BrowseSourceCompactGrid(
+         // The grid owns the scroll state: a cross-band shape commit remeasures every lane.
+         val state = rememberPanoramaMasonryState()
+         val settled = rememberPanoramaGridSettled { state.isScrollInProgress }
+-        PrefetchPanoramaCoverShapes(mangaList.itemCount) { mangaList.peek(it)?.value }
++        PrefetchPanoramaCoverShapes(
++            itemCount = mangaList.itemCount,
++            mangaAt = { mangaList.peek(it)?.value },
++            firstVisibleIndex = { state.firstVisibleItemIndex },
++            lastVisibleIndex = { state.lastVisibleItemIndex },
++        )
+         val shapeMode = rememberPanoramaShapeModeState()
+         CompositionLocalProvider(LocalPanoramaGridSettled provides settled) {
+             TrackPanoramaCoverShapes(mangaList.itemCount, shapeMode) { mangaList.peek(it)?.value?.id }
+diff --git a/app/src/main/java/eu/kanade/presentation/library/components/PanoramaCoverShapes.kt b/app/src/main/java/eu/kanade/presentation/library/components/PanoramaCoverShapes.kt
+index c039695..2bbb689 100644
+--- a/app/src/main/java/eu/kanade/presentation/library/components/PanoramaCoverShapes.kt
++++ b/app/src/main/java/eu/kanade/presentation/library/components/PanoramaCoverShapes.kt
+@@ -7,6 +7,7 @@ import androidx.compose.runtime.Composable
+ import androidx.compose.runtime.DisposableEffect
+ import androidx.compose.runtime.LaunchedEffect
+ import androidx.compose.runtime.MutableFloatState
++import androidx.compose.runtime.SideEffect
+ import androidx.compose.runtime.compositionLocalOf
+ import androidx.compose.runtime.getValue
+ import androidx.compose.runtime.mutableIntStateOf
+@@ -16,17 +17,27 @@ import androidx.compose.runtime.rememberUpdatedState
+ import androidx.compose.runtime.setValue
+ import androidx.compose.runtime.snapshotFlow
+ import androidx.compose.ui.platform.LocalContext
++import coil3.ColorImage
++import coil3.ImageLoader
++import coil3.decode.DecodeResult
++import coil3.decode.Decoder
++import coil3.decode.ImageSource
++import coil3.fetch.SourceFetchResult
+ import coil3.imageLoader
+ import coil3.request.CachePolicy
+ import coil3.request.Disposable
+ import coil3.request.ImageRequest
++import coil3.request.Options
++import coil3.request.allowHardware
+ import coil3.size.Precision
++import eu.kanade.tachiyomi.util.system.HarmonyPerfToggles
+ import kotlinx.coroutines.CompletableDeferred
+ import kotlinx.coroutines.CoroutineScope
+ import kotlinx.coroutines.Dispatchers
+ import kotlinx.coroutines.Job
+ import kotlinx.coroutines.coroutineScope
+ import kotlinx.coroutines.delay
++import kotlinx.coroutines.flow.collect
+ import kotlinx.coroutines.flow.collectLatest
+ import kotlinx.coroutines.isActive
+ import kotlinx.coroutines.launch
+@@ -41,6 +52,7 @@ import java.io.FileReader
+ import java.io.FileWriter
+ import kotlin.coroutines.cancellation.CancellationException
+ import kotlin.math.abs
++import kotlin.math.max
+ import kotlin.math.roundToInt
+ 
+ // Harmony -->
+@@ -156,7 +168,6 @@ object PanoramaCoverShapes {
+ 
+     private val gate = Any()
+     private val ready = CompletableDeferred<Unit>()
+-    private val earlyFlush = ArrayList<() -> Unit>()
+ 
+     @Volatile
+     internal var snapshotDispatcher: PanoramaSnapshotDispatcher = AndroidSnapshotDispatcher
+@@ -185,19 +196,11 @@ object PanoramaCoverShapes {
+     internal val committedShapeVersion = mutableIntStateOf(0)
+ 
+     fun init(file: File, scope: CoroutineScope) {
+-        val queued = synchronized(gate) {
++        synchronized(gate) {
+             if (initialized) return
+             initialized = true
+             storeFile = file
+             persistScope = scope
+-            val pending = ArrayList(earlyFlush)
+-            earlyFlush.clear()
+-            pending
+-        }
+-        if (queued.isNotEmpty()) {
+-            scope.launch(Dispatchers.Main.immediate) {
+-                queued.forEach { it() }
+-            }
+         }
+         scope.launch(Dispatchers.IO) {
+             try {
+@@ -305,7 +308,6 @@ object PanoramaCoverShapes {
+             scrollingGrids.clear()
+             scrollProbes.clear()
+             stored.clear()
+-            earlyFlush.clear()
+             flushQueued = false
+             initialized = false
+             loaded = false
+@@ -445,15 +447,6 @@ object PanoramaCoverShapes {
+         scheduleFlush()
+     }
+ 
+-    internal fun postToOwner(block: () -> Unit) {
+-        val scope = synchronized(gate) { persistScope }
+-        if (scope != null) {
+-            scope.launch(Dispatchers.Main.immediate) { block() }
+-        } else {
+-            synchronized(gate) { earlyFlush.add(block) }
+-        }
+-    }
+-
+     private fun scheduleFlush() {
+         synchronized(gate) {
+             if (flushQueued) return
+@@ -597,12 +590,38 @@ fun rememberPanoramaGridSettled(isScrollInProgress: () -> Boolean): () -> Boolea
+ }
+ 
+ /**
+- * Learns the shape of covers that are loaded into the list but not on screen yet, so their cells
+- * are laid out with the final shape when they scroll in. Only a small subsampled image is decoded
+- * and nothing goes to the memory cache; the download lands in the disk cache the cell reads.
++ * Learns the shape of covers ahead of the viewport, so their cells are laid out with the final
++ * shape when they scroll in.
++ *
++ * [HarmonyPerfToggles.Prefetch.BOUNDS] reads the image header and does not decode pixels.
++ * [HarmonyPerfToggles.Prefetch.DECODE] is the old 128 px decode of every loaded row.
++ * [HarmonyPerfToggles.Prefetch.OFF] learns only from covers that were drawn.
++ * The mode is read in composition, so a recorder flip applies on the next frame.
+  */
+ @Composable
+-fun PrefetchPanoramaCoverShapes(itemCount: Int, mangaAt: (Int) -> Manga?) {
++fun PrefetchPanoramaCoverShapes(
++    itemCount: Int,
++    mangaAt: (Int) -> Manga?,
++    firstVisibleIndex: () -> Int = { 0 },
++    lastVisibleIndex: () -> Int = { 0 },
++) {
++    when (HarmonyPerfToggles.prefetch) {
++        HarmonyPerfToggles.Prefetch.OFF -> Unit
++        HarmonyPerfToggles.Prefetch.DECODE -> {
++            PrefetchPanoramaCoverShapesDecode(itemCount, mangaAt)
++        }
++        HarmonyPerfToggles.Prefetch.BOUNDS -> {
++            PrefetchPanoramaCoverShapesBounds(itemCount, mangaAt, firstVisibleIndex, lastVisibleIndex)
++        }
++    }
++}
++
++/**
++ * Old prefetch: one subsampled decode per loaded row, kept for A/B against [PrefetchPanoramaCoverShapesBounds].
++ * The request map is cleared only when this composable leaves the tree.
++ */
++@Composable
++private fun PrefetchPanoramaCoverShapesDecode(itemCount: Int, mangaAt: (Int) -> Manga?) {
+     val context = LocalContext.current
+     val requests = remember { HashMap<Long, Disposable>() }
+     val currentMangaAt by rememberUpdatedState(mangaAt)
+@@ -639,6 +658,196 @@ fun PrefetchPanoramaCoverShapes(itemCount: Int, mangaAt: (Int) -> Manga?) {
+     }
+ }
+ 
++/**
++ * Header prefetch for the window [firstVisibleIndex, lastVisibleIndex] plus [PREFETCH_AHEAD] rows.
++ * At most [PREFETCH_MAX_IN_FLIGHT] requests run. Enqueueing waits while a panorama grid is scrolling.
++ * A row more than one such window behind the viewport is cancelled. An id is finished only once a
++ * ratio was stored, so a paging append does not start over at index 0. A header miss or a failed
++ * fetch is tried at most once more. The pump reads the window ids, so a paging snapshot that fills
++ * placeholders wakes it.
++ */
++@Composable
++private fun PrefetchPanoramaCoverShapesBounds(
++    itemCount: Int,
++    mangaAt: (Int) -> Manga?,
++    firstVisibleIndex: () -> Int,
++    lastVisibleIndex: () -> Int,
++) {
++    val context = LocalContext.current
++    val currentMangaAt by rememberUpdatedState(mangaAt)
++    val currentCount by rememberUpdatedState(itemCount)
++    val currentFirst by rememberUpdatedState(firstVisibleIndex)
++    val currentLast by rememberUpdatedState(lastVisibleIndex)
++    // Bumped from composition when paging fills placeholders without moving the window.
++    val compositionTick = remember { mutableIntStateOf(0) }
++    SideEffect { compositionTick.intValue++ }
++    // Bumped when a request finishes, so the pump can start the next one.
++    val finishedTick = remember { mutableIntStateOf(0) }
++    LaunchedEffect(context) {
++        val loader = context.imageLoader
++        val inFlight = LinkedHashMap<Long, PrefetchInFlight>()
++        val finished = HashSet<Long>()
++        val attempts = HashMap<Long, Int>()
++        fun complete(mangaId: Long, stored: Boolean, attempted: Boolean) {
++            launch {
++                if (inFlight.remove(mangaId) == null) return@launch
++                if (stored) {
++                    finished.add(mangaId)
++                } else if (attempted) {
++                    val used = (attempts[mangaId] ?: 0) + 1
++                    attempts[mangaId] = used
++                    if (used >= PREFETCH_MAX_ATTEMPTS) finished.add(mangaId)
++                }
++                finishedTick.intValue++
++            }
++        }
++        try {
++            snapshotFlow {
++                val count = currentCount.coerceAtLeast(0)
++                val first = currentFirst().coerceIn(0, count)
++                val last = currentLast().coerceIn(first, count)
++                val end = minOf(count, last + PREFETCH_AHEAD + 1)
++                val ids = ArrayList<Long>(end - first)
++                for (index in first until end) {
++                    // Reads the paging snapshot, so a placeholder that becomes a row wakes this flow.
++                    ids.add(currentMangaAt(index)?.id ?: Long.MIN_VALUE)
++                }
++                PrefetchWindow(
++                    first = first,
++                    last = last,
++                    count = count,
++                    scrolling = PanoramaCoverShapes.anyGridScrolling,
++                    tick = compositionTick.intValue + finishedTick.intValue,
++                    ids = ids,
++                )
++            }.collect { window ->
++                val span = max(window.last - window.first + 1, PREFETCH_AHEAD)
++                val behind = window.first - span
++                val stale = inFlight.entries.filter { it.value.index < behind }
++                for ((id, slot) in stale) {
++                    inFlight.remove(id)
++                    slot.disposable.dispose()
++                }
++                if (window.scrolling) return@collect
++                val end = minOf(window.count, window.last + PREFETCH_AHEAD + 1)
++                var index = window.first
++                while (index < end && inFlight.size < PREFETCH_MAX_IN_FLIGHT) {
++                    val manga = currentMangaAt(index)
++                    val at = index
++                    index++
++                    if (manga == null || manga.thumbnailUrl.isNullOrEmpty()) continue
++                    val mangaId = manga.id
++                    if (mangaId in inFlight || mangaId in finished) continue
++                    if (PanoramaCoverShapes.get(mangaId) != null) {
++                        finished.add(mangaId)
++                        continue
++                    }
++                    inFlight[mangaId] = PrefetchInFlight(
++                        index = at,
++                        disposable = loader.enqueue(
++                            ImageRequest.Builder(context)
++                                .data(manga.asMangaCover())
++                                .memoryCachePolicy(CachePolicy.DISABLED)
++                                .allowHardware(false)
++                                .decoderCoroutineContext(Dispatchers.IO)
++                                .decoderFactory(PanoramaCoverBoundsDecoder.Factory(mangaId))
++                                .listener(
++                                    onSuccess = { _, _ ->
++                                        val stored = PanoramaCoverShapes.get(mangaId) != null
++                                        complete(mangaId, stored = stored, attempted = true)
++                                    },
++                                    onError = { _, _ ->
++                                        complete(mangaId, stored = false, attempted = true)
++                                    },
++                                    onCancel = { complete(mangaId, stored = false, attempted = false) },
++                                )
++                                .build(),
++                        ),
++                    )
++                }
++            }
++        } finally {
++            inFlight.values.forEach { it.disposable.dispose() }
++            inFlight.clear()
++        }
++    }
++}
++
++private class PrefetchInFlight(
++    val index: Int,
++    val disposable: Disposable,
++)
++
++private data class PrefetchWindow(
++    val first: Int,
++    val last: Int,
++    val count: Int,
++    val scrolling: Boolean,
++    val tick: Int,
++    val ids: List<Long>,
++)
++
++/**
++ * Coil inserts [ImageRequest.Builder.decoderFactory] at the front of the decoder list, ahead of
++ * [eu.kanade.tachiyomi.data.coil.ImageDecoder] and [coil3.decode.BitmapFactoryDecoder]. [decode]
++ * always returns an image, so those decoders never run for this request and the loader's 3-wide
++ * decoder dispatcher is not used ([decoderCoroutineContext] is [Dispatchers.IO]).
++ * A header BitmapFactory cannot read (AVIF, JXL) is left unknown; the visible load learns it.
++ */
++private class PanoramaCoverBoundsDecoder(
++    private val source: ImageSource,
++    private val mangaId: Long,
++) : Decoder {
++
++    override suspend fun decode(): DecodeResult {
++        val ratio = try {
++            headerRatio(source)
++        } catch (cancelled: CancellationException) {
++            throw cancelled
++        } catch (_: Exception) {
++            null
++        }
++        if (ratio != null) {
++            // Stored before the request listener runs. The layout epoch is still posted to the owner.
++            PanoramaCoverShapes.put(mangaId, ratio)
++        }
++        // isSampled so this 1x1 image can never satisfy a memory-cache lookup for a real cover.
++        return DecodeResult(image = boundsPlaceholder.value, isSampled = true)
++    }
++
++    class Factory(
++        private val mangaId: Long,
++    ) : Decoder.Factory {
++        override fun create(
++            result: SourceFetchResult,
++            options: Options,
++            imageLoader: ImageLoader,
++        ): Decoder = PanoramaCoverBoundsDecoder(result.source, mangaId)
++    }
++}
++
++private fun headerRatio(imageSource: ImageSource): Float? {
++    val options = BitmapFactory.Options()
++    options.inJustDecodeBounds = true
++    // file() copies a non-file source to a temp file. decodeStream on the okio stream cannot
++    // mark/reset, so BitmapFactory would report no bounds.
++    val file = imageSource.file()
++    BitmapFactory.decodeFile(file.toString(), options)
++    val width = options.outWidth
++    val height = options.outHeight
++    if (width <= 0 || height <= 0) return null
++    val ratio = height.toFloat() / width.toFloat()
++    if (ratio <= 0f || ratio.isNaN() || ratio.isInfinite()) return null
++    return ratio
++}
++
++private val boundsPlaceholder = lazy { ColorImage(width = 1, height = 1) }
++
+ private const val SETTLE_DELAY_MILLIS = 300L
+ private const val PREFETCH_SIZE_PX = 128
++private const val PREFETCH_AHEAD = 30
++private const val PREFETCH_MAX_IN_FLIGHT = 2
++
++/** First try plus one retry. A permanent miss stops; a single network miss does not. */
++private const val PREFETCH_MAX_ATTEMPTS = 2
+ // Harmony <--
+diff --git a/app/src/main/java/eu/kanade/presentation/manga/components/MangaCover.kt b/app/src/main/java/eu/kanade/presentation/manga/components/MangaCover.kt
+index 0fd4f5c..df39fdd 100644
+--- a/app/src/main/java/eu/kanade/presentation/manga/components/MangaCover.kt
++++ b/app/src/main/java/eu/kanade/presentation/manga/components/MangaCover.kt
+@@ -4,17 +4,23 @@ import androidx.compose.foundation.clickable
+ import androidx.compose.foundation.layout.aspectRatio
+ import androidx.compose.material3.MaterialTheme
+ import androidx.compose.runtime.Composable
++import androidx.compose.runtime.remember
+ import androidx.compose.ui.Modifier
+ import androidx.compose.ui.draw.clip
+ import androidx.compose.ui.graphics.Color
+ import androidx.compose.ui.graphics.Shape
+ import androidx.compose.ui.graphics.painter.ColorPainter
+ import androidx.compose.ui.layout.ContentScale
++import androidx.compose.ui.platform.LocalContext
+ import androidx.compose.ui.semantics.Role
+ import coil3.compose.AsyncImage
+ import coil3.compose.AsyncImagePainter
++import coil3.request.ImageRequest
++import coil3.request.allowHardware
++import coil3.request.crossfade
+ import eu.kanade.presentation.util.rememberResourceBitmapPainter
+ import eu.kanade.tachiyomi.R
++import eu.kanade.tachiyomi.util.system.HarmonyPerfToggles
+ 
+ enum class MangaCover(val ratio: Float) {
+     Square(1f / 1f),
+@@ -36,8 +42,33 @@ enum class MangaCover(val ratio: Float) {
+         onCoverLoaded: ((AsyncImagePainter.State.Success) -> Unit)? = null,
+         // Harmony <--
+     ) {
++        // Harmony: defaults pass [data] through. A non-default flag is part of the memory-cache
++        // key and of AsyncImage request equality, so flipping one reloads instead of reusing a
++        // software bitmap decoded for the other arm.
++        val fade = HarmonyPerfToggles.coverCrossfade
++        val hardware = HarmonyPerfToggles.coverHardware
++        val context = LocalContext.current
++        val model = remember(data, fade, hardware, context) {
++            if (fade && hardware) {
++                data
++            } else {
++                ImageRequest.Builder(context)
++                    .data(data)
++                    .apply {
++                        if (!fade) {
++                            crossfade(false)
++                            memoryCacheKeyExtra("harmony_fade", "off")
++                        }
++                        if (!hardware) {
++                            allowHardware(false)
++                            memoryCacheKeyExtra("harmony_hw", "off")
++                        }
++                    }
++                    .build()
++            }
++        }
+         AsyncImage(
+-            model = data,
++            model = model,
+             placeholder = ColorPainter(CoverPlaceholderColor),
+             error = rememberResourceBitmapPainter(id = R.drawable.cover_error),
+             contentDescription = contentDescription,

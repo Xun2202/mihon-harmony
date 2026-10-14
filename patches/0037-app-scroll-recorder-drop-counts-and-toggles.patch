@@ -1,0 +1,1479 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Xun2202 <98207886+Xun2202@users.noreply.github.com>
+Date: Wed, 14 Oct 2026 14:38:29 +0000
+Subject: [PATCH] app: scroll recorder counts dropped reports, stages and cover
+ loads
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+A browse-grid fling can keep Choreographer at 90 Hz while FrameMetrics
+callbacks fall to about 60% of those ticks, and every reported frame is
+still under its deadline. The listener ignored dropCountSinceLastInvocation,
+and stage times were kept only for jank frames, so a stuffed swap chain
+could not be told apart from a listener that dropped reports.
+
+HarmonyFramePerf (still the file copied byte for byte into the sibling
+app) now stores dropCountSinceLastInvocation on each frame. The listener
+runs on HandlerThread "HarmonyFramePerf" at THREAD_PRIORITY_DISPLAY and
+only copies primitives into the ring. The 500 ms sampler moved to
+"HarmonyFramePerfSampler", so a /proc read cannot stall delivery and
+inflate that drop count.
+
+Each scroll segment, and the whole recording, reports p50/p90 of draw,
+sync, command issue, swap, gpu and layout for every frame, plus reported
+frames, the sum of dropCount, Choreographer ticks, and missed vsyncs.
+A missed vsync is a gap between consecutive intended vsyncs that is
+neither a report nor a dropped report:
+max(0, round(delta / refreshPeriod) - 1 - dropCount). The period is the
+display refresh sample in effect, not FrameMetrics.DEADLINE, which on a
+90 Hz panel is often 16.7 ms or about 21 ms. The last 30 s also has one
+line per second (ticks, frames, drops, missed, dominant phase, and
+swap / sync / gpu p90).
+
+Each sample adds Java heap, native heap, art.gc.gc-time and
+blocking-gc-count deltas, per-thread CPU (main, RenderThread, hwui,
+DefaultDispatcher, OkHttp, the recorder threads, other), how long the
+sample took, and Coil counts (DataSource, hardware bitmaps, errors,
+starts). The Coil listener is registered on the image loader and does
+nothing but a volatile check while recording is off. A failed per-thread
+read sticks and is printed as n/a. BLASTBufferQueue lines are split into
+"max frames", "Faking releaseBufferCallback" and other; only counts are
+exported, and the crash-log filter still matches the whole tag.
+
+Long-press on the "记录" button cycles 封面淡入, 硬件位图 and 预取, and
+writes "mark toggle <describe()>" into the scroll trace so one recording
+can be split by arm. Tap still exports. The header stores the toggle
+state at start and at export.
+
+The switches live in HarmonyPerfToggles (also shared byte for byte), in
+memory only, so a restart is back on crossfade=on hardware=on
+prefetch=bounds.
+
+The export format is harmony-scroll-perf 2.
+
+与 anikku-harmony 0044 同源（HarmonyFramePerf.kt / HarmonyPerfToggles.kt 逐字节共用），Anikku 侧待移植。
+---
+ app/src/main/java/eu/kanade/tachiyomi/App.kt  |   4 +
+ .../tachiyomi/util/system/HarmonyFramePerf.kt | 861 ++++++++++++++++--
+ .../util/system/HarmonyPerfToggles.kt         |  33 +
+ .../util/system/HarmonyFramePerfTest.kt       | 144 +++
+ 4 files changed, 946 insertions(+), 96 deletions(-)
+ create mode 100644 app/src/main/java/eu/kanade/tachiyomi/util/system/HarmonyPerfToggles.kt
+
+diff --git a/app/src/main/java/eu/kanade/tachiyomi/App.kt b/app/src/main/java/eu/kanade/tachiyomi/App.kt
+index 5578a76..30dc9aa 100644
+--- a/app/src/main/java/eu/kanade/tachiyomi/App.kt
++++ b/app/src/main/java/eu/kanade/tachiyomi/App.kt
+@@ -48,6 +48,7 @@ import eu.kanade.tachiyomi.network.NetworkPreferences
+ import eu.kanade.tachiyomi.ui.base.delegate.SecureActivityDelegate
+ import eu.kanade.tachiyomi.util.system.DeviceUtil
+ import eu.kanade.tachiyomi.util.system.GLUtil
++import eu.kanade.tachiyomi.util.system.HarmonyFramePerf
+ import eu.kanade.tachiyomi.util.system.HarmonyLogBuffer
+ import eu.kanade.tachiyomi.util.system.WebViewUtil
+ import eu.kanade.tachiyomi.util.system.animatorDurationScale
+@@ -283,6 +284,9 @@ class App : Application(), DefaultLifecycleObserver, SingletonImageLoader.Factor
+             // Coil spawns a new thread for every image load by default
+             fetcherCoroutineContext(Dispatchers.IO.limitedParallelism(8))
+             decoderCoroutineContext(Dispatchers.IO.limitedParallelism(3))
++
++            // Harmony: count cover loads only while the scroll recorder is on.
++            eventListener(HarmonyFramePerf.coilListener)
+         }
+             .build()
+     }
+diff --git a/app/src/main/java/eu/kanade/tachiyomi/util/system/HarmonyFramePerf.kt b/app/src/main/java/eu/kanade/tachiyomi/util/system/HarmonyFramePerf.kt
+index 30087f4..5fbf2f4 100644
+--- a/app/src/main/java/eu/kanade/tachiyomi/util/system/HarmonyFramePerf.kt
++++ b/app/src/main/java/eu/kanade/tachiyomi/util/system/HarmonyFramePerf.kt
+@@ -2,6 +2,7 @@ package eu.kanade.tachiyomi.util.system
+ 
+ import android.app.Activity
+ import android.content.Context
++import android.graphics.Bitmap
+ import android.os.Build
+ import android.os.Debug
+ import android.os.Handler
+@@ -10,13 +11,15 @@ import android.os.Looper
+ import android.os.PowerManager
+ import android.os.Process
+ import android.os.SystemClock
++import android.system.Os
++import android.system.OsConstants
+ import android.view.Choreographer
+ import android.view.Display
+ import android.view.FrameMetrics
+ import android.view.Window
+ import androidx.activity.ComponentActivity
+ import androidx.compose.foundation.background
+-import androidx.compose.foundation.clickable
++import androidx.compose.foundation.combinedClickable
+ import androidx.compose.foundation.layout.Box
+ import androidx.compose.foundation.layout.WindowInsets
+ import androidx.compose.foundation.layout.fillMaxSize
+@@ -25,6 +28,8 @@ import androidx.compose.foundation.layout.safeDrawing
+ import androidx.compose.foundation.layout.size
+ import androidx.compose.foundation.layout.windowInsetsPadding
+ import androidx.compose.foundation.shape.CircleShape
++import androidx.compose.material3.DropdownMenu
++import androidx.compose.material3.DropdownMenuItem
+ import androidx.compose.material3.Text
+ import androidx.compose.runtime.Composable
+ import androidx.compose.runtime.collectAsState
+@@ -43,6 +48,12 @@ import androidx.compose.ui.unit.sp
+ import androidx.lifecycle.Lifecycle
+ import androidx.lifecycle.lifecycleScope
+ import androidx.lifecycle.repeatOnLifecycle
++import coil3.BitmapImage
++import coil3.EventListener
++import coil3.decode.DataSource
++import coil3.request.ErrorResult
++import coil3.request.ImageRequest
++import coil3.request.SuccessResult
+ import eu.kanade.tachiyomi.util.CrashLogUtil
+ import eu.kanade.tachiyomi.util.storage.getUriCompat
+ import kotlinx.coroutines.Dispatchers
+@@ -61,18 +72,21 @@ import java.util.Locale
+ import java.util.SortedMap
+ import java.util.TimeZone
+ import java.util.TreeMap
++import java.util.concurrent.atomic.AtomicInteger
+ import kotlin.math.abs
+ import kotlin.math.ceil
++import kotlin.math.roundToLong
+ 
+ /**
+  * Harmony: on-device scroll performance recorder, behind a debug switch that is off by default.
+  *
+  * While switched on and the activity is started it keeps, in primitive ring buffers:
+- * FrameMetrics per rendered frame (callback on its own HandlerThread), the Choreographer vsync
+- * interval per main-thread frame with the panorama scroll phase / measure / compose counters,
+- * and a 500 ms sample of GC count, process CPU, display refresh rate, thermal status and battery
+- * saver. The export holds only those numbers, per-second counts of 卓易通 graphics-layer logcat
+- * lines and [PanoramaScrollTrace]; no titles, URLs, extension list or logcat text.
++ * FrameMetrics per rendered frame, including dropCountSinceLastInvocation, on a HandlerThread at
++ * display priority; the Choreographer vsync interval per main-thread frame with the panorama
++ * scroll phase; and a 500 ms sample (heaps, GC, per-thread CPU, Coil, refresh, thermal) on a
++ * second thread so a slow sample cannot stall FrameMetrics. The export holds only numbers,
++ * per-second counts of 卓易通 graphics-layer logcat lines and [PanoramaScrollTrace]; no titles,
++ * URLs, extension list or logcat text.
+  *
+  * Shared byte for byte between mihon-harmony and anikku-harmony.
+  */
+@@ -84,7 +98,7 @@ object HarmonyFramePerf {
+     private const val SAMPLE_INTERVAL_MS = 500L
+     private const val FIRST_FRAME_TIMEOUT_MS = 3000L
+ 
+-    /** About 1 MB, allocated on the first attach and dropped when the switch is turned off. */
++    /** About 1.2 MB, allocated on the first attach and dropped when the switch is turned off. */
+     private class Buffers {
+         val frames = PerfRing(FRAME_CAPACITY, PerfReport.FRAME_WIDTH)
+         val ticks = PerfRing(TICK_CAPACITY, PerfReport.TICK_WIDTH)
+@@ -125,6 +139,59 @@ object HarmonyFramePerf {
+     // Sampler thread only.
+     private var lastGcCount = -1L
+     private var lastCpuMs = -1L
++    private var lastGcTime = -1L
++    private var lastBlockingGc = -1L
++
++    /** tid -> utime+stime clock ticks at the previous sample. */
++    private val threadCpuTicks = HashMap<Int, Long>()
++    private var clkTck = 0L
++
++    /** First failed /proc read sticks, so the export says n/a instead of throwing every sample. */
++    private var threadCpuBroken = false
++
++    @Volatile private var togglesAtStart = ""
++
++    /** Cheap check for [coilListener]. The image loader holds it for the process lifetime. */
++    @Volatile private var active = false
++
++    private var metricsThread: HandlerThread? = null
++    private var metricsHandler: Handler? = null
++
++    private val coilStarted = AtomicInteger()
++    private val coilErrors = AtomicInteger()
++    private val coilMemCache = AtomicInteger()
++    private val coilMemory = AtomicInteger()
++    private val coilDisk = AtomicInteger()
++    private val coilNetwork = AtomicInteger()
++    private val coilHardware = AtomicInteger()
++
++    /**
++     * Coil event listener. Counts only while recording; callbacks may be on the main thread
++     * or a worker, so the counters are atomic.
++     */
++    val coilListener: EventListener = object : EventListener() {
++        override fun onStart(request: ImageRequest) {
++            if (!active) return
++            coilStarted.incrementAndGet()
++        }
++
++        override fun onError(request: ImageRequest, result: ErrorResult) {
++            if (!active) return
++            coilErrors.incrementAndGet()
++        }
++
++        override fun onSuccess(request: ImageRequest, result: SuccessResult) {
++            if (!active) return
++            when (result.dataSource) {
++                DataSource.MEMORY_CACHE -> coilMemCache.incrementAndGet()
++                DataSource.MEMORY -> coilMemory.incrementAndGet()
++                DataSource.DISK -> coilDisk.incrementAndGet()
++                DataSource.NETWORK -> coilNetwork.incrementAndGet()
++            }
++            val bitmap = (result.image as? BitmapImage)?.bitmap
++            if (bitmap?.config == Bitmap.Config.HARDWARE) coilHardware.incrementAndGet()
++        }
++    }
+ 
+     /**
+      * Records while [enabled] emits true and [activity] is started. Turning the switch off
+@@ -157,8 +224,15 @@ object HarmonyFramePerf {
+         if (startedWallMs == 0L) {
+             startedWallMs = System.currentTimeMillis()
+             startedNanos = System.nanoTime()
++            togglesAtStart = HarmonyPerfToggles.describe()
+         }
+-        val samplerThread = HandlerThread("HarmonyFramePerf").also { it.start() }
++        // The listener thread only copies metrics into the ring. /proc reads stay on the sampler
++        // thread: a slow sample would otherwise stall delivery and inflate dropCount.
++        val metrics = HandlerThread("HarmonyFramePerf", Process.THREAD_PRIORITY_DISPLAY).also { it.start() }
++        val metricsLooper = Handler(metrics.looper)
++        metricsThread = metrics
++        metricsHandler = metricsLooper
++        val samplerThread = HandlerThread("HarmonyFramePerfSampler").also { it.start() }
+         val samplerHandler = Handler(samplerThread.looper)
+         thread = samplerThread
+         handler = samplerHandler
+@@ -167,15 +241,23 @@ object HarmonyFramePerf {
+         firstFrameSeen = false
+         frameMetricsLate = false
+         frameMetricsError = null
+-        val listener = Window.OnFrameMetricsAvailableListener { _, metrics, _ -> onFrameMetrics(metrics) }
++        val listener = Window.OnFrameMetricsAvailableListener { _, frameMetrics, dropCount ->
++            onFrameMetrics(frameMetrics, dropCount)
++        }
+         try {
+-            activity.window.addOnFrameMetricsAvailableListener(listener, samplerHandler)
++            activity.window.addOnFrameMetricsAvailableListener(listener, metricsLooper)
+             metricsListener = listener
+         } catch (e: Throwable) {
+             frameMetricsError = e.javaClass.simpleName
+         }
+         lastGcCount = -1L
+         lastCpuMs = -1L
++        lastGcTime = -1L
++        lastBlockingGc = -1L
++        threadCpuTicks.clear()
++        threadCpuBroken = false
++        resetCoil()
++        active = true
+         samplerHandler.post(sampler)
+         samplerHandler.postDelayed(firstFrameCheck, FIRST_FRAME_TIMEOUT_MS)
+         lastTickNanos = 0L
+@@ -188,6 +270,7 @@ object HarmonyFramePerf {
+     }
+ 
+     private fun detach() {
++        active = false
+         val attached = window ?: return
+         metricsListener?.let { listener -> runCatching { attached.removeOnFrameMetricsAvailableListener(listener) } }
+         metricsListener = null
+@@ -198,6 +281,10 @@ object HarmonyFramePerf {
+         thread?.quitSafely()
+         handler = null
+         thread = null
++        metricsHandler?.removeCallbacksAndMessages(null)
++        metricsThread?.quitSafely()
++        metricsHandler = null
++        metricsThread = null
+         display = null
+         recordingState.value = false
+     }
+@@ -206,6 +293,8 @@ object HarmonyFramePerf {
+         buffers = null
+         startedWallMs = 0L
+         startedNanos = 0L
++        togglesAtStart = ""
++        resetCoil()
+     }
+ 
+     private val tickCallback = Choreographer.FrameCallback { frameTimeNanos -> onTick(frameTimeNanos) }
+@@ -235,7 +324,7 @@ object HarmonyFramePerf {
+         Choreographer.getInstance().postFrameCallback(tickCallback)
+     }
+ 
+-    private fun onFrameMetrics(metrics: FrameMetrics) {
++    private fun onFrameMetrics(metrics: FrameMetrics, dropCount: Int) {
+         if (!firstFrameSeen) firstFrameSeen = true
+         if (metrics.getMetric(FrameMetrics.FIRST_DRAW_FRAME) == 1L) return
+         val frames = buffers?.frames ?: return
+@@ -255,6 +344,7 @@ object HarmonyFramePerf {
+             frames[row + PerfReport.F_SWAP] = metrics.getMetric(FrameMetrics.SWAP_BUFFERS_DURATION)
+             frames[row + PerfReport.F_GPU] = if (modern) metrics.getMetric(FrameMetrics.GPU_DURATION) else -1L
+             frames[row + PerfReport.F_DEADLINE] = if (modern) metrics.getMetric(FrameMetrics.DEADLINE) else -1L
++            frames[row + PerfReport.F_DROP] = dropCount.toLong()
+         }
+     }
+ 
+@@ -272,38 +362,152 @@ object HarmonyFramePerf {
+     }
+ 
+     private fun sample() {
+-        val context = appContext ?: return
+-        val gc = Debug.getRuntimeStat("art.gc.gc-count")?.toLongOrNull() ?: -1L
+-        val cpu = Process.getElapsedCpuTime()
+-        val gcDelta = if (gc >= 0 && lastGcCount >= 0) gc - lastGcCount else 0L
+-        val cpuDelta = if (lastCpuMs >= 0) cpu - lastCpuMs else 0L
+-        lastGcCount = gc
+-        lastCpuMs = cpu
+-        val currentDisplay = display
+-        val mode = currentDisplay?.mode
+-        val power = context.getSystemService(Context.POWER_SERVICE) as? PowerManager
+-        val samples = buffers?.samples ?: return
+-        synchronized(samples) {
+-            val row = samples.appendRow()
+-            samples[row + PerfReport.S_TIME] = System.nanoTime()
+-            samples[row + PerfReport.S_GC] = gcDelta
+-            samples[row + PerfReport.S_CPU_MS] = cpuDelta
+-            samples[row + PerfReport.S_REFRESH_MILLI] = ((currentDisplay?.refreshRate ?: 0f) * 1000f).toLong()
+-            samples[row + PerfReport.S_MODE_ID] = mode?.modeId?.toLong() ?: -1L
+-            samples[row + PerfReport.S_MODE_REFRESH_MILLI] = ((mode?.refreshRate ?: 0f) * 1000f).toLong()
+-            samples[row + PerfReport.S_THERMAL] = thermalStatus(power).toLong()
+-            samples[row + PerfReport.S_POWER_SAVE] = if (power?.isPowerSaveMode == true) 1L else 0L
++        val started = System.nanoTime()
++        try {
++            val context = appContext ?: return
++            val gc = runtimeStat("art.gc.gc-count") ?: -1L
++            val cpu = Process.getElapsedCpuTime()
++            val gcDelta = if (gc >= 0 && lastGcCount >= 0) gc - lastGcCount else 0L
++            lastGcCount = gc
++            val cpuDelta = if (lastCpuMs >= 0) cpu - lastCpuMs else 0L
++            lastCpuMs = cpu
++            val gcTimeDelta = statDelta(runtimeStat("art.gc.gc-time"), lastGcTime) { lastGcTime = it }
++            val blockingDelta = statDelta(runtimeStat("art.gc.blocking-gc-count"), lastBlockingGc) {
++                lastBlockingGc = it
++            }
++            val heapKb = try {
++                val runtime = Runtime.getRuntime()
++                (runtime.totalMemory() - runtime.freeMemory()) / 1024L
++            } catch (_: Throwable) {
++                PerfReport.UNAVAILABLE
++            }
++            val nativeKb = try {
++                Debug.getNativeHeapAllocatedSize() / 1024L
++            } catch (_: Throwable) {
++                PerfReport.UNAVAILABLE
++            }
++            val threadCpu = readThreadCpuOrNa()
++            val coil = drainCoil()
++            val durationUs = (System.nanoTime() - started) / 1_000L
++            val currentDisplay = display
++            val mode = currentDisplay?.mode
++            val power = context.getSystemService(Context.POWER_SERVICE) as? PowerManager
++            val samples = buffers?.samples ?: return
++            synchronized(samples) {
++                val row = samples.appendRow()
++                samples[row + PerfReport.S_TIME] = System.nanoTime()
++                samples[row + PerfReport.S_GC] = gcDelta
++                samples[row + PerfReport.S_CPU_MS] = cpuDelta
++                samples[row + PerfReport.S_REFRESH_MILLI] = ((currentDisplay?.refreshRate ?: 0f) * 1000f).toLong()
++                samples[row + PerfReport.S_MODE_ID] = mode?.modeId?.toLong() ?: -1L
++                samples[row + PerfReport.S_MODE_REFRESH_MILLI] = ((mode?.refreshRate ?: 0f) * 1000f).toLong()
++                samples[row + PerfReport.S_THERMAL] = thermalStatus(power).toLong()
++                samples[row + PerfReport.S_POWER_SAVE] = if (power?.isPowerSaveMode == true) 1L else 0L
++                samples[row + PerfReport.S_HEAP_KB] = heapKb
++                samples[row + PerfReport.S_NATIVE_KB] = nativeKb
++                samples[row + PerfReport.S_GC_TIME_MS] = gcTimeDelta
++                samples[row + PerfReport.S_BLOCKING_GC] = blockingDelta
++                for (index in threadCpu.indices) {
++                    samples[row + PerfReport.S_CPU_MAIN + index] = threadCpu[index]
++                }
++                samples[row + PerfReport.S_SAMPLE_US] = durationUs
++                samples[row + PerfReport.S_COIL_MEM_CACHE] = coil[0].toLong()
++                samples[row + PerfReport.S_COIL_MEMORY] = coil[1].toLong()
++                samples[row + PerfReport.S_COIL_DISK] = coil[2].toLong()
++                samples[row + PerfReport.S_COIL_NETWORK] = coil[3].toLong()
++                samples[row + PerfReport.S_COIL_HW] = coil[4].toLong()
++                samples[row + PerfReport.S_COIL_ERR] = coil[5].toLong()
++                samples[row + PerfReport.S_COIL_START] = coil[6].toLong()
++            }
++        } catch (_: Throwable) {
++            // Drop this sample. Only a failed /proc read marks thread CPU unavailable.
+         }
+     }
+ 
++    private fun runtimeStat(name: String): Long? {
++        return try {
++            Debug.getRuntimeStat(name)?.toLongOrNull()
++        } catch (_: Throwable) {
++            null
++        }
++    }
++
++    private fun statDelta(current: Long?, previous: Long, store: (Long) -> Unit): Long {
++        if (current == null) return PerfReport.UNAVAILABLE
++        val delta = if (previous >= 0) current - previous else 0L
++        store(current)
++        return delta
++    }
++
++    private fun readThreadCpuOrNa(): LongArray {
++        if (threadCpuBroken) return LongArray(PerfReport.CPU_BUCKETS) { PerfReport.UNAVAILABLE }
++        return try {
++            readThreadCpuMs()
++        } catch (_: Throwable) {
++            threadCpuBroken = true
++            LongArray(PerfReport.CPU_BUCKETS) { PerfReport.UNAVAILABLE }
++        }
++    }
++
++    private fun readThreadCpuMs(): LongArray {
++        val pid = Process.myPid()
++        val dir = java.io.File("/proc/self/task")
++        val names = dir.list() ?: error("no proc")
++        val hz = clockTicksPerSec()
++        val seen = HashSet<Int>(names.size)
++        val ticks = LongArray(PerfReport.CPU_BUCKETS)
++        for (name in names) {
++            val tid = name.toIntOrNull() ?: continue
++            try {
++                val comm = java.io.File(dir, "$name/comm").readText().trim()
++                val stat = java.io.File(dir, "$name/stat").readText()
++                val cpu = PerfReport.parseStatCpuTicks(stat) ?: continue
++                seen.add(tid)
++                val previous = threadCpuTicks.put(tid, cpu)
++                if (previous == null) continue
++                val delta = (cpu - previous).coerceAtLeast(0L)
++                val bucket = PerfReport.threadCategory(comm, tid == pid)
++                ticks[bucket] += delta
++            } catch (_: Throwable) {
++                // The thread exited between readdir and the read.
++            }
++        }
++        threadCpuTicks.keys.retainAll(seen)
++        return LongArray(PerfReport.CPU_BUCKETS) { ticks[it] * 1000L / hz }
++    }
++
++    private fun clockTicksPerSec(): Long {
++        if (clkTck > 0L) return clkTck
++        val hz = runCatching { Os.sysconf(OsConstants._SC_CLK_TCK) }.getOrDefault(0L)
++        clkTck = if (hz > 0L) hz else 100L
++        return clkTck
++    }
++
++    private fun drainCoil(): IntArray {
++        return intArrayOf(
++            coilMemCache.getAndSet(0),
++            coilMemory.getAndSet(0),
++            coilDisk.getAndSet(0),
++            coilNetwork.getAndSet(0),
++            coilHardware.getAndSet(0),
++            coilErrors.getAndSet(0),
++            coilStarted.getAndSet(0),
++        )
++    }
++
++    private fun resetCoil() {
++        drainCoil()
++    }
++
+     /**
+-     * Writes the export into the cache directory and returns it. Call [collectHeader] on the
+-     * main thread first; the rest runs on any thread.
++     * Writes the export into the cache directory and returns it. Call [collectHeader] and
++     * [HarmonyPerfToggles.describe] on the main thread first and pass that string as
++     * [togglesAtExport]. The rest runs on any thread and must not read snapshot state.
+      */
+-    fun writeReport(context: Context, header: PerfHeader): java.io.File {
++    fun writeReport(context: Context, header: PerfHeader, togglesAtExport: String): java.io.File {
+         val nowNanos = System.nanoTime()
+         val nowWallMs = System.currentTimeMillis()
+-        val noise = readNoise(nowWallMs / 1000 - PerfReport.RECENT_SECONDS)
++        val tally = readNoise(nowWallMs / 1000 - PerfReport.RECENT_SECONDS)
+         val current = buffers
+         val input = PerfReportInput(
+             header = header,
+@@ -313,13 +517,16 @@ object HarmonyFramePerf {
+             frameMetricsLate = frameMetricsLate,
+             frameMetricsError = frameMetricsError,
+             noiseMarkers = CrashLogUtil.HARMONY_NOISE_MARKERS,
+-            noise = noise,
++            noise = tally.counts,
+             trace = PanoramaScrollTrace.snapshot(),
+             startedNanos = startedNanos.takeIf { it != 0L } ?: nowNanos,
+             startedWallMs = startedWallMs.takeIf { it != 0L } ?: nowWallMs,
+             nowNanos = nowNanos,
+             nowWallMs = nowWallMs,
+             timeZone = TimeZone.getDefault(),
++            togglesAtStart = togglesAtStart.ifEmpty { togglesAtExport },
++            togglesAtExport = togglesAtExport,
++            bbq = tally.bbq,
+         )
+         val stamp = SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date(nowWallMs))
+         val file = context.createFileInCacheDir("${fileLabel(header)}_scroll_perf_$stamp.txt")
+@@ -381,16 +588,16 @@ object HarmonyFramePerf {
+         )
+     }
+ 
+-    private fun readNoise(fromEpochSec: Long): SortedMap<Long, IntArray> {
++    private fun readNoise(fromEpochSec: Long): PerfReport.NoiseTally {
+         return try {
+             val process = Runtime.getRuntime().exec(arrayOf("logcat", "-d", "-v", "epoch"))
+-            val counts = process.inputStream.bufferedReader().useLines {
+-                PerfReport.countNoise(it, CrashLogUtil.HARMONY_NOISE_MARKERS, fromEpochSec)
++            val tally = process.inputStream.bufferedReader().useLines { lines ->
++                PerfReport.tallyNoise(lines, CrashLogUtil.HARMONY_NOISE_MARKERS, fromEpochSec)
+             }
+             process.waitFor()
+-            counts
++            tally
+         } catch (_: Throwable) {
+-            TreeMap()
++            PerfReport.NoiseTally(TreeMap(), TreeMap())
+         }
+     }
+ 
+@@ -428,6 +635,32 @@ fun HarmonyFramePerfButton() {
+     val context = LocalContext.current
+     val scope = rememberCoroutineScope()
+     var busy by remember { mutableStateOf(false) }
++    var menu by remember { mutableStateOf(false) }
++    val crossfade = HarmonyPerfToggles.coverCrossfade
++    val hardware = HarmonyPerfToggles.coverHardware
++    val prefetch = HarmonyPerfToggles.prefetch
++    fun exportReport() {
++        val activity = context.findActivity() ?: return
++        PanoramaScrollTrace.log(0, "mark user")
++        busy = true
++        menu = false
++        val header = HarmonyFramePerf.collectHeader(activity)
++        val togglesAtExport = HarmonyPerfToggles.describe()
++        scope.launch {
++            val file = withContext(Dispatchers.IO) {
++                runCatching {
++                    HarmonyFramePerf.writeReport(activity, header, togglesAtExport)
++                }.getOrNull()
++            }
++            busy = false
++            if (file == null) {
++                context.toast("Failed to write the performance log")
++                return@launch
++            }
++            val uri = file.getUriCompat(activity)
++            runCatching { activity.startActivity(uri.toShareIntent(activity, "text/plain")) }
++        }
++    }
+     Box(
+         modifier = Modifier
+             .fillMaxSize()
+@@ -440,31 +673,65 @@ fun HarmonyFramePerfButton() {
+                 .size(40.dp)
+                 .clip(CircleShape)
+                 .background(Color.Black.copy(alpha = if (busy) 0.25f else 0.45f))
+-                .clickable(enabled = !busy) {
+-                    val activity = context.findActivity() ?: return@clickable
+-                    PanoramaScrollTrace.log(0, "mark user")
+-                    busy = true
+-                    val header = HarmonyFramePerf.collectHeader(activity)
+-                    scope.launch {
+-                        val file = withContext(Dispatchers.IO) {
+-                            runCatching { HarmonyFramePerf.writeReport(activity, header) }.getOrNull()
+-                        }
+-                        busy = false
+-                        if (file == null) {
+-                            context.toast("Failed to write the performance log")
+-                            return@launch
+-                        }
+-                        val uri = file.getUriCompat(activity)
+-                        runCatching { activity.startActivity(uri.toShareIntent(activity, "text/plain")) }
+-                    }
+-                },
++                .combinedClickable(
++                    enabled = !busy,
++                    onClick = { exportReport() },
++                    onLongClick = { menu = true },
++                ),
+             contentAlignment = Alignment.Center,
+         ) {
+             Text(text = "记录", color = Color.White, fontSize = 12.sp)
++            DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
++                DropdownMenuItem(
++                    text = { Text(text = "封面淡入：${if (crossfade) "开" else "关"}") },
++                    onClick = {
++                        HarmonyPerfToggles.coverCrossfade = !crossfade
++                        markToggles()
++                    },
++                )
++                DropdownMenuItem(
++                    text = { Text(text = "硬件位图：${if (hardware) "开" else "关"}") },
++                    onClick = {
++                        HarmonyPerfToggles.coverHardware = !hardware
++                        markToggles()
++                    },
++                )
++                DropdownMenuItem(
++                    text = { Text(text = "预取：${prefetchLabel(prefetch)}") },
++                    onClick = {
++                        HarmonyPerfToggles.prefetch = nextPrefetch(prefetch)
++                        markToggles()
++                    },
++                )
++                DropdownMenuItem(
++                    text = { Text(text = "导出") },
++                    onClick = { exportReport() },
++                )
++            }
+         }
+     }
+ }
+ 
++private fun markToggles() {
++    PanoramaScrollTrace.log(0, "mark toggle ${HarmonyPerfToggles.describe()}")
++}
++
++private fun nextPrefetch(current: HarmonyPerfToggles.Prefetch): HarmonyPerfToggles.Prefetch {
++    return when (current) {
++        HarmonyPerfToggles.Prefetch.BOUNDS -> HarmonyPerfToggles.Prefetch.DECODE
++        HarmonyPerfToggles.Prefetch.DECODE -> HarmonyPerfToggles.Prefetch.OFF
++        HarmonyPerfToggles.Prefetch.OFF -> HarmonyPerfToggles.Prefetch.BOUNDS
++    }
++}
++
++private fun prefetchLabel(prefetch: HarmonyPerfToggles.Prefetch): String {
++    return when (prefetch) {
++        HarmonyPerfToggles.Prefetch.BOUNDS -> "读文件头"
++        HarmonyPerfToggles.Prefetch.DECODE -> "旧解码"
++        HarmonyPerfToggles.Prefetch.OFF -> "关闭"
++    }
++}
++
+ private fun Context.findActivity(): Activity? {
+     var current: Context? = this
+     while (current is android.content.ContextWrapper) {
+@@ -558,6 +825,9 @@ class PerfReportInput(
+     val nowNanos: Long,
+     val nowWallMs: Long,
+     val timeZone: TimeZone,
++    val togglesAtStart: String = "",
++    val togglesAtExport: String = "",
++    val bbq: SortedMap<Long, IntArray> = TreeMap(),
+ )
+ 
+ class PerfSegment(val phase: Int, val startNs: Long, val endNs: Long)
+@@ -577,7 +847,8 @@ object PerfReport {
+     const val F_SWAP = 10
+     const val F_GPU = 11
+     const val F_DEADLINE = 12
+-    const val FRAME_WIDTH = 13
++    const val F_DROP = 13
++    const val FRAME_WIDTH = 14
+ 
+     const val T_TIME = 0
+     const val T_INTERVAL = 1
+@@ -595,7 +866,44 @@ object PerfReport {
+     const val S_MODE_REFRESH_MILLI = 5
+     const val S_THERMAL = 6
+     const val S_POWER_SAVE = 7
+-    const val SAMPLE_WIDTH = 8
++    const val S_HEAP_KB = 8
++    const val S_NATIVE_KB = 9
++    const val S_GC_TIME_MS = 10
++    const val S_BLOCKING_GC = 11
++    const val S_CPU_MAIN = 12
++    const val S_CPU_RT = 13
++    const val S_CPU_HWUI = 14
++    const val S_CPU_POOL = 15
++    const val S_CPU_OKHTTP = 16
++    const val S_CPU_PERF = 17
++    const val S_CPU_OTHER = 18
++    const val S_SAMPLE_US = 19
++    const val S_COIL_MEM_CACHE = 20
++    const val S_COIL_MEMORY = 21
++    const val S_COIL_DISK = 22
++    const val S_COIL_NETWORK = 23
++    const val S_COIL_HW = 24
++    const val S_COIL_ERR = 25
++    const val S_COIL_START = 26
++    const val SAMPLE_WIDTH = 27
++
++    /** A sample field that could not be read. Printed as n/a. */
++    const val UNAVAILABLE = Long.MIN_VALUE
++
++    const val CPU_MAIN = 0
++    const val CPU_RENDER = 1
++    const val CPU_HWUI = 2
++    const val CPU_POOL = 3
++    const val CPU_OKHTTP = 4
++    const val CPU_PERF = 5
++    const val CPU_OTHER = 6
++    const val CPU_BUCKETS = 7
++
++    val BBQ_LABELS = arrayOf(
++        "BLASTBufferQueue max frames",
++        "BLASTBufferQueue Faking releaseBufferCallback",
++        "BLASTBufferQueue other",
++    )
+ 
+     const val RECENT_SECONDS = 30L
+     const val PRIVACY_LINE = "privacy: no titles, urls, extension list or logcat text"
+@@ -605,6 +913,16 @@ object PerfReport {
+     private const val IDLE_MERGE_NS = 100_000_000L
+     private const val DEFAULT_PERIOD_NS = 16_666_667L
+ 
++    /** p50/p90 over every reported frame, not only jank. Names match the analyzer. */
++    private val STAGE_PCTS = listOf(
++        "draw" to F_DRAW,
++        "sync" to F_SYNC,
++        "command" to F_COMMAND,
++        "swap" to F_SWAP,
++        "gpu" to F_GPU,
++        "layout" to F_LAYOUT,
++    )
++
+     /** Stage columns in report order; names match the analyzer. */
+     private val STAGES = listOf(
+         "delay" to F_DELAY,
+@@ -721,9 +1039,58 @@ object PerfReport {
+         return DEFAULT_PERIOD_NS
+     }
+ 
+-    /** Per-second counts of noise lines from `logcat -v epoch`. Values: one per marker, then the total. */
+-    fun countNoise(lines: Sequence<String>, markers: List<String>, fromEpochSec: Long): SortedMap<Long, IntArray> {
++    /**
++     * Vsyncs between two reported frames that were neither reported nor included in [dropCount]
++     * (the later frame's dropCountSinceLastInvocation).
++     *
++     * [periodNs] is the display refresh interval then in effect, from [periodAt], not
++     * FrameMetrics.DEADLINE. DEADLINE is a budget: on a 90 Hz panel it is often 16.7 ms or
++     * about 21 ms, so dividing by it mis-counts skipped vsyncs.
++     */
++    fun missedVsyncs(previousIntendedNs: Long, intendedNs: Long, dropCount: Long, periodNs: Long): Long {
++        if (periodNs <= 0L) return 0L
++        val steps = ((intendedNs - previousIntendedNs).toDouble() / periodNs).roundToLong()
++        return (steps - 1L - dropCount).coerceAtLeast(0L)
++    }
++
++    /** utime+stime from a `/proc/self/task/<tid>/stat` line. Null when the line is truncated. */
++    fun parseStatCpuTicks(stat: String): Long? {
++        val end = stat.lastIndexOf(')')
++        if (end < 0 || end + 2 >= stat.length) return null
++        val fields = stat.substring(end + 2).split(' ')
++        if (fields.size <= 12) return null
++        val utime = fields[11].toLongOrNull() ?: return null
++        val stime = fields[12].toLongOrNull() ?: return null
++        return utime + stime
++    }
++
++    /**
++     * `/proc` comm is truncated to 15 characters, so both recorder threads
++     * ("HarmonyFramePerf" and "HarmonyFramePerfSampler") show up as "HarmonyFramePer".
++     */
++    fun threadCategory(comm: String, isMain: Boolean): Int {
++        if (isMain) return CPU_MAIN
++        if (comm == "RenderThread") return CPU_RENDER
++        if (comm.startsWith("hwui")) return CPU_HWUI
++        if (comm.startsWith("DefaultDispatch")) return CPU_POOL
++        if (comm.startsWith("OkHttp")) return CPU_OKHTTP
++        if (comm.startsWith("HarmonyFrameP")) return CPU_PERF
++        return CPU_OTHER
++    }
++
++    class NoiseTally(
++        val counts: SortedMap<Long, IntArray>,
++        val bbq: SortedMap<Long, IntArray>,
++    )
++
++    /**
++     * Per-second noise counts, plus a BLASTBufferQueue split (max frames / faking release /
++     * other). The split stays here: the crash-log filter still matches the whole tag, and a
++     * line that contains both the tag and a substring must not increment two markers.
++     */
++    fun tallyNoise(lines: Sequence<String>, markers: List<String>, fromEpochSec: Long): NoiseTally {
+         val counts = TreeMap<Long, IntArray>()
++        val bbq = TreeMap<Long, IntArray>()
+         for (line in lines) {
+             val trimmed = line.trimStart()
+             val second = trimmed.substringBefore(' ').substringBefore('.').toLongOrNull() ?: continue
+@@ -737,8 +1104,27 @@ object PerfReport {
+                 }
+             }
+             if (hit) counts.getValue(second)[markers.size]++
++            if ("BLASTBufferQueue" in trimmed) {
++                val row = bbq.getOrPut(second) { IntArray(BBQ_LABELS.size) }
++                row[bbqBucket(trimmed)]++
++            }
+         }
+-        return counts
++        return NoiseTally(counts, bbq)
++    }
++
++    /** Per-second counts of noise lines from `logcat -v epoch`. Values: one per marker, then the total. */
++    fun countNoise(lines: Sequence<String>, markers: List<String>, fromEpochSec: Long): SortedMap<Long, IntArray> {
++        return tallyNoise(lines, markers, fromEpochSec).counts
++    }
++
++    fun countBbq(lines: Sequence<String>, fromEpochSec: Long): SortedMap<Long, IntArray> {
++        return tallyNoise(lines, emptyList(), fromEpochSec).bbq
++    }
++
++    fun bbqBucket(line: String): Int = when {
++        "max frames" in line -> 0
++        "Faking releaseBufferCallback" in line -> 1
++        else -> 2
+     }
+ 
+     fun format(input: PerfReportInput): String {
+@@ -752,7 +1138,7 @@ object PerfReport {
+         val haveFrames = frames.rows > 0
+ 
+         out.appendLine("# ${header.appLabel} scroll performance log")
+-        out.appendLine("format: harmony-scroll-perf 1")
++        out.appendLine("format: harmony-scroll-perf 2")
+         out.appendLine("app_id: ${header.appId}")
+         out.appendLine("version: ${header.versionName} (${header.versionCode})")
+         out.appendLine("device: ${header.brand} / ${header.model}")
+@@ -768,6 +1154,8 @@ object PerfReport {
+         out.appendLine("recording_started: ${clock.full(input.startedWallMs)}")
+         out.appendLine("exported: ${clock.full(input.nowWallMs)}")
+         out.appendLine("recorded_seconds: ${(input.nowNanos - input.startedNanos) / SECOND_NS}")
++        out.appendLine("toggles_at_start: ${input.togglesAtStart}")
++        out.appendLine("toggles_at_export: ${input.togglesAtExport}")
+         out.appendLine("vsync_ms: ${ms(periodAt(samples, input.nowNanos, fallbackRate))}")
+         when {
+             haveFrames && input.frameMetricsLate ->
+@@ -784,6 +1172,10 @@ object PerfReport {
+             "jank_rule: TOTAL_DURATION > DEADLINE when DEADLINE is known, otherwise > 1.5 x vsync period; " +
+                 "Choreographer: interval > 1.5 x vsync period",
+         )
++        out.appendLine(
++            "missed_vsync: max(0, round((intendedVsync[i] - intendedVsync[i-1]) / refreshPeriod) - 1 - " +
++                "dropCount[i]); refreshPeriod is the display refresh sample, not DEADLINE",
++        )
+         out.appendLine()
+ 
+         val segments = segments(ticks)
+@@ -814,15 +1206,57 @@ object PerfReport {
+                 "# source=choreographer: frames are vsync ticks, p50/p90/p99/max are tick intervals ms"
+             },
+         )
++        out.appendLine(
++            "# reported/drops/missed are FrameMetrics; ticks are Choreographer callbacks. " +
++                "stages p50/p90 cover every reported frame, not only jank",
++        )
+         for (segment in segments) {
++            val rows = if (haveFrames) rowsInSegment(segment, frames, framePhase) else IntArray(0)
++            val ticksInSegment = tickCount(segment, ticks)
++            val drops = if (haveFrames) segmentDrops(frames, rows) else 0L
++            val missed = if (haveFrames) {
++                val include = BooleanArray(frames.rows)
++                for (row in rows) include[row] = true
++                segmentMissed(frames, framePeriod, include)
++            } else {
++                0L
++            }
++            val prefix = if (haveFrames) {
++                frameSegmentLine(segment, frames, rows, frameJank, clock)
++            } else {
++                tickSegmentLine(segment, ticks, samples, fallbackRate, clock)
++            }
++            out.append(prefix)
++            out.append(" reported=").append(rows.size)
++            out.append(" drops=").append(drops)
++            out.append(" ticks=").append(ticksInSegment)
++            out.append(" missed=").append(missed)
++            out.appendLine()
+             out.appendLine(
+-                if (haveFrames) {
+-                    frameSegmentLine(segment, frames, framePhase, frameJank, clock)
+-                } else {
+-                    tickSegmentLine(segment, ticks, samples, fallbackRate, clock)
+-                },
++                stagesText(
++                    type = phaseName(segment.phase),
++                    start = clock.time(segment.startNs),
++                    frames = frames,
++                    rows = rows,
++                    reported = rows.size,
++                    drops = drops,
++                    ticks = ticksInSegment,
++                    missed = missed,
++                ),
+             )
+         }
++        out.appendLine(
++            stagesText(
++                type = "all",
++                start = null,
++                frames = frames,
++                rows = null,
++                reported = frames.rows,
++                drops = if (haveFrames) totalDrops(frames) else 0L,
++                ticks = ticks.rows,
++                missed = if (haveFrames) totalMissed(frames, framePeriod) else 0L,
++            ),
++        )
+         out.appendLine()
+ 
+         if (haveFrames) {
+@@ -846,6 +1280,7 @@ object PerfReport {
+         out.appendLine()
+ 
+         val recentFrom = input.nowNanos - RECENT_SECONDS * SECOND_NS
++        appendSeconds(out, input, clock, frames, ticks, framePeriod)
+         out.appendLine("## Last 30 s: jank frames")
+         out.appendLine(
+             "# columns: time phase total delay input animation layout draw sync command swap gpu deadline " +
+@@ -897,15 +1332,12 @@ object PerfReport {
+ 
+         out.appendLine("## Last 30 s: 500 ms samples")
+         out.appendLine("# gc = GC count delta, cpu_ms = process CPU delta, refresh = Display.refreshRate")
++        out.appendLine("# heap_mb / native_mb allocated; gc_time_ms = art.gc.gc-time delta; blocking_gc = count delta")
++        out.appendLine("# cpu_* = thread CPU delta ms by category; n/a if that read failed")
++        out.appendLine("# sample_ms = duration of this sample; coil_* = Coil events during the interval")
+         for (row in 0 until samples.rows) {
+-            val time = samples[row, S_TIME]
+-            if (time < recentFrom) continue
+-            out.appendLine(
+-                "sample ${clock.time(time)} gc=${samples[row, S_GC]} cpu_ms=${samples[row, S_CPU_MS]} " +
+-                    "refresh=${rateMilli(samples[row, S_REFRESH_MILLI])} mode=${samples[row, S_MODE_ID]}" +
+-                    "@${rateMilli(samples[row, S_MODE_REFRESH_MILLI])} " +
+-                    "thermal=${samples[row, S_THERMAL]} power_save=${samples[row, S_POWER_SAVE] == 1L}",
+-            )
++            if (samples[row, S_TIME] < recentFrom) continue
++            appendSample(out, clock, samples, row)
+         }
+         out.appendLine()
+ 
+@@ -917,6 +1349,14 @@ object PerfReport {
+             for ((index, marker) in input.noiseMarkers.withIndex()) {
+                 if (counts[index] > 0) out.append(" [").append(marker).append("]=").append(counts[index])
+             }
++            val bbqRow = input.bbq[second]
++            if (bbqRow != null) {
++                for (index in BBQ_LABELS.indices) {
++                    if (index < bbqRow.size && bbqRow[index] > 0) {
++                        out.append(" [").append(BBQ_LABELS[index]).append("]=").append(bbqRow[index])
++                    }
++                }
++            }
+             out.appendLine()
+         }
+         out.appendLine()
+@@ -937,26 +1377,26 @@ object PerfReport {
+     private fun frameSegmentLine(
+         segment: PerfSegment,
+         frames: PerfTable,
+-        framePhase: IntArray,
++        rows: IntArray,
+         frameJank: BooleanArray,
+         clock: Clock,
+     ): String {
+-        val totals = ArrayList<Long>()
++        val totals = LongArray(rows.size)
+         var jank = 0
+-        val inSegment = { row: Int ->
+-            val vsync = frames[row, F_VSYNC]
+-            vsync >= segment.startNs && vsync <= segment.endNs && framePhase[row] == segment.phase
+-        }
+-        for (row in 0 until frames.rows) {
+-            if (!inSegment(row)) continue
+-            totals += frames[row, F_TOTAL]
+-            if (frameJank[row]) jank++
++        val jankRows = BooleanArray(frames.rows)
++        for (index in rows.indices) {
++            val row = rows[index]
++            totals[index] = frames[row, F_TOTAL]
++            if (frameJank[row]) {
++                jank++
++                jankRows[row] = true
++            }
+         }
+-        val sorted = totals.toLongArray().also { it.sort() }
+-        return segmentPrefix(segment, sorted.size, clock) +
+-            " jank=$jank p50=${ms(percentile(sorted, 50.0))} p90=${ms(percentile(sorted, 90.0))}" +
+-            " p99=${ms(percentile(sorted, 99.0))} max=${ms(sorted.lastOrNull() ?: -1L)}" +
+-            " main=${mainStage(frames) { inSegment(it) && frameJank[it] } ?: "-"}"
++        totals.sort()
++        return segmentPrefix(segment, rows.size, clock) +
++            " jank=$jank p50=${ms(percentile(totals, 50.0))} p90=${ms(percentile(totals, 90.0))}" +
++            " p99=${ms(percentile(totals, 99.0))} max=${ms(totals.lastOrNull() ?: -1L)}" +
++            " main=${mainStage(frames, jankRows) ?: "-"}"
+     }
+ 
+     private fun tickSegmentLine(
+@@ -992,11 +1432,238 @@ object PerfReport {
+             "fps=${String.format(Locale.US, "%.1f", fps)}"
+     }
+ 
+-    private fun mainStage(frames: PerfTable, include: (Int) -> Boolean): String? {
+-        val means = stageMeans(frames, include) ?: return null
++    private fun mainStage(frames: PerfTable, include: BooleanArray): String? {
++        if (include.none { it }) return null
++        val means = stageMeans(frames) { include[it] } ?: return null
+         return means.maxByOrNull { it.second }?.takeIf { it.second > 0.0 }?.first
+     }
+ 
++    private fun rowsInSegment(segment: PerfSegment, frames: PerfTable, framePhase: IntArray): IntArray {
++        val rows = ArrayList<Int>()
++        for (row in 0 until frames.rows) {
++            val vsync = frames[row, F_VSYNC]
++            if (vsync < segment.startNs || vsync > segment.endNs) continue
++            if (framePhase[row] != segment.phase) continue
++            rows += row
++        }
++        return rows.toIntArray()
++    }
++
++    private fun tickCount(segment: PerfSegment, ticks: PerfTable): Int {
++        var count = 0
++        for (row in 0 until ticks.rows) {
++            val time = ticks[row, T_TIME]
++            if (time < segment.startNs || time > segment.endNs) continue
++            if (ticks[row, T_PHASE].toInt() != segment.phase) continue
++            count++
++        }
++        return count
++    }
++
++    private fun segmentDrops(frames: PerfTable, rows: IntArray): Long {
++        var drops = 0L
++        for (row in rows) drops += frames[row, F_DROP].coerceAtLeast(0L)
++        return drops
++    }
++
++    private fun segmentMissed(frames: PerfTable, periods: LongArray, include: BooleanArray): Long {
++        var missed = 0L
++        var previous = -1L
++        for (row in 0 until frames.rows) {
++            val intended = frames[row, F_INTENDED_VSYNC]
++            if (include[row] && previous >= 0L) {
++                missed += missedVsyncs(previous, intended, frames[row, F_DROP], periods[row])
++            }
++            previous = intended
++        }
++        return missed
++    }
++
++    private fun totalDrops(frames: PerfTable): Long {
++        var drops = 0L
++        for (row in 0 until frames.rows) drops += frames[row, F_DROP].coerceAtLeast(0L)
++        return drops
++    }
++
++    private fun totalMissed(frames: PerfTable, periods: LongArray): Long {
++        var missed = 0L
++        var previous = -1L
++        for (row in 0 until frames.rows) {
++            val intended = frames[row, F_INTENDED_VSYNC]
++            if (previous >= 0L) {
++                missed += missedVsyncs(previous, intended, frames[row, F_DROP], periods[row])
++            }
++            previous = intended
++        }
++        return missed
++    }
++
++    private fun stagesText(
++        type: String,
++        start: String?,
++        frames: PerfTable,
++        rows: IntArray?,
++        reported: Int,
++        drops: Long,
++        ticks: Int,
++        missed: Long,
++    ): String {
++        val list = rows?.asList()
++        val builder = StringBuilder()
++        builder.append("stages type=").append(type)
++        if (start != null) builder.append(" start=").append(start)
++        builder.append(" reported=").append(reported)
++        builder.append(" drops=").append(drops)
++        builder.append(" ticks=").append(ticks)
++        builder.append(" missed=").append(missed)
++        for ((name, column) in STAGE_PCTS) {
++            val sorted = sortedColumn(frames, list, column)
++            builder.append(' ').append(name).append("_p50=").append(ms(percentile(sorted, 50.0)))
++            builder.append(' ').append(name).append("_p90=").append(ms(percentile(sorted, 90.0)))
++        }
++        return builder.toString()
++    }
++
++    private fun sortedColumn(frames: PerfTable, rows: List<Int>?, column: Int): LongArray {
++        val count = rows?.size ?: frames.rows
++        val values = LongArray(count)
++        var used = 0
++        for (index in 0 until count) {
++            val row = rows?.get(index) ?: index
++            val value = frames[row, column]
++            if (value >= 0L) values[used++] = value
++        }
++        val trimmed = if (used == count) values else values.copyOf(used)
++        trimmed.sort()
++        return trimmed
++    }
++
++    private class SecAcc {
++        var ticks = 0
++        val phases = IntArray(3)
++        val rows = ArrayList<Int>()
++        var drops = 0L
++        var missed = 0L
++    }
++
++    private fun appendSeconds(
++        out: StringBuilder,
++        input: PerfReportInput,
++        clock: Clock,
++        frames: PerfTable,
++        ticks: PerfTable,
++        framePeriod: LongArray,
++    ) {
++        val endSec = input.nowWallMs / 1000L
++        val startSec = maxOf(input.startedWallMs / 1000L, endSec - RECENT_SECONDS)
++        val bySecond = HashMap<Long, SecAcc>()
++        fun acc(second: Long): SecAcc? {
++            if (second < startSec || second > endSec) return null
++            return bySecond.getOrPut(second) { SecAcc() }
++        }
++        for (row in 0 until ticks.rows) {
++            val bucket = acc(clock.epochSecond(ticks[row, T_TIME])) ?: continue
++            bucket.ticks++
++            val phase = ticks[row, T_PHASE].toInt()
++            if (phase in 0..2) bucket.phases[phase]++
++        }
++        var previousIntended = -1L
++        for (row in 0 until frames.rows) {
++            val intended = frames[row, F_INTENDED_VSYNC]
++            val missed = if (previousIntended >= 0L) {
++                missedVsyncs(previousIntended, intended, frames[row, F_DROP], framePeriod[row])
++            } else {
++                0L
++            }
++            previousIntended = intended
++            val bucket = acc(clock.epochSecond(frames[row, F_VSYNC])) ?: continue
++            bucket.rows += row
++            bucket.drops += frames[row, F_DROP].coerceAtLeast(0L)
++            bucket.missed += missed
++        }
++        out.appendLine("## Last 30 s: one line per second")
++        out.appendLine(
++            "# phase = most Choreographer ticks (fling over drag over idle on a tie); " +
++                "missed is charged to the later frame's second",
++        )
++        var second = startSec
++        while (second <= endSec) {
++            out.appendLine(secondLine(second, bySecond[second], frames, clock))
++            second++
++        }
++        out.appendLine()
++    }
++
++    private fun secondLine(second: Long, bucket: SecAcc?, frames: PerfTable, clock: Clock): String {
++        val rows = bucket?.rows
++        val swap = if (rows == null) -1L else percentile(sortedColumn(frames, rows, F_SWAP), 90.0)
++        val sync = if (rows == null) -1L else percentile(sortedColumn(frames, rows, F_SYNC), 90.0)
++        val gpu = if (rows == null) -1L else percentile(sortedColumn(frames, rows, F_GPU), 90.0)
++        return "sec ${clock.second(second)} ticks=${bucket?.ticks ?: 0} frames=${rows?.size ?: 0} " +
++            "drops=${bucket?.drops ?: 0L} missed=${bucket?.missed ?: 0L} phase=${dominantPhase(bucket?.phases)} " +
++            "swap_p90=${ms(swap)} sync_p90=${ms(sync)} gpu_p90=${ms(gpu)}"
++    }
++
++    /** Higher phase wins a tie, so a second that is half fling is not labelled idle. */
++    private fun dominantPhase(phases: IntArray?): String {
++        if (phases == null || phases.sum() == 0) return phaseName(PanoramaScrollTrace.PHASE_IDLE)
++        var best = 0
++        for (phase in 1..2) {
++            if (phases[phase] >= phases[best]) best = phase
++        }
++        return phaseName(best)
++    }
++
++    private fun appendSample(out: StringBuilder, clock: Clock, samples: PerfTable, row: Int) {
++        out.append("sample ").append(clock.time(samples[row, S_TIME]))
++        out.append(" gc=").append(samples[row, S_GC])
++        out.append(" cpu_ms=").append(samples[row, S_CPU_MS])
++        out.append(" refresh=").append(rateMilli(samples[row, S_REFRESH_MILLI]))
++        out.append(" mode=").append(samples[row, S_MODE_ID])
++        out.append('@').append(rateMilli(samples[row, S_MODE_REFRESH_MILLI]))
++        out.append(" thermal=").append(samples[row, S_THERMAL])
++        out.append(" power_save=").append(samples[row, S_POWER_SAVE] == 1L)
++        out.append(" heap_mb=").append(mbFromKb(samples[row, S_HEAP_KB]))
++        out.append(" native_mb=").append(mbFromKb(samples[row, S_NATIVE_KB]))
++        out.append(" gc_time_ms=").append(plain(samples[row, S_GC_TIME_MS]))
++        out.append(" blocking_gc=").append(plain(samples[row, S_BLOCKING_GC]))
++        // cpu_pool is the whole Default dispatcher pool, not Coil alone.
++        // cpu_ok is the OkHttp pool. The export must not contain the letters "http".
++        val cpuKeys = arrayOf(
++            "cpu_main",
++            "cpu_rt",
++            "cpu_hwui",
++            "cpu_pool",
++            "cpu_ok",
++            "cpu_perf",
++            "cpu_other",
++        )
++        for (index in cpuKeys.indices) {
++            out.append(' ').append(cpuKeys[index]).append('=').append(plain(samples[row, S_CPU_MAIN + index]))
++        }
++        out.append(" sample_ms=").append(sampleMs(samples[row, S_SAMPLE_US]))
++        out.append(" coil_mem_cache=").append(samples[row, S_COIL_MEM_CACHE])
++        out.append(" coil_memory=").append(samples[row, S_COIL_MEMORY])
++        out.append(" coil_disk=").append(samples[row, S_COIL_DISK])
++        out.append(" coil_network=").append(samples[row, S_COIL_NETWORK])
++        out.append(" coil_hw=").append(samples[row, S_COIL_HW])
++        out.append(" coil_err=").append(samples[row, S_COIL_ERR])
++        out.append(" coil_start=").append(samples[row, S_COIL_START])
++        out.appendLine()
++    }
++
++    private fun plain(value: Long): String = if (value == UNAVAILABLE) "n/a" else value.toString()
++
++    private fun mbFromKb(kb: Long): String {
++        if (kb == UNAVAILABLE) return "n/a"
++        return String.format(Locale.US, "%.1f", kb / 1024.0)
++    }
++
++    private fun sampleMs(micros: Long): String {
++        if (micros == UNAVAILABLE) return "n/a"
++        return String.format(Locale.US, "%.2f", micros / 1000.0)
++    }
++
+     private fun stageMeans(frames: PerfTable, include: (Int) -> Boolean): List<Pair<String, Double>>? {
+         val sums = DoubleArray(STAGES.size)
+         val counts = IntArray(STAGES.size)
+@@ -1092,6 +1759,8 @@ object PerfReport {
+ 
+         fun time(nanos: Long): String = timeFormat.format(Date(nowWallMs - (nowNanos - nanos) / 1_000_000))
+ 
++        fun epochSecond(nanos: Long): Long = (nowWallMs - (nowNanos - nanos) / 1_000_000) / 1000
++
+         fun second(epochSecond: Long): String = secondFormat.format(Date(epochSecond * 1000))
+ 
+         fun full(wallMs: Long): String = fullFormat.format(Date(wallMs))
+diff --git a/app/src/main/java/eu/kanade/tachiyomi/util/system/HarmonyPerfToggles.kt b/app/src/main/java/eu/kanade/tachiyomi/util/system/HarmonyPerfToggles.kt
+new file mode 100644
+index 0000000..5b3d4c7
+--- /dev/null
++++ b/app/src/main/java/eu/kanade/tachiyomi/util/system/HarmonyPerfToggles.kt
+@@ -0,0 +1,33 @@
++package eu.kanade.tachiyomi.util.system
++
++import androidx.compose.runtime.getValue
++import androidx.compose.runtime.mutableStateOf
++import androidx.compose.runtime.setValue
++
++/**
++ * A/B switches for grid cover loading, flipped from the scroll performance recorder so one
++ * recording can compare arms. They live in memory only: every process start is back on the
++ * defaults, and nothing reads them unless the recorder changed them.
++ */
++object HarmonyPerfToggles {
++
++    enum class Prefetch { BOUNDS, DECODE, OFF }
++
++    /** Coil crossfade on grid covers. Off skips the 300 ms fade for network and disk hits. */
++    var coverCrossfade by mutableStateOf(true)
++
++    /** Hardware bitmaps for grid covers. Off decodes to software bitmaps uploaded on first draw. */
++    var coverHardware by mutableStateOf(true)
++
++    /**
++     * How the browse panorama grid learns cover shapes ahead of the viewport.
++     * BOUNDS reads the image header from the disk cache, DECODE is the old 128 px Coil decode
++     * of every loaded row, OFF learns only from covers that were drawn.
++     */
++    var prefetch by mutableStateOf(Prefetch.BOUNDS)
++
++    fun describe(): String =
++        "crossfade=${if (coverCrossfade) "on" else "off"} " +
++            "hardware=${if (coverHardware) "on" else "off"} " +
++            "prefetch=${prefetch.name.lowercase()}"
++}
+diff --git a/app/src/test/java/eu/kanade/tachiyomi/util/system/HarmonyFramePerfTest.kt b/app/src/test/java/eu/kanade/tachiyomi/util/system/HarmonyFramePerfTest.kt
+index ac5478b..8af7440 100644
+--- a/app/src/test/java/eu/kanade/tachiyomi/util/system/HarmonyFramePerfTest.kt
++++ b/app/src/test/java/eu/kanade/tachiyomi/util/system/HarmonyFramePerfTest.kt
+@@ -80,16 +80,32 @@ class HarmonyFramePerfTest {
+         File("build/tmp").mkdirs()
+         File("build/tmp/harmony_scroll_perf_sample.txt").writeText(text)
+ 
++        assertTrue(text.contains("format: harmony-scroll-perf 2"), text)
+         assertTrue(text.contains("frame_metrics: provided"), text)
+         assertTrue(Regex("segment type=fling .* jank=[1-9]").containsMatchIn(text), text)
+         assertTrue(text.contains("segment type=drag"), text)
++        assertTrue(text.contains("reported="), text)
++        assertTrue(text.contains("drops="), text)
++        assertTrue(text.contains("missed="), text)
++        assertTrue(text.contains("stages type=fling"), text)
++        assertTrue(text.contains("stages type=all"), text)
++        assertTrue(text.contains("draw_p90="), text)
+         assertTrue(text.contains("jank_stages scope=fling"), text)
+         assertTrue(Regex("jank_stages scope=fling frames=\\d+ .* main=layout").containsMatchIn(text), text)
+         assertTrue(text.contains("choreographer scope=all"), text)
++        assertTrue(text.contains("\nsec "), text)
+         assertTrue(text.contains("\njank "), text)
+         assertTrue(text.contains("\nsample "), text)
++        assertTrue(text.contains("cpu_pool="), text)
++        assertFalse(text.contains("cpu_coil"), text)
++        assertTrue(text.contains("heap_mb="), text)
++        assertTrue(text.contains("coil_start="), text)
+         assertTrue(text.contains("\nnoise "), text)
++        assertTrue(text.contains("[BLASTBufferQueue other]="), text)
+         assertTrue(text.contains("g0 mark user"), text)
++        assertTrue(text.contains("toggles_at_start: crossfade=on hardware=on prefetch=bounds"), text)
++        assertTrue(text.contains("toggles_at_export: crossfade=off hardware=on prefetch=bounds"), text)
++        assertTrue(text.contains("mark toggle crossfade=off hardware=on prefetch=bounds"), text)
+         assertTrue(text.trimEnd().endsWith(PerfReport.PRIVACY_LINE), text)
+         // Marker names appear in the "# markers:" line by design; the log message text must not.
+         val body = text.substringBeforeLast(PerfReport.PRIVACY_LINE)
+@@ -122,9 +138,133 @@ class HarmonyFramePerfTest {
+         assertTrue(text.contains("FrameMetrics 未提供"), text)
+         assertTrue(text.contains("source=choreographer"), text)
+         assertTrue(text.contains("\njank_tick "), text)
++        assertTrue(text.contains("stages type=all"), text)
+         assertTrue(text.trimEnd().endsWith(PerfReport.PRIVACY_LINE), text)
+     }
+ 
++    @Test
++    fun `missed vsyncs subtract reported gaps and dropped reports`() {
++        assertEquals(0L, PerfReport.missedVsyncs(0L, PERIOD, dropCount = 0, periodNs = PERIOD))
++        assertEquals(2L, PerfReport.missedVsyncs(0L, 3 * PERIOD, dropCount = 0, periodNs = PERIOD))
++        assertEquals(0L, PerfReport.missedVsyncs(0L, 3 * PERIOD, dropCount = 2, periodNs = PERIOD))
++        assertEquals(1L, PerfReport.missedVsyncs(0L, 4 * PERIOD, dropCount = 2, periodNs = PERIOD))
++        assertEquals(0L, PerfReport.missedVsyncs(0L, PERIOD + PERIOD / 10, dropCount = 0, periodNs = PERIOD))
++        assertEquals(0L, PerfReport.missedVsyncs(5 * PERIOD, PERIOD, dropCount = 0, periodNs = PERIOD))
++    }
++
++    @Test
++    fun `a segment line has stage percentiles for every frame and a per-second line`() {
++        val period = 10 * MS
++        val t0 = BASE
++        fun frame(time: Long, drop: Long, draw: Long, gpu: Long): LongArray {
++            val row = LongArray(PerfReport.FRAME_WIDTH)
++            row[PerfReport.F_INTENDED_VSYNC] = time
++            row[PerfReport.F_VSYNC] = time
++            row[PerfReport.F_TOTAL] = 5 * MS
++            row[PerfReport.F_DRAW] = draw
++            row[PerfReport.F_SYNC] = draw
++            row[PerfReport.F_COMMAND] = MS
++            row[PerfReport.F_SWAP] = draw
++            row[PerfReport.F_GPU] = gpu
++            row[PerfReport.F_LAYOUT] = draw
++            row[PerfReport.F_DEADLINE] = period
++            row[PerfReport.F_DROP] = drop
++            return row
++        }
++        val frames = listOf(
++            frame(t0, drop = 0, draw = 1 * MS, gpu = -1),
++            frame(t0 + period, drop = 0, draw = 2 * MS, gpu = 4 * MS),
++            frame(t0 + 5 * period, drop = 1, draw = 3 * MS, gpu = 8 * MS),
++        )
++        val ticks = (0..5).map { tick(t0 + it * period, FLING, period) }
++        val nowNanos = t0 + SECOND
++        val nowWallMs = 1_792_000_000_000L
++        val input = PerfReportInput(
++            header = testHeader(refresh = 100f),
++            frames = PerfTable.of(PerfReport.FRAME_WIDTH, *frames.toTypedArray()),
++            ticks = PerfTable.of(PerfReport.TICK_WIDTH, *ticks.toTypedArray()),
++            samples = PerfTable(0, PerfReport.SAMPLE_WIDTH, LongArray(0)),
++            frameMetricsLate = false,
++            frameMetricsError = null,
++            noiseMarkers = emptyList(),
++            noise = TreeMap(),
++            trace = listOf("12:00:00.500 g2 mark toggle crossfade=off hardware=on prefetch=decode"),
++            startedNanos = t0,
++            startedWallMs = nowWallMs - 1_000L,
++            nowNanos = nowNanos,
++            nowWallMs = nowWallMs,
++            timeZone = TimeZone.getTimeZone("UTC"),
++            togglesAtStart = "crossfade=on hardware=on prefetch=bounds",
++            togglesAtExport = "crossfade=off hardware=on prefetch=decode",
++        )
++        val text = PerfReport.format(input)
++        assertTrue(
++            Regex("segment type=fling .* reported=3 drops=1 ticks=6 missed=2").containsMatchIn(text),
++            text,
++        )
++        assertTrue(text.contains("draw_p50=2.00 draw_p90=3.00"), text)
++        assertTrue(text.contains("gpu_p50=4.00 gpu_p90=8.00"), text)
++        assertTrue(Regex("stages type=all reported=3 drops=1 ticks=6 missed=2").containsMatchIn(text), text)
++        assertTrue(
++            Regex("sec \\d\\d:\\d\\d:\\d\\d ticks=6 frames=3 drops=1 missed=2 phase=fling").containsMatchIn(text),
++            text,
++        )
++        assertTrue(text.contains("mark toggle crossfade=off hardware=on prefetch=decode"), text)
++        assertFalse(text.contains("http"), text)
++    }
++
++    @Test
++    fun `BLASTBufferQueue lines split into sub-buckets without keeping the text`() {
++        val lines = sequenceOf(
++            "  100.1  1  2 E BLASTBufferQueue: max frames acquired https://secret.example/a",
++            "  100.2  1  2 E BLASTBufferQueue: Faking releaseBufferCallback from transaction",
++            "  100.3  1  2 E BLASTBufferQueue: something else",
++            "  100.4  1  2 E SurfaceDelegator: client is nullptr",
++            "  100.5  1  2 E BLASTBufferQueue: max frames and Faking releaseBufferCallback",
++        )
++        val bbq = PerfReport.countBbq(lines, fromEpochSec = 0L)
++        assertEquals(listOf(2, 1, 1), bbq.getValue(100L).toList())
++        val markers = listOf("BLASTBufferQueue", "SurfaceDelegator")
++        val counts = PerfReport.countNoise(lines, markers, fromEpochSec = 0L)
++        assertEquals(listOf(4, 1, 5), counts.getValue(100L).toList())
++    }
++
++    @Test
++    fun `thread cpu groups comm and reads utime plus stime past the comm field`() {
++        assertEquals(PerfReport.CPU_MAIN, PerfReport.threadCategory("app.mihon", isMain = true))
++        assertEquals(PerfReport.CPU_RENDER, PerfReport.threadCategory("RenderThread", isMain = false))
++        assertEquals(PerfReport.CPU_HWUI, PerfReport.threadCategory("hwuiTask0", isMain = false))
++        assertEquals(PerfReport.CPU_POOL, PerfReport.threadCategory("DefaultDispatch", isMain = false))
++        assertEquals(PerfReport.CPU_OKHTTP, PerfReport.threadCategory("OkHttp TaskRun", isMain = false))
++        assertEquals(PerfReport.CPU_PERF, PerfReport.threadCategory("HarmonyFramePer", isMain = false))
++        assertEquals(PerfReport.CPU_OTHER, PerfReport.threadCategory("HeapTaskDaemon", isMain = false))
++        val stat = "12 (OkHttp (pooled)) R 1 1 1 0 -1 0 0 0 0 0 15 25"
++        assertEquals(40L, PerfReport.parseStatCpuTicks(stat))
++        assertEquals(null, PerfReport.parseStatCpuTicks("no-paren"))
++    }
++
++    private fun testHeader(refresh: Float): PerfHeader {
++        return PerfHeader(
++            appId = "app.mihon.test",
++            appLabel = "Mihon",
++            versionName = "0.20.4",
++            versionCode = 20,
++            brand = "HUAWEI",
++            model = "ALN-AL00",
++            androidRelease = "12",
++            sdk = 31,
++            windowWidthDp = 411,
++            windowHeightDp = 891,
++            density = 2.625f,
++            supportedRefreshRates = listOf(refresh),
++            currentRefreshRate = refresh,
++            displayMode = "id=1 100x100 @$refresh",
++            thermalStatus = 0,
++            powerSave = false,
++            uptimeMs = 1_000L,
++        )
++    }
++
+     /**
+      * 12 s at 60 Hz: idle, a drag, a fling whose every 15th frame is a 30 ms layout frame, then
+      * a second drag with slow sync frames, and a switch to 90 Hz at 11.5 s.
+@@ -242,8 +382,12 @@ class HarmonyFramePerfTest {
+                 "00:00:03.000 g1 up moves=20 dy=-600 gapLastMove=8ms trackerV=-4000 recentV=-4100 consumed=true",
+                 "00:00:03.016 g1 fling start v=4000 offset=1200 max=90000",
+                 "00:00:05.000 g1 fling done left=0 dist=3000 frames=118 ms=1950 maxGap=33ms offset=4200 max=90000",
++                "00:00:11.000 g0 mark toggle crossfade=off hardware=on prefetch=bounds",
+                 "00:00:12.000 g0 mark user",
+             ),
++            togglesAtStart = "crossfade=on hardware=on prefetch=bounds",
++            togglesAtExport = "crossfade=off hardware=on prefetch=bounds",
++            bbq = PerfReport.countBbq(noiseLines.asSequence(), nowWallMs / 1000 - 30),
+             startedNanos = BASE,
+             startedWallMs = nowWallMs - 12_000L,
+             nowNanos = nowNanos,
