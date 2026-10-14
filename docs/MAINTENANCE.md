@@ -75,7 +75,8 @@
 - `v0.21.2-harmony-preview.3` —— 2026-10-13，已被 preview.4 取代。加入补丁 0021（自建全景瀑布流：末尾不再左空、列数变化当帧重排、滚动条用真实内容高度）。versionCode 3803，versionName `0.21.2-harmony.3-8192`，签名与 preview.2 相同（`4bd90284…ea8a`）。开发树 `/tmp/mihon-verify212` `dev-0021` 提交 `08bd109`（底座 v0.21.2 + 0001–0020），流水线 `e5c6c734e`。`:presentation-core:spotlessCheck` `:app:spotlessCheck` 通过，`:presentation-core:testDebugUnitTest` 16/16，`:app:compileNightlyKotlin` 通过。干净 v0.21.2 树套 21 张成功，12 个改动文件 `cmp` 一致。`check_patches` run 38453485932、`dry_run` run 38453484931、正式 run 38454541710 均成功。arm64 26,940,089 B（SHA-256 前缀 `58ea2694f782`），universal 67,249,088 B，DEX 含 `PanoramaMasonryLayout`。`repo` 分支 `releases.json` 第一条即此版，共 21 条。未上模拟器。与 anikku-harmony 0030 同源。
 - `v0.21.2-harmony-preview.4` —— 2026-10-14，已被 preview.5 取代。加入补丁 0022（更新页下载：专用客户端重试 + Range 续传，失败在更新说明上方用红字写原因）。versionCode 3804，versionName `0.21.2-harmony.4-8193`，签名与 preview.3 相同（`4bd90284…ea8a`）。开发树 `/tmp/mihon-verify212` 分支 `dev-0022` 提交 `e1a029d`（底座 v0.21.2 + 0001–0021 + 0022），流水线 `779cccafc`。主代理复跑 `:app:spotlessCheck :app:compileNightlyKotlin :app:testDebugUnitTest --tests '*AppUpdateApkDownloaderTest*'` 退出 0，3/3、skipped 0。干净 v0.21.2 以 N=4 套全部 20 张（0001–0022，0004 / 0009 早已删除） → versionCode 3804，与开发树只差版本号。`check_patches` run 38512243044、`dry_run` run 38512260459、正式 run 38513011212 均成功。Release 非 draft、非 prerelease，target `779cccafc`。arm64 26,942,369 B（SHA-256 前缀 `fbcf9c960068`），universal 67,251,368 B，DEX 含 `Update download attempt`、`update.apk`，资源含 `harmony_update_download_timeout`。`repo` 分支 `releases.json` 22 条，第一条即此版。从旧版升到这一版时，点下载的仍是旧代码，第一下可能还会失败，再点即可；从 preview.4 往后的更新才自动重试。Anikku 不适用；Animeko 待确认。
 - `v0.21.2-harmony-preview.5` —— 2026-10-14 07:39 UTC，已被 preview.6 取代。加入补丁 0023–0029（返回位置按 key 记、布局世代、封面形状按版本通知、滚动条按下即抓、自动列宽分档、瀑布流滚动条不再每帧重启），与 anikku-harmony 0031–0037 一一对应、同源。versionCode 3805，versionName `0.21.2-harmony.5-8200`，签名与 preview.4 相同（`4bd90284…ea8a`）。流水线 `0066de0e4`。`check_patches` run 38527739609、`dry_run` run 38527787706、正式 run 38529020510 均成功。`app.mihon.debug`，arm64 26,942,369 B（SHA-256 前缀 `1f52f85fbac7`），universal 67,251,368 B。DEX 含 `PanoramaColumns$Tiered`、`holdOpaqueWhileThumbGrabbed`、`PanoramaMasonryContentEpoch`。`repo` 分支 `releases.json` 23 条，第一条即此版。子代理（grok-4.7-high-fast）实现；主代理复跑 `:presentation-core:spotlessCheck :app:spotlessCheck :presentation-core:testDebugUnitTest :app:testDebugUnitTest :app:compileNightlyKotlin --rerun-tasks` 通过（presentation-core 35 个用例，0 失败，2 个门控跳过；app 28 个，0 失败）。干净树 `/tmp/mihon-verify213`（v0.21.2，N=5）套用成功，12 个改动文件与开发树 `cmp` 一致。没有真机 / 模拟器手势测试。`PanoramaMasonry.kt` / `PanoramaMasonryLayout.kt` / `PanoramaMasonryLayoutTest.kt` 与 Anikku 逐字节相同。series 27 张（0001–0029，0004 / 0009 已删）。
-- `v0.21.2-harmony-preview.6` —— 2026-10-14 10:31 UTC，**当前版本**。加入补丁 0030–0032（`PanoramaColumns.Shaped`、形状模式、滚动条热区收回为绘制宽度），与 anikku-harmony 0038–0040 一一对应、同源。versionCode 3806，versionName `0.21.2-harmony.6-8203`，签名与 preview.5 相同（`4bd90284…ea8a`）。流水线 `e8220fba2`。`check_patches` run 38548385048、`dry_run` run 38548395586、正式 run 38549485379 均成功。`app.mihon.debug`，arm64 26,958,753 B（SHA-256 前缀 `e7233bbfcd39`），universal 67,267,752 B。DEX 含 `PanoramaColumns$Shaped`、`PanoramaShapeMode`、`committedShapeVersion`。manifest 无 ui-test 的 ComponentActivity。DEX 里的 `robolectric` 字符串 5 处，与上一版相同，来自第三方库的运行时检测，不是新依赖进包。`repo` 分支 `releases.json` 24 条，第一条即此版。子代理（grok-4.7-high-fast）实现；主代理复跑 `:presentation-core:spotlessCheck :app:spotlessCheck :presentation-core:testDebugUnitTest :app:testDebugUnitTest :app:compileNightlyKotlin --rerun-tasks` 通过（presentation-core 51 个用例，0 失败，2 跳过；app 35 个）。干净树 `/tmp/mihon-verify214`（v0.21.2，N=6）套用成功，18 个改动文件与开发树 `cmp` 一致。没有真机手势测试。三个共享文件与 Anikku 0038–0040 逐字节相同。series 30 张（0001–0032，0004 / 0009 已删）。
+- `v0.21.2-harmony-preview.6` —— 2026-10-14 10:31 UTC，已被 preview.7 取代。加入补丁 0030–0032（`PanoramaColumns.Shaped`、形状模式、滚动条热区收回为绘制宽度），与 anikku-harmony 0038–0040 一一对应、同源。versionCode 3806，versionName `0.21.2-harmony.6-8203`，签名与 preview.5 相同（`4bd90284…ea8a`）。流水线 `e8220fba2`。`check_patches` run 38548385048、`dry_run` run 38548395586、正式 run 38549485379 均成功。`app.mihon.debug`，arm64 26,958,753 B（SHA-256 前缀 `e7233bbfcd39`），universal 67,267,752 B。DEX 含 `PanoramaColumns$Shaped`、`PanoramaShapeMode`、`committedShapeVersion`。manifest 无 ui-test 的 ComponentActivity。DEX 里的 `robolectric` 字符串 5 处，与上一版相同，来自第三方库的运行时检测，不是新依赖进包。`repo` 分支 `releases.json` 24 条，第一条即此版。子代理（grok-4.7-high-fast）实现；主代理复跑 `:presentation-core:spotlessCheck :app:spotlessCheck :presentation-core:testDebugUnitTest :app:testDebugUnitTest :app:compileNightlyKotlin --rerun-tasks` 通过（presentation-core 51 个用例，0 失败，2 跳过；app 35 个）。干净树 `/tmp/mihon-verify214`（v0.21.2，N=6）套用成功，18 个改动文件与开发树 `cmp` 一致。没有真机手势测试。三个共享文件与 Anikku 0038–0040 逐字节相同。series 30 张（0001–0032，0004 / 0009 已删）。
+- `v0.21.2-harmony-preview.7` —— 2026-10-14 11:15 UTC，**当前版本**。加入补丁 0033（全景网格滑动诊断，不改滚动行为），与 anikku-harmony 0041 同源。versionCode 3807，versionName `0.21.2-harmony.7-8204`，签名与 preview.6 相同（`4bd90284…ea8a`）。流水线 `15289c4df`。`check_patches` run 38553790858、`dry_run` run 38553801784、正式 run 38553912820 均成功。`app.mihon.debug`，arm64 26,958,753 B（SHA-256 前缀 `9f97e5d14716`），universal 67,267,752 B。体积与 preview.6 相同，是对齐填充，分辨版本看 SHA-256 / versionCode。DEX 含 `Panorama scroll trace`、`gapLastMove=`、`fling start v=`。manifest 无 ui-test。`repo` 分支 `releases.json` 25 条，第一条即此版。开发树 `dev-0023` 提交 `7b0bddc`。`:presentation-core:spotlessCheck :app:spotlessCheck :presentation-core:testDebugUnitTest :app:testDebugUnitTest :app:compileNightlyKotlin` 通过（presentation-core 54 个用例，0 失败，2 跳过；app 35 个）。干净树 `/tmp/mihon-verify215`（v0.21.2，N=7）套用成功，20 个改动文件与开发树 `cmp` 一致。`PanoramaScrollTrace.kt` / `PanoramaMasonry.kt` 与 Anikku 0041 逐字节相同。series 31 张（0001–0033，0004 / 0009 已删）。不改滑动手感。正式 run 在 dry_run 结束前就触发了（等待脚本把一次 API 报错当成完成）；正式 run 在同一并发组里排队，等 dry_run 成功后才执行，结果无影响。
 
 ## 3. 仓库结构
 
@@ -113,6 +114,7 @@ patches/0029-*.patch           # 瀑布流滚动条单个 LaunchedEffect + snaps
 patches/0030-*.patch           # 全景自动列 Shaped: 面积大致恒定, 列宽由主导形状推出 (与 Anikku 0038 逐字节相同)
 patches/0031-*.patch           # 形状模式 Tall/Wide/Unknown (PanoramaShapeMode.kt 在 app 层; 与 Anikku 0039 同源)
 patches/0032-*.patch           # 滚动条热区收回为绘制宽度 ThumbThickness + endInset (与 Anikku 0040 同源)
+patches/0033-*.patch           # 全景滑动诊断: 崩溃日志附最近 400 条轨迹, 不改滚动行为 (PanoramaScrollTrace.kt / PanoramaMasonry.kt 与 Anikku 0041 逐字节相同)
 scripts/prepare-source.sh      # 官方源码 → 套补丁 → 改版本号, 每步一个 commit
 scripts/write-release-index.sh # Releases 接口返回 → repo 分支的 releases.json / latest.json
 .github/workflows/harmony_preview.yml   # 每日构建发布, 最后写 Release 索引
@@ -360,6 +362,44 @@ CBZ 模式（0003 的 `finalizeArchive`）没有动：它本来就是单文件�
 
 同病：Anikku 0038–0040 同轮已修。Animeko：列数按形状不适用（没有全景瀑布流）；滚动条热区不适用（Android 端是不可拖动的 `LazyListVerticalScrollIndicator`）；惯性不适用，同一原因。
 
+补丁 0033 与 anikku-harmony 0041 同源（用户 2026-10-14 10:53 UTC：「我感觉不是加宽的原因，mihon书架有时候不在底部的时候还是会滑动完没有惯性，之前应该没有的，要有办法定位吗？」）。preview.6 收回热区（0032），只解释「到底往回滑」那一下。书架中间偶发的问题另有原因。没有真机数据，不能定论，因此先发诊断版，不改滑动行为。
+
+读代码，全景网格的惯性只可能这几种原因提前结束：
+- 新的滚动请求或按下，打断惯性；
+- 某一帧没吃满位移（滚动范围临时变小）；
+- 外层（分页器 / 下拉刷新）吃掉松手速度；
+- 网格被重建；
+- 松手速度本身是 0。
+
+最可疑的是最后一种：Compose 的 VelocityTracker 在「最后一次 move 到 up 的间隔 > 40 ms」时把速度算成 0。卓易通如果触摸事件投递卡顿，就会这样。
+
+做法：
+- 新文件 `presentation-core/.../PanoramaScrollTrace.kt`，并改 `PanoramaMasonry.kt`。这两个文件与 Anikku 逐字节相同。
+- `CrashLogUtil.kt`：「转储崩溃日志」末尾附「--- Panorama scroll trace (last N events) ---」，最多 400 条，与 `HarmonyLogBuffer`（0012）分开存。
+- 每次触摸记 `down` / `up`（`up` 带 `moves`、`dy`、`gapLastMove`、`trackerV`（Compose 速度）、`recentV`（最后 100 ms 自算速度）、`consumed`）。
+- 每次惯性记 `fling start v= offset= max=`，结束为 `fling done|stopped|cancelled left= dist= frames= ms= maxGap=`，吃不满的帧记 `short frame asked= got=`。
+- `scrollToItem` / `requestScrollToItem` / `scrollToOffset` 各写一行。正式版经过混淆，看不到调用栈，所以每个入口自己写标签。
+- offset 被改时记 `measure reason=request|restore|anchor|clamp`；epoch 变化、滚动中 max 变化也记。
+- 网格 `enter` / `leave`，以及 `userScrollEnabled=false`。
+- 只覆盖全景（瀑布流）网格，普通紧凑 / 舒适网格不记录。
+
+不改滚动行为：惯性包装逐帧原样转发；触摸只在 Initial 阶段旁听、不消费；测量里读 `isScrollInProgress` 用 `Snapshot.withoutReadObservation`，不额外触发重测。
+
+**重做要点**（rebase 到新上游时这 1 张）：
+- `PanoramaScrollTrace.kt`、`PanoramaMasonry.kt` 与 Anikku 0041 **逐字节相同**，改一处要同步另一处。`PanoramaMasonryLayout.kt` / `PanoramaMasonryLayoutTest.kt` 本张没动。
+- 轨迹不要塞进 `HarmonyLogBuffer` 的 600 行应用日志，分开存，附在转储末尾，最多 400 条。
+- 每个滚动入口自己写标签。正式版混淆后没有调用栈。
+- 判读：`trackerV=0` 而 `recentV` 很大、`gapLastMove≥40ms` → 触摸投递卡顿；`fling cancelled` 前一行是 `scrollTo…` / `down` / `leave` → 被它打断；`short frame` 或 `fling stopped` → 滚动范围问题；`up` 的 `trackerV` 很大但 `fling start v` 小 → 外层吃了速度。
+
+新测试 3 个（Robolectric）：
+- `the scroll trace records the release and how the fling ended`：顺序为 up → fling start → fling done，dist 4462、frames 132。
+- `the scroll trace names a jump that cancels the fling`：`scrollToOffset 1000` 之后紧跟 `fling cancelled`。
+- `a pause before lifting reads as zero release velocity`：在 4 次 move 后停 60 ms 再松手，得 `gapLastMove=60ms trackerV=0 recentV=-2215`，`fling start v=0`，惯性 0。这说明「停顿后速度归零」的假设在机制上成立。
+
+`:presentation-core:spotlessCheck :app:spotlessCheck :presentation-core:testDebugUnitTest :app:testDebugUnitTest :app:compileNightlyKotlin` 通过（presentation-core 54 个用例，0 失败，2 跳过；app 35 个）。干净树 `/tmp/mihon-verify215`（`prepare-source.sh`，v0.21.2，N=7）套用成功，20 个改动文件与开发树 `cmp` 一致。开发树 `dev-0023` 提交 `7b0bddc`。流水线提交 `15289c4df`。
+
+同病：Anikku 0041 同轮已加诊断。Animeko 没有全景瀑布流，这条日志不适用；若「停顿 >40 ms 速度归零」是卓易通触摸投递问题，属于平台层，Animeko 的 LazyColumn 也可能受影响，等这份诊断日志定性后再看。
+
 ### 5.2 加新补丁
 
 在套完现有补丁的源码树上直接改代码并 commit（message 写清楚为什么），`git format-patch -1` 导出，
@@ -444,7 +484,9 @@ gh release list --repo Xun2202/mihon-harmony
 | 按住滚动条快速下翻时拇指变透明，松手方向变成上翻 | 滚动条只在拇指 alpha>0 时挂拖动手势。按住不动、还没超过 touch slop 时不算滚动，拇指淡出，手势落到内容上。0027（preview.5）起 `startDragImmediately`，按住期间 `holdOpaqueWhileThumbGrabbed`、不摘手势，触摸区 32 dp。列表、网格、瀑布流三根都改了 |
 | 全景「自动」在折叠屏只有两列，竖封面过大、横封面过小 | preview.4 及之前自动最小列宽 168 dp，360 dp 宽只有 2 列。0023 起横封面在 ≥3 列时跨两列（`PanoramaSpan.TwoLanesWhenRoomy`）。0028 起 `PanoramaColumns.Tiered`：网格宽 < 600 dp 最小 112 dp，≥ 600 dp 用 140 dp（常量在 `LibraryComfortableGrid.kt`）。360 / 420 / 459 dp → 3 列，664 / 672 dp → 4 列，800 dp → 5 列，933 / 939 dp → 6 列。比较的是网格自身宽度，分屏同样适用。Pura X Max 折叠竖屏约 459 dp → 3 列，展开横屏约 939 dp → 6 列。横封面多时右列空、以及按主导形状定列，见下两行 |
 | 横封面多时右列空 | 折叠 459 dp 按 `Tiered` 分 3 列，横封面 `TwoLanesWhenRoomy` 跨两列，等高时取最左，横封面占多数时第 3 列永远空。Mihon 竖封面多所以平时看不出来。0030 / 0031（`v0.21.2-harmony-preview.6`）改为 `Shaped` + 形状模式：折叠竖 + 横书架为 2 列宽封面。形状未学够时先按 Tiered，判定后最多跳一次，锚点保住位置。40–60% 横的混合书架仍按 Tall 处理（跨列），偶尔会有空位。横主导书架里少数竖封面会很高（展开横约 382 dp） |
-| 到底往回滑没惯性 | 0027 的热区 32 dp，比画出的拇指（12 dp）向内容侧多约 20 dp 透明区，且按下即抓。到底时拇指停在右下角，右手往回滑的起点被当成拖滚动条，列表按比例跳、松手没有惯性。中间滑偶尔撞上。用户说没动滑块，碰到的是透明的那一截。0032 起热区改为 `ThumbThickness + endInset`。测试：2000 项、40 ms 上滑，修前距右缘 20 dp 起滑 0 px（4 帧），修后 4462 px / 134 帧；滚到底再在拇指高度距右缘 20 dp 向下甩，修前 0 px，修后 247.72 px（中央基线的 100%）。一次 epoch 变化、一次换列表、一次高度变化、`pendingRestore`、外层 HorizontalPager / 下拉刷新都不会让惯性完全停下（各保留 96% 左右或照常衰减）。热区变窄后能否稳稳按住拖，要真机确认 |
+| 到底往回滑没惯性 | 0027 的热区 32 dp，比画出的拇指（12 dp）向内容侧多约 20 dp 透明区，且按下即抓。到底时拇指停在右下角，右手往回滑的起点被当成拖滚动条，列表按比例跳、松手没有惯性。中间滑偶尔撞上。用户说没动滑块，碰到的是透明的那一截。0032 起热区改为 `ThumbThickness + endInset`。测试：2000 项、40 ms 上滑，修前距右缘 20 dp 起滑 0 px（4 帧），修后 4462 px / 134 帧；滚到底再在拇指高度距右缘 20 dp 向下甩，修前 0 px，修后 247.72 px（中央基线的 100%）。一次 epoch 变化、一次换列表、一次高度变化、`pendingRestore`、外层 HorizontalPager / 下拉刷新都不会让惯性完全停下（各保留 96% 左右或照常衰减）。热区变窄后能否稳稳按住拖，要真机确认。若收回热区之后、不在底部时仍没惯性，见下一行 |
+| 书架中间滑完没有惯性 | preview.6 收回热区（0032）只解释「到底往回滑」那一下。书架不在底部时偶尔还是滑完没有惯性，另有原因。读代码，全景网格的惯性只可能这几种原因提前结束：新的滚动请求或按下打断；某一帧没吃满位移；外层吃掉松手速度；网格被重建；松手速度本身是 0。最可疑的是最后一种：Compose 的 VelocityTracker 在「最后一次 move 到 up 的间隔 > 40 ms」时把速度算成 0。没有真机数据，不能定论。0033（`v0.21.2-harmony-preview.7`）起在「转储崩溃日志」末尾附全景滑动轨迹，最多 400 条，不改滑动行为。只记全景网格。判读：`trackerV=0` 而 `recentV` 很大、`gapLastMove≥40ms` → 触摸投递卡顿；`fling cancelled` 前一行是 `scrollTo…` / `down` / `leave` → 被它打断；`short frame` 或 `fling stopped` → 滚动范围问题；`up` 的 `trackerV` 很大但 `fling start v` 小 → 外层吃了速度。复现后立刻转储，最近 400 条会覆盖 |
+| 发版等待脚本把一次 API 报错当成 dry_run 已完成 | preview.7 的正式 run 38553912820 在 dry_run 38553801784 结束前就触发了。正式 run 在同一并发组里排队，等 dry_run 成功后才执行，结果无影响。等待循环要把取不到 `conclusion` 当作「未完成」 |
 | 手机提示版本过老 / 降级不给装 | 更新器按版本号取最大。官方 2026-10-13 04:27 UTC 出了 v0.21.2，定时 run 38392710194 自动发了 `v0.21.2-harmony-preview.1`（versionCode 3801）；随后在 0.21.1 上发的 `v0.21.1-harmony-preview.5`（3705）号更小，手机拒装。preview.5 保留未删，更新器不会把它推给已在 0.21.2 的用户。补救是在最新上游上重发：`v0.21.2-harmony-preview.2`（3802，正式 run 38427442080）。workflow「Resolve release version」（提交 `fd1835633`）：非 dry_run 且目标 tag 还不存在时，按「上游版本.N」`sort -V`，比已发布最高的旧就 `exit 1` 报「installs would be a downgrade」。已存在的 tag 仍 skip，定时 run 不会因此变红。发版前先看 Releases 上最新的上游底座。本地用真实 tag 列表测过：0.21.1 的 preview.6 拒绝，0.21.2 的 preview.3、0.21.3 的 preview.1、0.21.10 的 preview.1 放行。CI 上没实际触发过拒绝路径 |
 
 ## 8. 不要做的事
@@ -537,3 +579,6 @@ gh release list --repo Xun2202/mihon-harmony
 - 2026-10-14（10:31 UTC）用户两件：横封面多时全景右列空，以及滑到底再往回甩惯性消失（「我没动滑块」）。根因见 §5.1 补丁 0030–0032，与 anikku-harmony 0038–0040 一一对应、同源。0030 `PanoramaColumns.Shaped`；0031 形状模式（`PanoramaShapeMode.kt` 在 app 层，`committedShapeVersion` 只在主线程写、measure 不读，列数变化不 bump epoch）；0032 热区收回为 `ThumbThickness + endInset`。三个共享文件与 Anikku 逐字节相同。测试依赖不进包（nightly 对库模块回退 release 变体）。
   子代理（grok-4.7-high-fast）实现。主代理复跑 `:presentation-core:spotlessCheck :app:spotlessCheck :presentation-core:testDebugUnitTest :app:testDebugUnitTest :app:compileNightlyKotlin --rerun-tasks` 通过（presentation-core 51 个用例，0 失败，2 跳过；app 35 个）。干净树 `/tmp/mihon-verify214`（v0.21.2，N=6）套用成功，18 个改动文件与开发树 `cmp` 一致。没有真机手势测试。
   推 `main` `e8220fba2` → `check_patches` run 38548385048 绿 → `dry_run` run 38548395586 绿 → 正式 run 38549485379 → **`v0.21.2-harmony-preview.6`**（10:31 UTC），`app.mihon.debug` versionCode 3806、versionName `0.21.2-harmony.6-8203`，签名 `4bd90284…ea8a` 不变，arm64 26,958,753 B（SHA-256 前缀 `e7233bbfcd39`），universal 67,267,752 B，DEX 含 `PanoramaColumns$Shaped`、`PanoramaShapeMode`、`committedShapeVersion`；manifest 无 ui-test 的 ComponentActivity；DEX 里 `robolectric` 字符串 5 处，与上一版相同。`repo` 分支 `releases.json` 24 条，第一条即此版。series 30 张（0001–0032，0004 / 0009 已删）。同轮 Anikku 0038–0040 → `v0.2.0-harmony-preview.19`。Animeko：列数按形状、滚动条热区、惯性都不适用。
+- 2026-10-14（11:15 UTC）用户：「我感觉不是加宽的原因，mihon书架有时候不在底部的时候还是会滑动完没有惯性，之前应该没有的，要有办法定位吗？」（10:53 UTC）。preview.6 收回热区（0032）只解释「到底往回滑」那一下。书架中间偶发另有原因。读代码，全景网格的惯性只可能这几种原因提前结束：新的滚动请求或按下打断；某一帧没吃满位移；外层吃掉松手速度；网格被重建；松手速度本身是 0。最可疑的是最后一种：Compose 的 VelocityTracker 在「最后一次 move 到 up 的间隔 > 40 ms」时把速度算成 0。没有真机数据，不能定论，因此先发诊断版，不改滑动行为。根因与做法见 §5.1 补丁 0033，与 anikku-harmony 0041 同源。`PanoramaScrollTrace.kt` / `PanoramaMasonry.kt` 与 Anikku 逐字节相同。轨迹最多 400 条，与 `HarmonyLogBuffer`（0012）分开，附在「转储崩溃日志」末尾。只记全景网格。
+  `:presentation-core:spotlessCheck :app:spotlessCheck :presentation-core:testDebugUnitTest :app:testDebugUnitTest :app:compileNightlyKotlin` 通过（presentation-core 54 个用例，0 失败，2 跳过；app 35 个）。干净树 `/tmp/mihon-verify215`（v0.21.2，N=7）套用成功，20 个改动文件与开发树 `cmp` 一致。开发树 `dev-0023` 提交 `7b0bddc`。新测试 3 个：顺序 up → fling start → fling done，dist 4462、frames 132；`scrollToOffset 1000` 之后紧跟 `fling cancelled`；4 次 move 后停 60 ms 再松手，得 `gapLastMove=60ms trackerV=0 recentV=-2215`，`fling start v=0`，惯性 0。
+  推 `main` `15289c4df` → `check_patches` run 38553790858 绿 → `dry_run` run 38553801784 绿 → 正式 run 38553912820 → **`v0.21.2-harmony-preview.7`**（11:15 UTC），`app.mihon.debug` versionCode 3807、versionName `0.21.2-harmony.7-8204`，签名 `4bd90284…ea8a` 不变，arm64 26,958,753 B（SHA-256 前缀 `9f97e5d14716`；体积与 preview.6 相同，是对齐填充），universal 67,267,752 B，DEX 含 `Panorama scroll trace`、`gapLastMove=`、`fling start v=`；manifest 无 ui-test。`repo` 分支 `releases.json` 25 条，第一条即此版。series 31 张（0001–0033，0004 / 0009 已删）。正式 run 在 dry_run 结束前就触发了（等待脚本把一次 API 报错当成完成）；同一并发组里排队，等 dry_run 成功后才执行，结果无影响。同轮 Anikku 0041 → `v0.2.0-harmony-preview.20`。Animeko 没有全景瀑布流，这条日志不适用；若是触摸投递卡顿，LazyColumn 也可能受影响，等日志定性后再看。
