@@ -1,0 +1,550 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Xun2202 <98207886+Xun2202@users.noreply.github.com>
+Date: Wed, 14 Oct 2026 04:33:37 +0000
+Subject: [PATCH] updater: retry and resume the update download
+
+The update screen downloaded a GitHub release asset with one call on the
+shared client (30s read, 2min call). From mainland China the first
+connection to release-assets.githubusercontent.com often stalls or is
+reset after the handshake. OkHttp does not retry that read inside one
+call, so the exception deleted update.apk and the button became Retry.
+The next tap was a new call and usually succeeded.
+
+This download uses its own client (60s read, 10min call), at most 4
+attempts, and delays of 2/4/8 seconds. IOException and HTTP 5xx are
+retried; 416 deletes the file and starts from zero; other 4xx fail
+immediately. A 206 response is appended and a 200 response is rewritten.
+The partial file is kept until the final failure. Starting again drops
+update.apk only when packageManager can read a versionCode from it.
+Failure shows timeout, a dropped connection, the HTTP code, or a storage
+write error instead of the exception text.
+
+Anikku already resumes through upstream NetworkHelper.downloadFileWithResume
+(5 attempts), so this is not ported there. Animeko uses a different
+downloader and switches to the universal package after a failure.
+---
+ .../presentation/more/NewUpdateScreen.kt      |  10 ++
+ .../data/updater/AppUpdateApkCleaner.kt       |   4 +-
+ .../data/updater/AppUpdateApkDownloader.kt    | 138 ++++++++++++++++++
+ .../tachiyomi/ui/more/NewUpdateScreen.kt      |   1 +
+ .../tachiyomi/ui/more/NewUpdateScreenModel.kt |  71 ++++++---
+ .../updater/AppUpdateApkDownloaderTest.kt     | 138 ++++++++++++++++++
+ .../moko-resources/base/strings.xml           |   4 +
+ .../moko-resources/zh-rCN/strings.xml         |   4 +
+ .../moko-resources/zh-rTW/strings.xml         |   4 +
+ 9 files changed, 350 insertions(+), 24 deletions(-)
+ create mode 100644 app/src/main/java/eu/kanade/tachiyomi/data/updater/AppUpdateApkDownloader.kt
+ create mode 100644 app/src/test/java/eu/kanade/tachiyomi/data/updater/AppUpdateApkDownloaderTest.kt
+
+diff --git a/app/src/main/java/eu/kanade/presentation/more/NewUpdateScreen.kt b/app/src/main/java/eu/kanade/presentation/more/NewUpdateScreen.kt
+index f55b699..8e57982 100644
+--- a/app/src/main/java/eu/kanade/presentation/more/NewUpdateScreen.kt
++++ b/app/src/main/java/eu/kanade/presentation/more/NewUpdateScreen.kt
+@@ -41,6 +41,7 @@ fun NewUpdateScreen(
+     onAcceptUpdate: () -> Unit,
+     onRejectUpdate: () -> Unit,
+     onSkipUpdate: () -> Unit,
++    failureReason: String? = null,
+ ) {
+     var showSkipDialog by remember { mutableStateOf(false) }
+     if (showSkipDialog) {
+@@ -98,6 +99,15 @@ fun NewUpdateScreen(
+                 .fillMaxWidth()
+                 .padding(vertical = MaterialTheme.padding.large),
+         ) {
++            if (stage == NewUpdateScreenModel.Stage.Failed && !failureReason.isNullOrBlank()) {
++                Text(
++                    text = failureReason,
++                    color = MaterialTheme.colorScheme.error,
++                    modifier = Modifier
++                        .fillMaxWidth()
++                        .padding(bottom = MaterialTheme.padding.small),
++                )
++            }
+             MarkdownRender(
+                 content = changelogInfo,
+                 flavour = remember { GFMFlavourDescriptor() },
+diff --git a/app/src/main/java/eu/kanade/tachiyomi/data/updater/AppUpdateApkCleaner.kt b/app/src/main/java/eu/kanade/tachiyomi/data/updater/AppUpdateApkCleaner.kt
+index 3144c83..50280ba 100644
+--- a/app/src/main/java/eu/kanade/tachiyomi/data/updater/AppUpdateApkCleaner.kt
++++ b/app/src/main/java/eu/kanade/tachiyomi/data/updater/AppUpdateApkCleaner.kt
+@@ -13,7 +13,9 @@ import java.io.File
+  */
+ object AppUpdateApkCleaner {
+ 
+-    fun updateApk(context: Context): File = File(context.externalCacheDir, "update.apk")
++    // Harmony: externalCacheDir is null while shared storage is unavailable; File(null, name) would
++    // resolve against the unwritable working directory. provider_paths.xml also exposes cache-path.
++    fun updateApk(context: Context): File = File(context.externalCacheDir ?: context.cacheDir, "update.apk")
+ 
+     /** Deletes the downloaded APK once it is installed (or turned out unreadable). */
+     fun deleteInstalledApk(context: Context) {
+diff --git a/app/src/main/java/eu/kanade/tachiyomi/data/updater/AppUpdateApkDownloader.kt b/app/src/main/java/eu/kanade/tachiyomi/data/updater/AppUpdateApkDownloader.kt
+new file mode 100644
+index 0000000..7fb035e
+--- /dev/null
++++ b/app/src/main/java/eu/kanade/tachiyomi/data/updater/AppUpdateApkDownloader.kt
+@@ -0,0 +1,138 @@
++package eu.kanade.tachiyomi.data.updater
++
++import eu.kanade.tachiyomi.network.GET
++import eu.kanade.tachiyomi.network.HttpException
++import eu.kanade.tachiyomi.network.ProgressListener
++import eu.kanade.tachiyomi.network.await
++import eu.kanade.tachiyomi.network.newCachelessCallWithProgress
++import eu.kanade.tachiyomi.util.storage.saveTo
++import kotlinx.coroutines.CancellationException
++import kotlinx.coroutines.currentCoroutineContext
++import kotlinx.coroutines.delay
++import kotlinx.coroutines.ensureActive
++import logcat.LogPriority
++import okhttp3.OkHttpClient
++import okhttp3.Response
++import tachiyomi.core.common.util.system.logcat
++import java.io.File
++import java.io.FileOutputStream
++import java.io.IOException
++import java.io.OutputStream
++
++/**
++ * Downloads one update APK. The shared [eu.kanade.tachiyomi.network.NetworkHelper] client is not
++ * modified; pass a client built for this download.
++ */
++class AppUpdateApkDownloader(
++    private val client: OkHttpClient,
++    private val retryDelay: suspend (millis: Long) -> Unit = { delay(it) },
++) {
++
++    suspend fun download(
++        url: String,
++        apkFile: File,
++        onProgress: (percent: Int) -> Unit = {},
++    ) {
++        // Harmony: the first connection from mainland China to the GitHub release CDN often stalls
++        // or is reset after it connects. OkHttp does not retry that read inside one call.
++        var highWater = 0
++        fun report(bytesRead: Long, contentLength: Long) {
++            if (contentLength <= 0L) return
++            val percent = ((bytesRead * 100) / contentLength).toInt().coerceIn(0, 100)
++            if (percent > highWater) {
++                highWater = percent
++                onProgress(percent)
++            }
++        }
++
++        var lastError: Exception? = null
++        for (attempt in 1..MAX_ATTEMPTS) {
++            currentCoroutineContext().ensureActive()
++            try {
++                downloadOnce(url, apkFile, ::report)
++                return
++            } catch (e: CancellationException) {
++                throw e
++            } catch (e: HttpException) {
++                logcat(LogPriority.WARN, e) { "Update download attempt $attempt failed" }
++                lastError = e
++                if (e.code == HTTP_RANGE_NOT_SATISFIABLE) {
++                    apkFile.delete()
++                } else if (e.code !in 500..599) {
++                    apkFile.delete()
++                    throw e
++                }
++                if (attempt == MAX_ATTEMPTS) break
++                retryDelay(backoffMillis(attempt))
++            } catch (e: IOException) {
++                // A cancelled read surfaces as IOException("Canceled"); do not treat that as a failure.
++                currentCoroutineContext().ensureActive()
++                logcat(LogPriority.WARN, e) { "Update download attempt $attempt failed" }
++                lastError = e
++                if (attempt == MAX_ATTEMPTS) break
++                retryDelay(backoffMillis(attempt))
++            }
++        }
++        apkFile.delete()
++        throw lastError ?: IOException("Update download failed")
++    }
++
++    private suspend fun downloadOnce(
++        url: String,
++        apkFile: File,
++        onProgress: (bytesRead: Long, contentLength: Long) -> Unit,
++    ) {
++        val existingSize = if (apkFile.exists()) apkFile.length() else 0L
++        val listener = object : ProgressListener {
++            override fun update(bytesRead: Long, contentLength: Long, done: Boolean) {
++                onProgress(bytesRead, contentLength)
++            }
++        }
++        client.newCachelessCallWithProgress(GET(url), listener, existingSize).await().use { response ->
++            val code = response.code
++            if (code == HTTP_RANGE_NOT_SATISFIABLE || code !in 200..299) {
++                throw HttpException(code)
++            }
++            // 206 keeps the bytes already on disk; 200 replaces them.
++            writeToFile(apkFile, response, append = code == 206)
++        }
++    }
++
++    private fun writeToFile(apkFile: File, response: Response, append: Boolean) {
++        apkFile.parentFile?.mkdirs()
++        val fileStream = try {
++            FileOutputStream(apkFile, append)
++        } catch (e: IOException) {
++            throw StorageWriteException(e)
++        }
++        response.body.source().saveTo(StorageMarkingStream(fileStream))
++    }
++
++    private companion object {
++        const val MAX_ATTEMPTS = 4
++        const val HTTP_RANGE_NOT_SATISFIABLE = 416
++
++        fun backoffMillis(failedAttempt: Int): Long = 2_000L shl (failedAttempt - 1)
++    }
++}
++
++/** Disk write failed. Retried like any other [IOException], then reported separately from network errors. */
++internal class StorageWriteException(cause: IOException) : IOException(cause)
++
++private class StorageMarkingStream(private val out: OutputStream) : OutputStream() {
++    override fun write(b: Int) = guard { out.write(b) }
++
++    override fun write(b: ByteArray, off: Int, len: Int) = guard { out.write(b, off, len) }
++
++    override fun flush() = guard { out.flush() }
++
++    override fun close() = guard { out.close() }
++
++    private inline fun guard(block: () -> Unit) {
++        try {
++            block()
++        } catch (e: IOException) {
++            throw StorageWriteException(e)
++        }
++    }
++}
+diff --git a/app/src/main/java/eu/kanade/tachiyomi/ui/more/NewUpdateScreen.kt b/app/src/main/java/eu/kanade/tachiyomi/ui/more/NewUpdateScreen.kt
+index 38c6bae..9b78d62 100644
+--- a/app/src/main/java/eu/kanade/tachiyomi/ui/more/NewUpdateScreen.kt
++++ b/app/src/main/java/eu/kanade/tachiyomi/ui/more/NewUpdateScreen.kt
+@@ -47,6 +47,7 @@ class NewUpdateScreen(
+                 viewModel.skipUpdate(versionName)
+                 navigator.pop()
+             },
++            failureReason = state.failureReason,
+         )
+     }
+ }
+diff --git a/app/src/main/java/eu/kanade/tachiyomi/ui/more/NewUpdateScreenModel.kt b/app/src/main/java/eu/kanade/tachiyomi/ui/more/NewUpdateScreenModel.kt
+index 2bf852a..dbdf653 100644
+--- a/app/src/main/java/eu/kanade/tachiyomi/ui/more/NewUpdateScreenModel.kt
++++ b/app/src/main/java/eu/kanade/tachiyomi/ui/more/NewUpdateScreenModel.kt
+@@ -14,14 +14,12 @@ import dev.zacsweers.metrox.viewmodel.ManualViewModelAssistedFactory
+ import dev.zacsweers.metrox.viewmodel.ManualViewModelAssistedFactoryKey
+ import eu.kanade.domain.base.BasePreferences
+ import eu.kanade.tachiyomi.data.updater.AppUpdateApkCleaner
++import eu.kanade.tachiyomi.data.updater.AppUpdateApkDownloader
++import eu.kanade.tachiyomi.data.updater.StorageWriteException
+ import eu.kanade.tachiyomi.extension.util.ExtensionInstaller
+-import eu.kanade.tachiyomi.network.GET
++import eu.kanade.tachiyomi.network.HttpException
+ import eu.kanade.tachiyomi.network.NetworkHelper
+-import eu.kanade.tachiyomi.network.ProgressListener
+-import eu.kanade.tachiyomi.network.awaitSuccess
+-import eu.kanade.tachiyomi.network.newCachelessCallWithProgress
+ import eu.kanade.tachiyomi.util.storage.getUriCompat
+-import eu.kanade.tachiyomi.util.storage.saveTo
+ import kotlinx.coroutines.CancellationException
+ import kotlinx.coroutines.Dispatchers
+ import kotlinx.coroutines.Job
+@@ -31,8 +29,14 @@ import kotlinx.coroutines.flow.update
+ import kotlinx.coroutines.launch
+ import kotlinx.coroutines.withContext
+ import logcat.LogPriority
++import tachiyomi.core.common.i18n.stringResource
+ import tachiyomi.core.common.util.system.logcat
++import tachiyomi.i18n.MR
+ import java.io.File
++import java.io.InterruptedIOException
++import java.net.SocketTimeoutException
++import java.util.concurrent.TimeUnit.MINUTES
++import java.util.concurrent.TimeUnit.SECONDS
+ 
+ @AssistedInject
+ class NewUpdateScreenModel(
+@@ -62,7 +66,7 @@ class NewUpdateScreenModel(
+         if (downloadJob?.isActive == true) return
+ 
+         downloadJob = viewModelScope.launch {
+-            state.update { it.copy(downloadProgress = 0, stage = Stage.Downloading) }
++            state.update { it.copy(downloadProgress = 0, stage = Stage.Downloading, failureReason = null) }
+             try {
+                 withContext(Dispatchers.IO) { downloadApk() }
+                 state.update { it.copy(downloadProgress = 100, stage = Stage.Downloaded) }
+@@ -71,32 +75,52 @@ class NewUpdateScreenModel(
+             } catch (e: Exception) {
+                 logcat(LogPriority.ERROR, e)
+                 apkFile.delete()
+-                state.update { it.copy(stage = Stage.Failed) }
++                state.update { it.copy(stage = Stage.Failed, failureReason = failureReason(e)) }
+             }
+         }
+     }
+ 
+     private suspend fun downloadApk() {
+-        val progressListener = object : ProgressListener {
+-            // Progress of the download
+-            var savedProgress = 0
+-
+-            // Keep track of the last update sent to avoid updating the state too often.
+-            var lastTick = 0L
++        // Harmony: a readable archive already has a versionCode, so it is a finished APK from an
++        // earlier download. Drop it and start over. A partial file does not parse and is resumed.
++        if (apkFile.exists()) {
++            val finished = try {
++                context.packageManager.getPackageArchiveInfo(apkFile.absolutePath, 0) != null
++            } catch (_: Exception) {
++                false
++            }
++            if (finished) apkFile.delete()
++        }
+ 
+-            override fun update(bytesRead: Long, contentLength: Long, done: Boolean) {
+-                val progress = (100 * (bytesRead.toFloat() / contentLength)).toInt()
+-                val currentTime = System.currentTimeMillis()
+-                if (progress > savedProgress && currentTime - 200 > lastTick) {
+-                    savedProgress = progress
+-                    lastTick = currentTime
+-                    state.update { it.copy(downloadProgress = progress) }
+-                }
++        var savedProgress = 0
++        var lastTick = 0L
++        // Harmony: longer read timeout for the release CDN only. The shared client is unchanged.
++        val client = network.client.newBuilder()
++            .readTimeout(60, SECONDS)
++            .callTimeout(10, MINUTES)
++            .build()
++        AppUpdateApkDownloader(client).download(downloadLink, apkFile) { progress ->
++            val currentTime = System.currentTimeMillis()
++            if (progress > savedProgress && currentTime - 200 > lastTick) {
++                savedProgress = progress
++                lastTick = currentTime
++                state.update { it.copy(downloadProgress = progress) }
+             }
+         }
++    }
+ 
+-        val response = network.client.newCachelessCallWithProgress(GET(downloadLink), progressListener).awaitSuccess()
+-        response.body.source().saveTo(apkFile)
++    private fun failureReason(error: Throwable): String {
++        val chain = generateSequence(error) { it.cause }
++        chain.filterIsInstance<HttpException>().firstOrNull()?.let { http ->
++            return context.stringResource(MR.strings.harmony_update_download_http, http.code)
++        }
++        if (chain.any { it is StorageWriteException }) {
++            return context.stringResource(MR.strings.harmony_update_download_storage)
++        }
++        if (chain.any { it is SocketTimeoutException || it is InterruptedIOException }) {
++            return context.stringResource(MR.strings.harmony_update_download_timeout)
++        }
++        return context.stringResource(MR.strings.harmony_update_download_network)
+     }
+ 
+     fun skipUpdate(versionName: String) {
+@@ -117,6 +141,7 @@ class NewUpdateScreenModel(
+         val changelogInfo: String,
+         val downloadProgress: Int = 0,
+         val stage: Stage = Stage.Available,
++        val failureReason: String? = null,
+     )
+ 
+     enum class Stage {
+diff --git a/app/src/test/java/eu/kanade/tachiyomi/data/updater/AppUpdateApkDownloaderTest.kt b/app/src/test/java/eu/kanade/tachiyomi/data/updater/AppUpdateApkDownloaderTest.kt
+new file mode 100644
+index 0000000..c9de3d3
+--- /dev/null
++++ b/app/src/test/java/eu/kanade/tachiyomi/data/updater/AppUpdateApkDownloaderTest.kt
+@@ -0,0 +1,138 @@
++package eu.kanade.tachiyomi.data.updater
++
++import com.sun.net.httpserver.HttpExchange
++import com.sun.net.httpserver.HttpServer
++import eu.kanade.tachiyomi.network.HttpException
++import io.kotest.assertions.throwables.shouldThrow
++import io.kotest.matchers.collections.shouldBeEmpty
++import io.kotest.matchers.shouldBe
++import kotlinx.coroutines.runBlocking
++import okhttp3.OkHttpClient
++import okhttp3.Protocol
++import org.junit.jupiter.api.Test
++import java.io.File
++import java.net.InetSocketAddress
++import java.util.concurrent.Executors
++import java.util.concurrent.TimeUnit
++import java.util.concurrent.atomic.AtomicInteger
++
++class AppUpdateApkDownloaderTest {
++
++    private val client = OkHttpClient.Builder()
++        .protocols(listOf(Protocol.HTTP_1_1))
++        .connectTimeout(5, TimeUnit.SECONDS)
++        .readTimeout(5, TimeUnit.SECONDS)
++        .callTimeout(15, TimeUnit.SECONDS)
++        .retryOnConnectionFailure(false)
++        .build()
++
++    @Test
++    fun `resumes after the connection drops halfway`() = runBlocking<Unit> {
++        val data = ByteArray(80_000) { (it * 31).toByte() }
++        val half = data.size / 2
++        val ranges = mutableListOf<String?>()
++        val hits = AtomicInteger()
++        val server = server { exchange ->
++            val attempt = hits.incrementAndGet()
++            if (attempt == 1) {
++                exchange.sendResponseHeaders(200, data.size.toLong())
++                exchange.responseBody.use { it.write(data, 0, half) }
++            } else {
++                val range = exchange.requestHeaders.getFirst("Range")
++                ranges += range
++                val start = range!!.removePrefix("bytes=").substringBefore('-').toInt()
++                val rest = data.size - start
++                exchange.responseHeaders.add("Content-Range", "bytes $start-${data.size - 1}/${data.size}")
++                exchange.sendResponseHeaders(206, rest.toLong())
++                exchange.responseBody.use { it.write(data, start, rest) }
++            }
++        }
++        val file = File.createTempFile("update", ".apk")
++        val delays = mutableListOf<Long>()
++        val progress = mutableListOf<Int>()
++        try {
++            downloader(delays).download(url(server), file) { progress += it }
++            ranges.single() shouldBe "bytes=$half-"
++            file.readBytes().contentEquals(data) shouldBe true
++            delays shouldBe listOf(2_000L)
++            hits.get() shouldBe 2
++            progress.zipWithNext().all { (previous, next) -> next >= previous } shouldBe true
++        } finally {
++            file.delete()
++            server.stop(0)
++        }
++    }
++
++    @Test
++    fun `starts over after 416`() = runBlocking<Unit> {
++        val data = ByteArray(4_096) { it.toByte() }
++        val ranges = mutableListOf<String?>()
++        val server = server { exchange ->
++            val range = exchange.requestHeaders.getFirst("Range")
++            ranges += range
++            if (range != null) {
++                exchange.sendResponseHeaders(416, -1)
++            } else {
++                exchange.sendResponseHeaders(200, data.size.toLong())
++                exchange.responseBody.use { it.write(data) }
++            }
++        }
++        val file = File.createTempFile("update", ".apk")
++        file.writeBytes(ByteArray(100) { 7 })
++        val delays = mutableListOf<Long>()
++        try {
++            downloader(delays).download(url(server), file)
++            ranges shouldBe listOf("bytes=100-", null)
++            file.readBytes().contentEquals(data) shouldBe true
++            delays shouldBe listOf(2_000L)
++        } finally {
++            file.delete()
++            server.stop(0)
++        }
++    }
++
++    @Test
++    fun `fails immediately on 404`() = runBlocking<Unit> {
++        val hits = AtomicInteger()
++        val server = server { exchange ->
++            hits.incrementAndGet()
++            exchange.sendResponseHeaders(404, -1)
++        }
++        val file = File.createTempFile("update", ".apk")
++        val delays = mutableListOf<Long>()
++        try {
++            val error = shouldThrow<HttpException> {
++                downloader(delays).download(url(server), file)
++            }
++            error.code shouldBe 404
++            hits.get() shouldBe 1
++            delays.shouldBeEmpty()
++            file.exists() shouldBe false
++        } finally {
++            file.delete()
++            server.stop(0)
++        }
++    }
++
++    private fun downloader(delays: MutableList<Long>) = AppUpdateApkDownloader(client) { millis ->
++        delays += millis
++    }
++
++    private fun url(server: HttpServer) = "http://127.0.0.1:${server.address.port}/apk"
++
++    private fun server(handler: (HttpExchange) -> Unit): HttpServer {
++        val http = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
++        http.createContext("/apk") { exchange ->
++            try {
++                handler(exchange)
++            } finally {
++                exchange.close()
++            }
++        }
++        http.executor = Executors.newCachedThreadPool { runnable ->
++            Thread(runnable, "apk-update-test").apply { isDaemon = true }
++        }
++        http.start()
++        return http
++    }
++}
+diff --git a/i18n/src/commonMain/moko-resources/base/strings.xml b/i18n/src/commonMain/moko-resources/base/strings.xml
+index bd2c343..3587856 100644
+--- a/i18n/src/commonMain/moko-resources/base/strings.xml
++++ b/i18n/src/commonMain/moko-resources/base/strings.xml
+@@ -557,6 +557,10 @@
+     <string name="harmony_download_skipped_queued">%1$d already in the queue</string>
+     <string name="harmony_download_skipped_no_source">%1$d from a source that is not installed</string>
+     <string name="harmony_download_leftover_delete_failed">Could not remove the leftover \'%1$s\' from an earlier download</string>
++    <string name="harmony_update_download_timeout">Download timed out</string>
++    <string name="harmony_update_download_network">Connection interrupted</string>
++    <string name="harmony_update_download_http">Server returned HTTP %1$d</string>
++    <string name="harmony_update_download_storage">Could not write the update to storage</string>
+     <string name="pref_harmony_keep_alive">Keep running in the background (HarmonyOS)</string>
+     <string name="pref_harmony_keep_alive_summary">Plays a silent audio track while downloading or updating the library so that 卓易通 does not suspend the app. Other apps' audio is not affected.</string>
+     <string name="download_notifier_speed_progress">Download: %1$s/s · %2$d%%</string>
+diff --git a/i18n/src/commonMain/moko-resources/zh-rCN/strings.xml b/i18n/src/commonMain/moko-resources/zh-rCN/strings.xml
+index 1797276..c7f6007 100644
+--- a/i18n/src/commonMain/moko-resources/zh-rCN/strings.xml
++++ b/i18n/src/commonMain/moko-resources/zh-rCN/strings.xml
+@@ -577,6 +577,10 @@
+     <string name="harmony_download_skipped_queued">%1$d 章已在队列中</string>
+     <string name="harmony_download_skipped_no_source">%1$d 章的图源未安装</string>
+     <string name="harmony_download_leftover_delete_failed">无法删除上次下载残留的「%1$s」</string>
++    <string name="harmony_update_download_timeout">下载超时</string>
++    <string name="harmony_update_download_network">网络中断</string>
++    <string name="harmony_update_download_http">服务器返回 HTTP %1$d</string>
++    <string name="harmony_update_download_storage">存储写入失败</string>
+     <string name="pref_harmony_keep_alive">后台保持运行（鸿蒙）</string>
+     <string name="pref_harmony_keep_alive_summary">下载或更新书架时播放一段静音音轨，防止卓易通冻结应用；不影响其他应用的声音。</string>
+     <string name="download_notifier_speed_progress">下载：%1$s/s · %2$d%%</string>
+diff --git a/i18n/src/commonMain/moko-resources/zh-rTW/strings.xml b/i18n/src/commonMain/moko-resources/zh-rTW/strings.xml
+index 2fd39e4..8906021 100644
+--- a/i18n/src/commonMain/moko-resources/zh-rTW/strings.xml
++++ b/i18n/src/commonMain/moko-resources/zh-rTW/strings.xml
+@@ -578,6 +578,10 @@
+     <string name="harmony_download_skipped_queued">%1$d 章已在佇列中</string>
+     <string name="harmony_download_skipped_no_source">%1$d 章的圖源未安裝</string>
+     <string name="harmony_download_leftover_delete_failed">無法刪除上次下載殘留的「%1$s」</string>
++    <string name="harmony_update_download_timeout">下載逾時</string>
++    <string name="harmony_update_download_network">網路中斷</string>
++    <string name="harmony_update_download_http">伺服器回傳 HTTP %1$d</string>
++    <string name="harmony_update_download_storage">儲存寫入失敗</string>
+     <string name="pref_harmony_keep_alive">在背景保持執行（HarmonyOS）</string>
+     <string name="pref_harmony_keep_alive_summary">下載或更新書庫時播放一段靜音音軌，避免卓易通凍結應用程式；不影響其他應用程式的聲音。</string>
+     <string name="download_notifier_speed_progress">下載：%1$s/s · %2$d%%</string>
