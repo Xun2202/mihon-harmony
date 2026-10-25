@@ -1,0 +1,1295 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Xun2202 <98207886+Xun2202@users.noreply.github.com>
+Date: Sun, 25 Oct 2026 18:13:59 +0000
+Subject: [PATCH] presentation: refine inline navigation and translucent edge
+ browsing
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+与 Anikku 0053 同源：固定标题与中部横滑分类，40dp紧凑标题；56dp底栏/独立徽标与整项高亮；刷新指示器按可见顶栏窗口边界避让。保留已有手势动画与详情始终透明。
+---
+ .../components/BrowseSourceComfortableGrid.kt |   4 +-
+ .../components/BrowseSourceCompactGrid.kt     |   4 +-
+ .../browse/components/GlobalSearchCardRow.kt  |   4 +-
+ .../presentation/components/TabbedScreen.kt   |   1 +
+ .../library/components/CommonMangaItem.kt     |  20 +-
+ .../library/components/LazyLibraryGrid.kt     |   4 +-
+ .../library/components/LibraryPager.kt        |   2 +-
+ .../eu/kanade/tachiyomi/ui/home/HomeScreen.kt |   7 +-
+ .../kanade/tachiyomi/ui/library/LibraryTab.kt |   1 +
+ .../core/components/FastScrollerGlass.kt      |  63 +++++++
+ .../core/components/FastScrollerVisibility.kt |  10 +
+ .../core/components/PanoramaMasonry.kt        |   1 +
+ .../core/components/PanoramaMasonryLayout.kt  |  13 +-
+ .../core/components/VerticalFastScroller.kt   |  38 ++--
+ .../material/BrowsingTabSelector.kt           | 141 +++++++++++---
+ .../material/CompactNavigationBar.kt          |  47 +++--
+ .../components/material/NavigationChrome.kt   |   1 +
+ .../core/components/material/PullRefresh.kt   |  57 +++++-
+ .../core/components/material/Scaffold.kt      |  32 +++-
+ .../components/PanoramaMasonryLayoutTest.kt   |  13 ++
+ .../material/NavigationChromeLayoutTest.kt    |  54 ++++--
+ .../material/NavigationChromeRefreshTest.kt   | 175 ++++++++++++++++++
+ 22 files changed, 577 insertions(+), 115 deletions(-)
+ create mode 100644 presentation-core/src/main/java/tachiyomi/presentation/core/components/FastScrollerGlass.kt
+ create mode 100644 presentation-core/src/main/java/tachiyomi/presentation/core/components/FastScrollerVisibility.kt
+ create mode 100644 presentation-core/src/test/java/tachiyomi/presentation/core/components/material/NavigationChromeRefreshTest.kt
+
+diff --git a/app/src/main/java/eu/kanade/presentation/browse/components/BrowseSourceComfortableGrid.kt b/app/src/main/java/eu/kanade/presentation/browse/components/BrowseSourceComfortableGrid.kt
+index 4f7e4fb72..c4e4a6cef 100644
+--- a/app/src/main/java/eu/kanade/presentation/browse/components/BrowseSourceComfortableGrid.kt
++++ b/app/src/main/java/eu/kanade/presentation/browse/components/BrowseSourceComfortableGrid.kt
+@@ -73,7 +73,7 @@ fun BrowseSourceComfortableGrid(
+                     PanoramaColumns.Fixed(columnCount)
+                 },
+                 contentPadding =
+-                contentPadding + PaddingValues(horizontal = 8.dp, vertical = browsingContentVerticalPadding()),
++                contentPadding + PaddingValues(horizontal = 1.dp, vertical = browsingContentVerticalPadding()),
+                 verticalSpacing = CommonMangaItemDefaults.GridVerticalSpacer,
+                 horizontalSpacing = CommonMangaItemDefaults.GridHorizontalSpacer,
+             ) {
+@@ -130,7 +130,7 @@ fun BrowseSourceComfortableGrid(
+     // Harmony <--
+     LazyVerticalGrid(
+         columns = columns,
+-        contentPadding = contentPadding + PaddingValues(horizontal = 8.dp, vertical = browsingContentVerticalPadding()),
++        contentPadding = contentPadding + PaddingValues(horizontal = 1.dp, vertical = browsingContentVerticalPadding()),
+         verticalArrangement = Arrangement.spacedBy(CommonMangaItemDefaults.GridVerticalSpacer),
+         horizontalArrangement = Arrangement.spacedBy(CommonMangaItemDefaults.GridHorizontalSpacer),
+     ) {
+diff --git a/app/src/main/java/eu/kanade/presentation/browse/components/BrowseSourceCompactGrid.kt b/app/src/main/java/eu/kanade/presentation/browse/components/BrowseSourceCompactGrid.kt
+index bc64dbab0..03ff8b7ff 100644
+--- a/app/src/main/java/eu/kanade/presentation/browse/components/BrowseSourceCompactGrid.kt
++++ b/app/src/main/java/eu/kanade/presentation/browse/components/BrowseSourceCompactGrid.kt
+@@ -73,7 +73,7 @@ fun BrowseSourceCompactGrid(
+                     PanoramaColumns.Fixed(columnCount)
+                 },
+                 contentPadding =
+-                contentPadding + PaddingValues(horizontal = 8.dp, vertical = browsingContentVerticalPadding()),
++                contentPadding + PaddingValues(horizontal = 1.dp, vertical = browsingContentVerticalPadding()),
+                 verticalSpacing = CommonMangaItemDefaults.GridVerticalSpacer,
+                 horizontalSpacing = CommonMangaItemDefaults.GridHorizontalSpacer,
+             ) {
+@@ -130,7 +130,7 @@ fun BrowseSourceCompactGrid(
+     // Harmony <--
+     LazyVerticalGrid(
+         columns = columns,
+-        contentPadding = contentPadding + PaddingValues(horizontal = 8.dp, vertical = browsingContentVerticalPadding()),
++        contentPadding = contentPadding + PaddingValues(horizontal = 1.dp, vertical = browsingContentVerticalPadding()),
+         verticalArrangement = Arrangement.spacedBy(CommonMangaItemDefaults.GridVerticalSpacer),
+         horizontalArrangement = Arrangement.spacedBy(CommonMangaItemDefaults.GridHorizontalSpacer),
+     ) {
+diff --git a/app/src/main/java/eu/kanade/presentation/browse/components/GlobalSearchCardRow.kt b/app/src/main/java/eu/kanade/presentation/browse/components/GlobalSearchCardRow.kt
+index 456269b7c..7e1cf212c 100644
+--- a/app/src/main/java/eu/kanade/presentation/browse/components/GlobalSearchCardRow.kt
++++ b/app/src/main/java/eu/kanade/presentation/browse/components/GlobalSearchCardRow.kt
+@@ -36,8 +36,8 @@ fun GlobalSearchCardRow(
+     }
+ 
+     LazyRow(
+-        contentPadding = PaddingValues(MaterialTheme.padding.small),
+-        horizontalArrangement = Arrangement.spacedBy(MaterialTheme.padding.extraSmall),
++        contentPadding = PaddingValues(horizontal = 1.dp, vertical = MaterialTheme.padding.small),
++        horizontalArrangement = Arrangement.spacedBy(CommonMangaItemDefaults.GridHorizontalSpacer),
+     ) {
+         items(titles) {
+             val title by getManga(it)
+diff --git a/app/src/main/java/eu/kanade/presentation/components/TabbedScreen.kt b/app/src/main/java/eu/kanade/presentation/components/TabbedScreen.kt
+index 26a352a5b..3b5244a51 100644
+--- a/app/src/main/java/eu/kanade/presentation/components/TabbedScreen.kt
++++ b/app/src/main/java/eu/kanade/presentation/components/TabbedScreen.kt
+@@ -59,6 +59,7 @@ fun TabbedScreen(
+                     titleContent = {
+                         if (compactTabs) {
+                             BrowsingTabSelector(
++                                title = stringResource(titleRes),
+                                 labels = tabs.map { stringResource(it.titleRes) },
+                                 selectedIndex = state.currentPage,
+                                 badges = tabs.map { it.badgeNumber },
+diff --git a/app/src/main/java/eu/kanade/presentation/library/components/CommonMangaItem.kt b/app/src/main/java/eu/kanade/presentation/library/components/CommonMangaItem.kt
+index b9b36fb44..37ae6685a 100644
+--- a/app/src/main/java/eu/kanade/presentation/library/components/CommonMangaItem.kt
++++ b/app/src/main/java/eu/kanade/presentation/library/components/CommonMangaItem.kt
+@@ -30,10 +30,11 @@ import androidx.compose.ui.Alignment
+ import androidx.compose.ui.Modifier
+ import androidx.compose.ui.draw.alpha
+ import androidx.compose.ui.draw.clip
+-import androidx.compose.ui.draw.drawBehind
++import androidx.compose.ui.draw.drawWithContent
+ import androidx.compose.ui.graphics.Brush
+ import androidx.compose.ui.graphics.Color
+ import androidx.compose.ui.graphics.Shadow
++import androidx.compose.ui.graphics.drawscope.Stroke
+ import androidx.compose.ui.text.TextStyle
+ import androidx.compose.ui.text.style.TextOverflow
+ import androidx.compose.ui.unit.Dp
+@@ -50,8 +51,9 @@ import tachiyomi.presentation.core.util.selectedBackground
+ import tachiyomi.domain.manga.model.MangaCover as MangaCoverModel
+ 
+ object CommonMangaItemDefaults {
+-    val GridHorizontalSpacer = 4.dp
+-    val GridVerticalSpacer = 4.dp
++    // Keep cover gaps slightly wider than the 1dp screen edge margin.
++    val GridHorizontalSpacer = 3.dp
++    val GridVerticalSpacer = 3.dp
+ 
+     @Suppress("ConstPropertyName")
+     const val BrowseFavoriteCoverAlpha = 0.34f
+@@ -377,8 +379,7 @@ private fun GridItemSelectable(
+                 onClick = onClick,
+                 onLongClick = onLongClick,
+             )
+-            .selectedOutline(isSelected = isSelected, color = MaterialTheme.colorScheme.secondary)
+-            .padding(4.dp),
++            .selectedOutline(isSelected = isSelected, color = MaterialTheme.colorScheme.secondary),
+     ) {
+         val contentColor = if (isSelected) {
+             MaterialTheme.colorScheme.onSecondary
+@@ -397,7 +398,12 @@ private fun GridItemSelectable(
+ private fun Modifier.selectedOutline(
+     isSelected: Boolean,
+     color: Color,
+-) = drawBehind { if (isSelected) drawRect(color = color) }
++) = drawWithContent {
++    if (isSelected) drawRect(color = color)
++    drawContent()
++    // Keep the selection visible along cover edges without reserving horizontal cover padding.
++    if (isSelected) drawRect(color = color, style = Stroke(width = 4.dp.toPx()))
++}
+ 
+ /**
+  * Layout of list item.
+@@ -421,7 +427,7 @@ fun MangaListItem(
+                 onClick = onClick,
+                 onLongClick = onLongClick,
+             )
+-            .padding(horizontal = 16.dp, vertical = 8.dp),
++            .padding(horizontal = 1.dp, vertical = 1.5.dp),
+         verticalAlignment = Alignment.CenterVertically,
+     ) {
+         MangaCover.Square(
+diff --git a/app/src/main/java/eu/kanade/presentation/library/components/LazyLibraryGrid.kt b/app/src/main/java/eu/kanade/presentation/library/components/LazyLibraryGrid.kt
+index 52d240c4d..1de33d039 100644
+--- a/app/src/main/java/eu/kanade/presentation/library/components/LazyLibraryGrid.kt
++++ b/app/src/main/java/eu/kanade/presentation/library/components/LazyLibraryGrid.kt
+@@ -35,7 +35,7 @@ internal fun LazyLibraryGrid(
+             GridCells.Fixed(columns)
+         },
+         modifier = modifier,
+-        contentPadding = contentPadding + PaddingValues(horizontal = 8.dp, vertical = browsingContentVerticalPadding()),
++        contentPadding = contentPadding + PaddingValues(horizontal = 1.dp, vertical = browsingContentVerticalPadding()),
+         verticalArrangement = Arrangement.spacedBy(CommonMangaItemDefaults.GridVerticalSpacer),
+         horizontalArrangement = Arrangement.spacedBy(CommonMangaItemDefaults.GridHorizontalSpacer),
+         content = content,
+@@ -73,7 +73,7 @@ internal fun LazyLibraryStaggeredGrid(
+             modifier = modifier,
+             state = state,
+             contentPadding =
+-            contentPadding + PaddingValues(horizontal = 8.dp, vertical = browsingContentVerticalPadding()),
++            contentPadding + PaddingValues(horizontal = 1.dp, vertical = browsingContentVerticalPadding()),
+             verticalSpacing = CommonMangaItemDefaults.GridVerticalSpacer,
+             horizontalSpacing = CommonMangaItemDefaults.GridHorizontalSpacer,
+         ) {
+diff --git a/app/src/main/java/eu/kanade/presentation/library/components/LibraryPager.kt b/app/src/main/java/eu/kanade/presentation/library/components/LibraryPager.kt
+index 52348131e..0bf42e35c 100644
+--- a/app/src/main/java/eu/kanade/presentation/library/components/LibraryPager.kt
++++ b/app/src/main/java/eu/kanade/presentation/library/components/LibraryPager.kt
+@@ -171,7 +171,7 @@ private fun LibraryPagerEmptyScreen(
+ 
+     Column(
+         modifier = Modifier
+-            .padding(contentPadding + PaddingValues(horizontal = 8.dp, vertical = browsingContentVerticalPadding()))
++            .padding(contentPadding + PaddingValues(horizontal = 1.dp, vertical = browsingContentVerticalPadding()))
+             .fillMaxSize()
+             .verticalScroll(rememberScrollState()),
+     ) {
+diff --git a/app/src/main/java/eu/kanade/tachiyomi/ui/home/HomeScreen.kt b/app/src/main/java/eu/kanade/tachiyomi/ui/home/HomeScreen.kt
+index 962f5d8a8..30b101c99 100644
+--- a/app/src/main/java/eu/kanade/tachiyomi/ui/home/HomeScreen.kt
++++ b/app/src/main/java/eu/kanade/tachiyomi/ui/home/HomeScreen.kt
+@@ -245,7 +245,8 @@ object HomeScreen : Screen() {
+             onClick = {
+                 if (!selected) tabNavigator.current = tab else scope.launch { tab.onReselect(navigator) }
+             },
+-            icon = { TabIcon(tab) },
++            icon = { Icon(painter = tab.options.icon!!, contentDescription = tab.options.title) },
++            badge = tabBadge(tab, compact = true),
+             label = tab.options.title,
+             showLabel = true,
+         )
+@@ -296,7 +297,7 @@ object HomeScreen : Screen() {
+     }
+ 
+     @Composable
+-    private fun tabBadge(tab: eu.kanade.presentation.util.Tab): (@Composable () -> Unit)? {
++    private fun tabBadge(tab: eu.kanade.presentation.util.Tab, compact: Boolean = false): (@Composable () -> Unit)? {
+         val context = LocalContext.current
+         val count by produceState(initialValue = 0, tab) {
+             val graph = context.appGraph
+@@ -338,7 +339,7 @@ object HomeScreen : Screen() {
+                     else -> null
+                 }
+                 Text(
+-                    text = count.toString(),
++                    text = if (compact && count > 99) "99+" else count.toString(),
+                     modifier = Modifier.semantics {
+                         if (desc != null) contentDescription = desc
+                     },
+diff --git a/app/src/main/java/eu/kanade/tachiyomi/ui/library/LibraryTab.kt b/app/src/main/java/eu/kanade/tachiyomi/ui/library/LibraryTab.kt
+index 5bb0007ea..f536d18b4 100644
+--- a/app/src/main/java/eu/kanade/tachiyomi/ui/library/LibraryTab.kt
++++ b/app/src/main/java/eu/kanade/tachiyomi/ui/library/LibraryTab.kt
+@@ -147,6 +147,7 @@ data object LibraryTab : Tab {
+                         titleContent = if (compactCategories) {
+                             {
+                                 BrowsingTabSelector(
++                                    title = stringResource(MR.strings.label_library),
+                                     labels = categories.map { it.visualName },
+                                     selectedIndex = pagerState.currentPage,
+                                     badges = categories.map { state.getItemCountForCategory(it) },
+diff --git a/presentation-core/src/main/java/tachiyomi/presentation/core/components/FastScrollerGlass.kt b/presentation-core/src/main/java/tachiyomi/presentation/core/components/FastScrollerGlass.kt
+new file mode 100644
+index 000000000..c3c253a7d
+--- /dev/null
++++ b/presentation-core/src/main/java/tachiyomi/presentation/core/components/FastScrollerGlass.kt
+@@ -0,0 +1,63 @@
++package tachiyomi.presentation.core.components
++
++import android.os.Build
++import androidx.compose.foundation.background
++import androidx.compose.foundation.border
++import androidx.compose.foundation.shape.RoundedCornerShape
++import androidx.compose.material3.MaterialTheme
++import androidx.compose.runtime.Composable
++import androidx.compose.runtime.remember
++import androidx.compose.ui.Modifier
++import androidx.compose.ui.draw.clip
++import androidx.compose.ui.graphics.Brush
++import androidx.compose.ui.graphics.Color
++import androidx.compose.ui.platform.LocalView
++import androidx.compose.ui.unit.dp
++import dev.chrisbanes.haze.HazeState
++import dev.chrisbanes.haze.HazeStyle
++import dev.chrisbanes.haze.HazeTint
++import dev.chrisbanes.haze.hazeEffect
++import dev.chrisbanes.haze.hazeSource
++
++@Composable
++internal fun rememberFastScrollerGlass(): HazeState? {
++    val supported = Build.VERSION.SDK_INT >= 31 && LocalView.current.isHardwareAccelerated
++    return remember(supported) { if (supported) HazeState() else null }
++}
++
++// Capture only the list sibling. Capturing an ancestor that also contains the thumb cannot
++// supply its backdrop: Haze deliberately excludes that area to prevent drawing itself.
++internal fun Modifier.fastScrollerGlassSource(state: HazeState?): Modifier =
++    if (state == null) this else hazeSource(state)
++
++@Composable
++internal fun Modifier.fastScrollerGlass(
++    state: HazeState?,
++    accent: Color,
++    pressed: Boolean,
++): Modifier {
++    val surface = MaterialTheme.colorScheme.surface
++    val shape = RoundedCornerShape(8.dp)
++    val tint = accent.copy(alpha = if (pressed) 0.3f else 0.18f)
++    val base = if (state == null) {
++        Modifier.background(surface.copy(alpha = 0.78f)).background(tint)
++    } else {
++        Modifier.hazeEffect(
++            state = state,
++            style = HazeStyle(
++                backgroundColor = surface,
++                tints = listOf(HazeTint(surface.copy(alpha = 0.4f)), HazeTint(tint)),
++                blurRadius = 12.dp,
++                noiseFactor = 0.035f,
++                fallbackTint = HazeTint(surface.copy(alpha = 0.78f)),
++            ),
++        )
++    }
++    return clip(shape).then(base).background(
++        Brush.verticalGradient(listOf(Color.White.copy(alpha = 0.2f), Color.Transparent, accent.copy(alpha = 0.1f))),
++    ).border(
++        width = 1.dp,
++        brush = Brush.verticalGradient(listOf(Color.White.copy(alpha = 0.65f), accent.copy(alpha = 0.55f))),
++        shape = shape,
++    )
++}
+diff --git a/presentation-core/src/main/java/tachiyomi/presentation/core/components/FastScrollerVisibility.kt b/presentation-core/src/main/java/tachiyomi/presentation/core/components/FastScrollerVisibility.kt
+new file mode 100644
+index 000000000..d5e0d0aa9
+--- /dev/null
++++ b/presentation-core/src/main/java/tachiyomi/presentation/core/components/FastScrollerVisibility.kt
+@@ -0,0 +1,10 @@
++package tachiyomi.presentation.core.components
++
++import android.view.ViewConfiguration
++import androidx.compose.animation.core.tween
++
++// Give the user time to reach the thumb after scrolling stops. A new scroll or grab resets this delay.
++internal val FastScrollerFadeOutAnimationSpec = tween<Float>(
++    durationMillis = ViewConfiguration.getScrollBarFadeDuration(),
++    delayMillis = 2_500,
++)
+diff --git a/presentation-core/src/main/java/tachiyomi/presentation/core/components/PanoramaMasonry.kt b/presentation-core/src/main/java/tachiyomi/presentation/core/components/PanoramaMasonry.kt
+index c1464c52b..fbe56c95e 100644
+--- a/presentation-core/src/main/java/tachiyomi/presentation/core/components/PanoramaMasonry.kt
++++ b/presentation-core/src/main/java/tachiyomi/presentation/core/components/PanoramaMasonry.kt
+@@ -849,6 +849,7 @@ private fun LazyLayoutMeasureScope.measureMasonry(
+                 wide = spec.wide,
+                 titleBelow = spec.titleBelow,
+                 cellPaddingPx = cellPadding,
++                horizontalPaddingPx = 0,
+                 titlePaddingPx = titlePadding,
+                 titleLineHeightPx = titleLine,
+             )
+diff --git a/presentation-core/src/main/java/tachiyomi/presentation/core/components/PanoramaMasonryLayout.kt b/presentation-core/src/main/java/tachiyomi/presentation/core/components/PanoramaMasonryLayout.kt
+index 165252cd7..42f08e1d6 100644
+--- a/presentation-core/src/main/java/tachiyomi/presentation/core/components/PanoramaMasonryLayout.kt
++++ b/presentation-core/src/main/java/tachiyomi/presentation/core/components/PanoramaMasonryLayout.kt
+@@ -16,12 +16,12 @@ const val PANORAMA_RECESS_FRACTION = 0.5
+  * Cover cell chrome from [eu.kanade.presentation.library.components.MangaCompactGridItem] and
+  * [eu.kanade.presentation.library.components.MangaComfortableGridItem].
+  *
+- * The selectable box pads 4 dp on every edge. The cover is [fillMaxWidth] + [aspectRatio]:
++ * The selectable box has no cover padding. The cover is [fillMaxWidth] + [aspectRatio]:
+  * wide (height/width <= 0.75) uses 3/2, tall uses 2/3.
+- * Compact draws the title over the cover, so the cell is the padding plus the cover.
++ * Compact draws the title over the cover, so its cell matches the cover height.
+  * Comfortable adds the title block: padding 4 dp and two lines at 18 sp (`minLines` = 2).
+  */
+-const val PANORAMA_CELL_PADDING_DP = 4
++const val PANORAMA_CELL_PADDING_DP = 0
+ const val PANORAMA_TITLE_PADDING_DP = 4
+ const val PANORAMA_TITLE_LINE_SP = 18
+ const val PANORAMA_TITLE_LINES = 2
+@@ -880,8 +880,8 @@ fun scrollOffsetForAnchor(
+ }
+ 
+ /**
+- * Height of a panorama cover cell. [laneWidthPx] is the column width, including the 4 dp
+- * padding on each side of the cover. Wide covers use aspect 3/2, tall covers 2/3.
++ * Height of a panorama cover cell. [horizontalPaddingPx] is independent of the vertical
++ * [cellPaddingPx]. Wide covers use aspect 3/2, tall covers 2/3.
+  */
+ fun panoramaCoverCellHeightPx(
+     laneWidthPx: Int,
+@@ -891,8 +891,9 @@ fun panoramaCoverCellHeightPx(
+     titlePaddingPx: Int,
+     titleLineHeightPx: Int,
+     titleLines: Int = PANORAMA_TITLE_LINES,
++    horizontalPaddingPx: Int = cellPaddingPx,
+ ): Int {
+-    val innerWidth = (laneWidthPx - cellPaddingPx * 2).coerceAtLeast(0)
++    val innerWidth = (laneWidthPx - horizontalPaddingPx * 2).coerceAtLeast(0)
+     val cover = if (wide) {
+         (innerWidth * 2.0 / 3.0).roundToInt()
+     } else {
+diff --git a/presentation-core/src/main/java/tachiyomi/presentation/core/components/VerticalFastScroller.kt b/presentation-core/src/main/java/tachiyomi/presentation/core/components/VerticalFastScroller.kt
+index 851248701..c8ebfbf99 100644
+--- a/presentation-core/src/main/java/tachiyomi/presentation/core/components/VerticalFastScroller.kt
++++ b/presentation-core/src/main/java/tachiyomi/presentation/core/components/VerticalFastScroller.kt
+@@ -4,7 +4,6 @@ import android.view.ViewConfiguration
+ import androidx.compose.animation.core.Animatable
+ import androidx.compose.animation.core.AnimationVector1D
+ import androidx.compose.animation.core.tween
+-import androidx.compose.foundation.background
+ import androidx.compose.foundation.gestures.DraggableState
+ import androidx.compose.foundation.gestures.Orientation
+ import androidx.compose.foundation.gestures.awaitEachGesture
+@@ -28,7 +27,6 @@ import androidx.compose.foundation.lazy.LazyListItemInfo
+ import androidx.compose.foundation.lazy.LazyListState
+ import androidx.compose.foundation.lazy.grid.GridCells
+ import androidx.compose.foundation.lazy.grid.LazyGridState
+-import androidx.compose.foundation.shape.RoundedCornerShape
+ import androidx.compose.foundation.systemGestureExclusion
+ import androidx.compose.material3.MaterialTheme
+ import androidx.compose.runtime.Composable
+@@ -67,10 +65,10 @@ import androidx.compose.ui.util.fastFirstOrNull
+ import androidx.compose.ui.util.fastForEach
+ import androidx.compose.ui.util.fastLastOrNull
+ import androidx.compose.ui.util.fastMaxBy
++import dev.chrisbanes.haze.HazeState
+ import kotlinx.coroutines.CompletableDeferred
+ import kotlinx.coroutines.channels.BufferOverflow
+ import kotlinx.coroutines.coroutineScope
+-import kotlinx.coroutines.delay
+ import kotlinx.coroutines.flow.MutableSharedFlow
+ import kotlinx.coroutines.flow.collect
+ import kotlinx.coroutines.flow.collectLatest
+@@ -101,8 +99,11 @@ fun VerticalFastScroller(
+     endContentPadding: Dp = Dp.Hairline,
+     content: @Composable () -> Unit,
+ ) {
++    val thumbGlass = rememberFastScrollerGlass()
+     SubcomposeLayout(modifier = modifier) { constraints ->
+-        val contentPlaceable = subcompose("content", content).map { it.measure(constraints) }
++        val contentPlaceable = subcompose("content") {
++            Box(Modifier.fastScrollerGlassSource(thumbGlass), propagateMinConstraints = true) { content() }
++        }.map { it.measure(constraints) }
+         val contentHeight = contentPlaceable.fastMaxBy { it.height }?.height ?: 0
+         val contentWidth = contentPlaceable.fastMaxBy { it.width }?.width ?: 0
+ 
+@@ -231,8 +232,7 @@ fun VerticalFastScroller(
+                             held = { thumbPressed.pressed || isThumbDraggedState.value },
+                             thumbAllowed = thumbAllowed,
+                         ) {
+-                            delay(ScrollBarVisibilityDuration)
+-                            animateTo(0f, animationSpec = ImmediateFadeOutAnimationSpec)
++                            animateTo(0f, animationSpec = FastScrollerFadeOutAnimationSpec)
+                         }
+                         // Harmony <--
+                     }
+@@ -245,6 +245,7 @@ fun VerticalFastScroller(
+                 offsetY = thumbOffsetY,
+                 alpha = alpha.value,
+                 thumbColor = thumbColor,
++                glassState = thumbGlass,
+                 endInset = 8.dp + endContentPadding,
+                 touchEnabled = isThumbVisible || thumbPressed.pressed || isThumbDragged,
+                 pressState = thumbPressed,
+@@ -331,8 +332,11 @@ fun VerticalGridFastScroller(
+         contentPadding = contentPadding,
+     )
+ 
++    val thumbGlass = rememberFastScrollerGlass()
+     SubcomposeLayout(modifier = modifier) { constraints ->
+-        val contentPlaceable = subcompose("content", content).map { it.measure(constraints) }
++        val contentPlaceable = subcompose("content") {
++            Box(Modifier.fastScrollerGlassSource(thumbGlass), propagateMinConstraints = true) { content() }
++        }.map { it.measure(constraints) }
+         val contentHeight = contentPlaceable.fastMaxBy { it.height }?.height ?: 0
+         val contentWidth = contentPlaceable.fastMaxBy { it.width }?.width ?: 0
+ 
+@@ -445,8 +449,7 @@ fun VerticalGridFastScroller(
+                             held = { thumbPressed.pressed || isThumbDraggedState.value },
+                             thumbAllowed = thumbAllowed,
+                         ) {
+-                            delay(ScrollBarVisibilityDuration)
+-                            animateTo(0f, animationSpec = ImmediateFadeOutAnimationSpec)
++                            animateTo(0f, animationSpec = FastScrollerFadeOutAnimationSpec)
+                         }
+                         // Harmony <--
+                     }
+@@ -457,6 +460,7 @@ fun VerticalGridFastScroller(
+                 offsetY = thumbOffsetY,
+                 alpha = alpha.value,
+                 thumbColor = thumbColor,
++                glassState = thumbGlass,
+                 endInset = endContentPadding,
+                 touchEnabled = isThumbVisible || thumbPressed.pressed || isThumbDragged,
+                 pressState = thumbPressed,
+@@ -539,8 +543,11 @@ fun VerticalMasonryFastScroller(
+     endContentPadding: Dp = Dp.Hairline,
+     content: @Composable () -> Unit,
+ ) {
++    val thumbGlass = rememberFastScrollerGlass()
+     SubcomposeLayout(modifier = modifier) { constraints ->
+-        val contentPlaceable = subcompose("content", content).map { it.measure(constraints) }
++        val contentPlaceable = subcompose("content") {
++            Box(Modifier.fastScrollerGlassSource(thumbGlass), propagateMinConstraints = true) { content() }
++        }.map { it.measure(constraints) }
+         val contentHeight = contentPlaceable.fastMaxBy { it.height }?.height ?: 0
+         val contentWidth = contentPlaceable.fastMaxBy { it.width }?.width ?: 0
+ 
+@@ -617,10 +624,7 @@ fun VerticalMasonryFastScroller(
+                         ) {
+                             animateTo(
+                                 0f,
+-                                animationSpec = tween(
+-                                    durationMillis = ViewConfiguration.getScrollBarFadeDuration(),
+-                                    delayMillis = ViewConfiguration.getScrollDefaultDelay(),
+-                                ),
++                                animationSpec = FastScrollerFadeOutAnimationSpec,
+                             )
+                         }
+                     }
+@@ -633,6 +637,7 @@ fun VerticalMasonryFastScroller(
+                 offsetY = thumbOffsetY,
+                 alpha = alpha.value,
+                 thumbColor = thumbColor,
++                glassState = thumbGlass,
+                 endInset = endContentPadding,
+                 touchEnabled = isThumbVisible || thumbPressed.pressed || isThumbDragged,
+                 pressState = thumbPressed,
+@@ -691,6 +696,7 @@ private fun HarmonyScrollerThumb(
+     offsetY: Float,
+     alpha: Float,
+     thumbColor: Color,
++    glassState: HazeState?,
+     endInset: Dp,
+     touchEnabled: Boolean,
+     pressState: ThumbPressedState,
+@@ -734,7 +740,7 @@ private fun HarmonyScrollerThumb(
+                 .width(ThumbThickness)
+                 .height(ThumbLength)
+                 .alpha(alpha)
+-                .background(color = thumbColor, shape = ThumbShape),
++                .fastScrollerGlass(glassState, thumbColor, pressed = pressState.pressed),
+         )
+     }
+ }
+@@ -971,8 +977,6 @@ private val ThumbThickness = 16.dp
+ private val ThumbGrabWidth = 28.dp
+ private val ThumbTouchWidth = 32.dp
+ private val HoldToGrabMillis = 120L
+-private val ThumbShape = RoundedCornerShape(ThumbThickness / 2)
+-private val ScrollBarVisibilityDuration = 2.seconds
+ private val ImmediateFadeOutAnimationSpec = tween<Float>(
+     durationMillis = ViewConfiguration.getScrollBarFadeDuration(),
+ )
+diff --git a/presentation-core/src/main/java/tachiyomi/presentation/core/components/material/BrowsingTabSelector.kt b/presentation-core/src/main/java/tachiyomi/presentation/core/components/material/BrowsingTabSelector.kt
+index 552fb500f..724d5d746 100644
+--- a/presentation-core/src/main/java/tachiyomi/presentation/core/components/material/BrowsingTabSelector.kt
++++ b/presentation-core/src/main/java/tachiyomi/presentation/core/components/material/BrowsingTabSelector.kt
+@@ -1,60 +1,143 @@
+ package tachiyomi.presentation.core.components.material
+ 
+-import androidx.compose.foundation.clickable
++import androidx.compose.foundation.background
+ import androidx.compose.foundation.layout.Arrangement
+ import androidx.compose.foundation.layout.Box
++import androidx.compose.foundation.layout.BoxWithConstraints
++import androidx.compose.foundation.layout.IntrinsicSize
+ import androidx.compose.foundation.layout.Row
+-import androidx.compose.foundation.layout.heightIn
++import androidx.compose.foundation.layout.fillMaxWidth
++import androidx.compose.foundation.layout.height
+ import androidx.compose.foundation.layout.padding
+-import androidx.compose.material3.DropdownMenu
+-import androidx.compose.material3.DropdownMenuItem
++import androidx.compose.foundation.layout.width
++import androidx.compose.foundation.layout.widthIn
++import androidx.compose.foundation.lazy.LazyRow
++import androidx.compose.foundation.lazy.itemsIndexed
++import androidx.compose.foundation.lazy.rememberLazyListState
++import androidx.compose.foundation.selection.selectable
++import androidx.compose.foundation.selection.selectableGroup
++import androidx.compose.foundation.shape.RoundedCornerShape
+ import androidx.compose.material3.MaterialTheme
+ import androidx.compose.material3.ProvideTextStyle
+ import androidx.compose.material3.Text
+ import androidx.compose.runtime.Composable
+-import androidx.compose.runtime.getValue
+-import androidx.compose.runtime.mutableStateOf
+-import androidx.compose.runtime.remember
+-import androidx.compose.runtime.setValue
++import androidx.compose.runtime.LaunchedEffect
+ import androidx.compose.ui.Alignment
+ import androidx.compose.ui.Modifier
++import androidx.compose.ui.draw.drawWithContent
++import androidx.compose.ui.geometry.Offset
++import androidx.compose.ui.geometry.Size
++import androidx.compose.ui.graphics.BlendMode
++import androidx.compose.ui.graphics.Brush
++import androidx.compose.ui.graphics.Color
++import androidx.compose.ui.graphics.CompositingStrategy
++import androidx.compose.ui.graphics.graphicsLayer
++import androidx.compose.ui.platform.LocalLayoutDirection
+ import androidx.compose.ui.semantics.Role
++import androidx.compose.ui.text.style.TextOverflow
++import androidx.compose.ui.unit.LayoutDirection
+ import androidx.compose.ui.unit.dp
++import androidx.compose.ui.unit.sp
+ 
+-/** The current tab occupies the title slot on wide windows; all pages remain available in the menu. */
++/** A fixed screen title beside scrolling categories; only the category strip fades at its edges. */
+ @Composable
+ fun BrowsingTabSelector(
++    title: String,
+     labels: List<String>,
+     selectedIndex: Int,
+     badges: List<Int?> = emptyList(),
+     onSelect: (Int) -> Unit,
++    modifier: Modifier = Modifier,
+ ) {
+     if (labels.isEmpty()) return
+-    var expanded by remember { mutableStateOf(false) }
+     val selected = selectedIndex.coerceIn(labels.indices)
+-    Box {
++    val state = rememberLazyListState(initialFirstVisibleItemIndex = selected)
++    val rtl = LocalLayoutDirection.current == LayoutDirection.Rtl
++    LaunchedEffect(selected, labels.size) {
++        val item = state.layoutInfo.visibleItemsInfo.firstOrNull { it.index == selected }
++        if (item == null || item.offset < 0 || item.offset + item.size > state.layoutInfo.viewportEndOffset) {
++            state.animateScrollToItem(selected)
++        }
++    }
++    BoxWithConstraints(modifier.fillMaxWidth()) {
++        val titleMaxWidth = maxWidth * 0.45f
+         Row(
+-            modifier = Modifier.heightIn(min = 48.dp).clickable(role = Role.Button) { expanded = true },
++            modifier = Modifier.fillMaxWidth().height(40.dp),
+             verticalAlignment = Alignment.CenterVertically,
+-            horizontalArrangement = Arrangement.spacedBy(4.dp),
++            horizontalArrangement = Arrangement.spacedBy(6.dp),
+         ) {
+-            Box(Modifier.weight(1f, fill = false)) {
+-                ProvideTextStyle(MaterialTheme.typography.titleMedium) {
+-                    TabText(labels[selected], badges.getOrNull(selected))
+-                }
+-            }
+-            Text("▾", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(end = 4.dp))
+-        }
+-        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+-            labels.forEachIndexed { index, label ->
+-                DropdownMenuItem(
+-                    text = { TabText(label, badges.getOrNull(index)) },
+-                    leadingIcon = { Text(if (index == selected) "✓" else "") },
+-                    onClick = {
+-                        expanded = false
+-                        onSelect(index)
++            Text(
++                text = title,
++                modifier = Modifier.widthIn(max = titleMaxWidth),
++                style = MaterialTheme.typography.titleLarge.copy(lineHeight = 28.sp),
++                maxLines = 1,
++                overflow = TextOverflow.Ellipsis,
++            )
++            LazyRow(
++                state = state,
++                modifier = Modifier
++                    .weight(1f)
++                    .selectableGroup()
++                    .graphicsLayer { compositingStrategy = CompositingStrategy.Offscreen }
++                    .drawWithContent {
++                        drawContent()
++                        val edge = 10.dp.toPx().coerceAtMost(size.width / 2)
++                        val fadeLeft = if (rtl) state.canScrollForward else state.canScrollBackward
++                        val fadeRight = if (rtl) state.canScrollBackward else state.canScrollForward
++                        if (fadeLeft) {
++                            drawRect(
++                                brush = Brush.horizontalGradient(listOf(Color.Transparent, Color.Black), 0f, edge),
++                                size = Size(edge, size.height),
++                                blendMode = BlendMode.DstIn,
++                            )
++                        }
++                        if (fadeRight) {
++                            drawRect(
++                                brush = Brush.horizontalGradient(
++                                    listOf(Color.Black, Color.Transparent),
++                                    size.width - edge,
++                                    size.width,
++                                ),
++                                topLeft = Offset(size.width - edge, 0f),
++                                size = Size(edge, size.height),
++                                blendMode = BlendMode.DstIn,
++                            )
++                        }
+                     },
+-                )
++            ) {
++                itemsIndexed(labels) { index, label ->
++                    Box(
++                        Modifier
++                            .height(40.dp)
++                            .width(IntrinsicSize.Max)
++                            .widthIn(min = 48.dp, max = 180.dp)
++                            .selectable(selected = index == selected, role = Role.Tab, onClick = { onSelect(index) })
++                            .padding(horizontal = 8.dp),
++                    ) {
++                        ProvideTextStyle(
++                            MaterialTheme.typography.labelLarge.copy(
++                                fontSize = 14.sp,
++                                lineHeight = 20.sp,
++                                color = if (index == selected) {
++                                    MaterialTheme.colorScheme.primary
++                                } else {
++                                    MaterialTheme.colorScheme.onSurfaceVariant
++                                },
++                            ),
++                        ) {
++                            // Match the title's lower text edge while leaving room for the selection bar.
++                            Box(Modifier.align(Alignment.BottomCenter).padding(bottom = 6.dp)) {
++                                TabText(label, badges.getOrNull(index))
++                            }
++                        }
++                        if (index == selected) {
++                            Box(
++                                Modifier.align(Alignment.BottomCenter).fillMaxWidth().height(2.dp)
++                                    .background(MaterialTheme.colorScheme.primary, RoundedCornerShape(1.dp)),
++                            )
++                        }
++                    }
++                }
+             }
+         }
+     }
+diff --git a/presentation-core/src/main/java/tachiyomi/presentation/core/components/material/CompactNavigationBar.kt b/presentation-core/src/main/java/tachiyomi/presentation/core/components/material/CompactNavigationBar.kt
+index 952d15b93..7e6666adc 100644
+--- a/presentation-core/src/main/java/tachiyomi/presentation/core/components/material/CompactNavigationBar.kt
++++ b/presentation-core/src/main/java/tachiyomi/presentation/core/components/material/CompactNavigationBar.kt
+@@ -13,7 +13,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
+ import androidx.compose.foundation.layout.height
+ import androidx.compose.foundation.layout.only
+ import androidx.compose.foundation.layout.padding
+-import androidx.compose.foundation.layout.size
+ import androidx.compose.foundation.layout.windowInsetsPadding
+ import androidx.compose.foundation.selection.selectable
+ import androidx.compose.foundation.selection.selectableGroup
+@@ -27,12 +26,13 @@ import androidx.compose.runtime.CompositionLocalProvider
+ import androidx.compose.ui.Alignment
+ import androidx.compose.ui.Modifier
+ import androidx.compose.ui.graphics.Color
++import androidx.compose.ui.layout.Layout
+ import androidx.compose.ui.semantics.Role
+ import androidx.compose.ui.text.style.TextOverflow
+ import androidx.compose.ui.unit.dp
+ import androidx.compose.ui.unit.sp
+ 
+-/** A 48dp touch row, 16dp badge headroom, and the real bottom system inset. */
++/** A 48dp visual row plus 8dp badge space, all touchable, and the real bottom system inset. */
+ @Composable
+ fun CompactNavigationBar(
+     modifier: Modifier = Modifier,
+@@ -45,8 +45,7 @@ fun CompactNavigationBar(
+             .fillMaxWidth()
+             .background(containerColor)
+             .windowInsetsPadding(windowInsets)
+-            .padding(top = 16.dp)
+-            .height(48.dp)
++            .height(56.dp)
+             .selectableGroup(),
+         verticalAlignment = Alignment.CenterVertically,
+         content = content,
+@@ -61,26 +60,46 @@ fun RowScope.CompactNavigationBarItem(
+     label: String,
+     showLabel: Boolean,
+     modifier: Modifier = Modifier,
++    badge: (@Composable () -> Unit)? = null,
+ ) {
+     val color = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+     Column(
+         modifier = modifier
+             .weight(1f)
+             .fillMaxHeight()
+-            .selectable(selected = selected, role = Role.Tab, onClick = onClick),
++            .selectable(selected = selected, role = Role.Tab, onClick = onClick)
++            .padding(start = 4.dp, top = 8.dp, end = 4.dp)
++            .background(
++                if (selected) MaterialTheme.colorScheme.secondaryContainer else Color.Transparent,
++                RoundedCornerShape(16.dp),
++            ),
+         horizontalAlignment = Alignment.CenterHorizontally,
+         verticalArrangement = Arrangement.Center,
+     ) {
+         CompositionLocalProvider(LocalContentColor provides color) {
+-            Box(
+-                modifier = Modifier
+-                    .size(width = 36.dp, height = 28.dp)
+-                    .background(
+-                        if (selected) MaterialTheme.colorScheme.secondaryContainer else Color.Transparent,
+-                        RoundedCornerShape(14.dp),
+-                    ),
+-                contentAlignment = Alignment.Center,
+-            ) { icon() }
++            Layout(modifier = Modifier.fillMaxWidth(), content = {
++                Box(contentAlignment = Alignment.Center) { icon() }
++                Box {
++                    MaterialTheme(
++                        typography = MaterialTheme.typography.copy(
++                            labelSmall = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp, lineHeight = 12.sp),
++                        ),
++                    ) { badge?.invoke() }
++                }
++            }) { measurables, constraints ->
++                val looseConstraints = constraints.copy(minWidth = 0, minHeight = 0)
++                val iconPlaceable = measurables[0].measure(looseConstraints)
++                val badgePlaceable = measurables[1].measure(looseConstraints)
++                val width = constraints.maxWidth
++                val height = maxOf(28.dp.roundToPx(), iconPlaceable.height)
++                layout(width, height) {
++                    iconPlaceable.placeRelative((width - iconPlaceable.width) / 2, height - iconPlaceable.height)
++                    // Keep the compact counter inside this item's edges and above the icon.
++                    // Its small overlap is confined to the icon's upper corner, like a normal badge.
++                    badgePlaceable.placeRelative((width - badgePlaceable.width).coerceAtLeast(0), -8.dp.roundToPx())
++                }
++            }
++
+             if (showLabel) {
+                 Text(
+                     text = label,
+diff --git a/presentation-core/src/main/java/tachiyomi/presentation/core/components/material/NavigationChrome.kt b/presentation-core/src/main/java/tachiyomi/presentation/core/components/material/NavigationChrome.kt
+index 1ecf21811..807ce8e3b 100644
+--- a/presentation-core/src/main/java/tachiyomi/presentation/core/components/material/NavigationChrome.kt
++++ b/presentation-core/src/main/java/tachiyomi/presentation/core/components/material/NavigationChrome.kt
+@@ -51,6 +51,7 @@ fun isCompactBrowsingWindow(): Boolean {
+ @Composable
+ fun navigationToolbarHeight(): Dp = when {
+     LocalDensity.current.fontScale > 1.3f -> 64.dp
++    isCompactBrowsingWindow() && LocalBrowsingChrome.current != null -> 40.dp
+     isCompactBrowsingWindow() -> 48.dp
+     else -> 56.dp
+ }
+diff --git a/presentation-core/src/main/java/tachiyomi/presentation/core/components/material/PullRefresh.kt b/presentation-core/src/main/java/tachiyomi/presentation/core/components/material/PullRefresh.kt
+index 08b10cdaa..31580d727 100644
+--- a/presentation-core/src/main/java/tachiyomi/presentation/core/components/material/PullRefresh.kt
++++ b/presentation-core/src/main/java/tachiyomi/presentation/core/components/material/PullRefresh.kt
+@@ -2,16 +2,31 @@ package tachiyomi.presentation.core.components.material
+ 
+ import androidx.compose.foundation.layout.Box
+ import androidx.compose.foundation.layout.PaddingValues
++import androidx.compose.foundation.layout.calculateEndPadding
++import androidx.compose.foundation.layout.calculateStartPadding
+ import androidx.compose.foundation.layout.padding
+ import androidx.compose.material3.MaterialTheme
+ import androidx.compose.material3.pulltorefresh.PullToRefreshDefaults
+ import androidx.compose.material3.pulltorefresh.pullToRefresh
+ import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
+ import androidx.compose.runtime.Composable
++import androidx.compose.runtime.getValue
++import androidx.compose.runtime.mutableFloatStateOf
++import androidx.compose.runtime.remember
++import androidx.compose.runtime.setValue
++import androidx.compose.runtime.staticCompositionLocalOf
+ import androidx.compose.ui.Alignment
+ import androidx.compose.ui.Modifier
++import androidx.compose.ui.draw.clipToBounds
++import androidx.compose.ui.layout.onGloballyPositioned
++import androidx.compose.ui.layout.positionInWindow
++import androidx.compose.ui.platform.LocalDensity
++import androidx.compose.ui.platform.LocalLayoutDirection
+ import androidx.compose.ui.unit.dp
+ 
++/** Window coordinate of the visible toolbar bottom, shared through nested scaffolds. */
++internal val LocalPullRefreshTopBoundary = staticCompositionLocalOf<() -> Float?> { { 0f } }
++
+ /**
+  * @param refreshing Whether the layout is currently refreshing
+  * @param onRefresh Lambda which is invoked when a swipe to refresh gesture is completed.
+@@ -29,8 +44,26 @@ fun PullRefresh(
+     content: @Composable () -> Unit,
+ ) {
+     val state = rememberPullToRefreshState()
++    val topBoundary = LocalPullRefreshTopBoundary.current
++    val density = LocalDensity.current
++    val direction = LocalLayoutDirection.current
++    var windowY by remember { mutableFloatStateOf(Float.NaN) }
++    val boundary = topBoundary()
++    val positioned = windowY.isFinite() && boundary != null
++    val minimumTopPadding = if (windowY.isFinite() && boundary != null) {
++        with(density) { (boundary - windowY).coerceAtLeast(0f).toDp() }
++    } else {
++        0.dp
++    }
++    val resolvedIndicatorPadding = PaddingValues(
++        start = indicatorPadding.calculateStartPadding(direction),
++        top = maxOf(indicatorPadding.calculateTopPadding(), minimumTopPadding),
++        end = indicatorPadding.calculateEndPadding(direction),
++        bottom = indicatorPadding.calculateBottomPadding(),
++    )
+     Box(
+         modifier = modifier
++            .onGloballyPositioned { windowY = it.positionInWindow().y }
+             .pullToRefresh(
+                 isRefreshing = refreshing,
+                 state = state,
+@@ -40,14 +73,20 @@ fun PullRefresh(
+     ) {
+         content()
+ 
+-        PullToRefreshDefaults.Indicator(
+-            modifier = Modifier
+-                .align(Alignment.TopCenter)
+-                .padding(indicatorPadding),
+-            isRefreshing = refreshing,
+-            state = state,
+-            containerColor = MaterialTheme.colorScheme.surfaceVariant,
+-            color = MaterialTheme.colorScheme.onSurfaceVariant,
+-        )
++        // Keep the entire indicator animation below the visible toolbar, including its entry.
++        // A child zIndex cannot lift it above Scaffold's separately drawn top bar.
++        if (positioned) {
++            Box(
++                Modifier.matchParentSize().padding(resolvedIndicatorPadding).clipToBounds(),
++            ) {
++                PullToRefreshDefaults.Indicator(
++                    modifier = Modifier.align(Alignment.TopCenter),
++                    isRefreshing = refreshing,
++                    state = state,
++                    containerColor = MaterialTheme.colorScheme.surfaceVariant,
++                    color = MaterialTheme.colorScheme.onSurfaceVariant,
++                )
++            }
++        }
+     }
+ }
+diff --git a/presentation-core/src/main/java/tachiyomi/presentation/core/components/material/Scaffold.kt b/presentation-core/src/main/java/tachiyomi/presentation/core/components/material/Scaffold.kt
+index 43e8852b7..11a3db2ba 100644
+--- a/presentation-core/src/main/java/tachiyomi/presentation/core/components/material/Scaffold.kt
++++ b/presentation-core/src/main/java/tachiyomi/presentation/core/components/material/Scaffold.kt
+@@ -17,13 +17,16 @@ import androidx.compose.material3.rememberTopAppBarState
+ import androidx.compose.runtime.Composable
+ import androidx.compose.runtime.CompositionLocalProvider
+ import androidx.compose.runtime.getValue
++import androidx.compose.runtime.mutableFloatStateOf
+ import androidx.compose.runtime.mutableIntStateOf
+ import androidx.compose.runtime.remember
+ import androidx.compose.runtime.setValue
+ import androidx.compose.ui.Modifier
+ import androidx.compose.ui.graphics.Color
+ import androidx.compose.ui.input.nestedscroll.nestedScroll
++import androidx.compose.ui.layout.onGloballyPositioned
+ import androidx.compose.ui.layout.onSizeChanged
++import androidx.compose.ui.layout.positionInWindow
+ import androidx.compose.ui.platform.LocalDensity
+ import androidx.compose.ui.unit.Dp
+ import androidx.compose.ui.unit.LayoutDirection
+@@ -47,6 +50,9 @@ fun Scaffold(
+ ) {
+     var fabHeight by remember { mutableIntStateOf(0) }
+     val density = LocalDensity.current
++    val parentRefreshBoundary = LocalPullRefreshTopBoundary.current
++    var topBarWindowY by remember { mutableFloatStateOf(Float.NaN) }
++    var topBarHeight by remember { mutableIntStateOf(0) }
+ 
+     val homeInsets = contentWindowInsets.union(WindowInsets(bottom = LocalBrowsingBottomPadding.current))
+     val browsingBehavior = topBarScrollBehavior as? BrowsingTopAppBarScrollBehavior
+@@ -55,12 +61,34 @@ fun Scaffold(
+     } else {
+         homeInsets
+     }
+-    CompositionLocalProvider(LocalBrowsingChrome provides browsingBehavior) {
++    CompositionLocalProvider(
++        LocalBrowsingChrome provides browsingBehavior,
++        LocalPullRefreshTopBoundary provides {
++            val parentBoundary = parentRefreshBoundary()
++            if (topBarWindowY.isFinite() && parentBoundary != null) {
++                maxOf(
++                    parentBoundary,
++                    topBarWindowY + topBarHeight * (1f - (browsingBehavior?.chrome?.hiddenFraction ?: 0f)),
++                )
++            } else {
++                null
++            }
++        },
++    ) {
+         androidx.compose.material3.Scaffold(
+             modifier = modifier
+                 .observeBrowsingChromeGestures(browsingBehavior?.chrome, density.density)
+                 .nestedScroll(topBarScrollBehavior.nestedScrollConnection),
+-            topBar = { BrowsingNavigationChrome { topBar(topBarScrollBehavior) } },
++            topBar = {
++                Box(
++                    Modifier.onGloballyPositioned {
++                        topBarWindowY = it.positionInWindow().y
++                        topBarHeight = it.size.height
++                    },
++                ) {
++                    BrowsingNavigationChrome { topBar(topBarScrollBehavior) }
++                }
++            },
+             bottomBar = bottomBar,
+             snackbarHost = snackbarHost,
+             floatingActionButton = {
+diff --git a/presentation-core/src/test/java/tachiyomi/presentation/core/components/PanoramaMasonryLayoutTest.kt b/presentation-core/src/test/java/tachiyomi/presentation/core/components/PanoramaMasonryLayoutTest.kt
+index 3b6ccd257..931a64dd4 100644
+--- a/presentation-core/src/test/java/tachiyomi/presentation/core/components/PanoramaMasonryLayoutTest.kt
++++ b/presentation-core/src/test/java/tachiyomi/presentation/core/components/PanoramaMasonryLayoutTest.kt
+@@ -1354,6 +1354,19 @@ class PanoramaMasonryLayoutTest {
+         assertEquals(190, panoramaCoverCellHeightPx(100, wide = false, titleBelow = true, 4, 4, 18))
+     }
+ 
++    @Test
++    fun `edge covers fill their cell without adding padding between rows`() {
++        // A 100px lane is all cover; comfortable titles keep their existing padding and lines.
++        assertEquals(
++            67,
++            panoramaCoverCellHeightPx(100, wide = true, titleBelow = false, 0, 4, 18, horizontalPaddingPx = 0),
++        )
++        assertEquals(
++            194,
++            panoramaCoverCellHeightPx(100, wide = false, titleBelow = true, 0, 4, 18, horizontalPaddingPx = 0),
++        )
++    }
++
+     private fun checkShaped(
+         gridWidth: Int,
+         gridHeight: Int,
+diff --git a/presentation-core/src/test/java/tachiyomi/presentation/core/components/material/NavigationChromeLayoutTest.kt b/presentation-core/src/test/java/tachiyomi/presentation/core/components/material/NavigationChromeLayoutTest.kt
+index 8f2c6c097..80992b1b6 100644
+--- a/presentation-core/src/test/java/tachiyomi/presentation/core/components/material/NavigationChromeLayoutTest.kt
++++ b/presentation-core/src/test/java/tachiyomi/presentation/core/components/material/NavigationChromeLayoutTest.kt
+@@ -2,6 +2,7 @@ package tachiyomi.presentation.core.components.material
+ 
+ import androidx.compose.foundation.layout.Box
+ import androidx.compose.foundation.layout.Column
++import androidx.compose.foundation.layout.Row
+ import androidx.compose.foundation.layout.WindowInsets
+ import androidx.compose.foundation.layout.fillMaxSize
+ import androidx.compose.foundation.layout.fillMaxWidth
+@@ -11,11 +12,11 @@ import androidx.compose.foundation.layout.width
+ import androidx.compose.foundation.lazy.LazyColumn
+ import androidx.compose.foundation.lazy.rememberLazyListState
+ import androidx.compose.material3.Badge
+-import androidx.compose.material3.BadgedBox
+ import androidx.compose.material3.MaterialTheme
+ import androidx.compose.material3.Text
+ import androidx.compose.runtime.CompositionLocalProvider
+ import androidx.compose.runtime.mutableFloatStateOf
++import androidx.compose.runtime.mutableIntStateOf
+ import androidx.compose.ui.Alignment
+ import androidx.compose.ui.Modifier
+ import androidx.compose.ui.geometry.Offset
+@@ -24,9 +25,13 @@ import androidx.compose.ui.layout.onGloballyPositioned
+ import androidx.compose.ui.layout.positionInRoot
+ import androidx.compose.ui.platform.testTag
+ import androidx.compose.ui.test.ExperimentalTestApi
++import androidx.compose.ui.test.assertIsDisplayed
++import androidx.compose.ui.test.assertIsSelected
++import androidx.compose.ui.test.hasScrollToIndexAction
+ import androidx.compose.ui.test.onNodeWithTag
+ import androidx.compose.ui.test.onNodeWithText
+ import androidx.compose.ui.test.performClick
++import androidx.compose.ui.test.performScrollToIndex
+ import androidx.compose.ui.test.performTouchInput
+ import androidx.compose.ui.test.v2.runComposeUiTest
+ import androidx.compose.ui.unit.dp
+@@ -290,17 +295,14 @@ class NavigationChromeLayoutTest {
+                             onClick = {},
+                             label = "Browse",
+                             showLabel = true,
+-                            icon = {
+-                                BadgedBox(badge = {
+-                                    Badge(
+-                                        Modifier.testTag("update-badge").onGloballyPositioned {
+-                                            badgeTop = it.positionInRoot().y
+-                                            badgeBottom = badgeTop + it.size.height
+-                                        },
+-                                    ) { Text("99") }
+-                                }) {
+-                                    Box(Modifier.size(24.dp))
+-                                }
++                            icon = { Box(Modifier.size(24.dp)) },
++                            badge = {
++                                Badge(
++                                    Modifier.testTag("update-badge").onGloballyPositioned {
++                                        badgeTop = it.positionInRoot().y
++                                        badgeBottom = badgeTop + it.size.height
++                                    },
++                                ) { Text("99") }
+                             },
+                         )
+                     }
+@@ -316,17 +318,31 @@ class NavigationChromeLayoutTest {
+     }
+ 
+     @Test
+-    fun `single row selector keeps every category reachable`() = runComposeUiTest {
+-        var selected = -1
++    fun `inline categories scroll and select without displacing title or actions`() = runComposeUiTest {
++        val selected = mutableIntStateOf(0)
+         setContent {
+             MaterialTheme {
+-                Box(Modifier.width(200.dp).testTag("selector")) {
+-                    BrowsingTabSelector(listOf("Reading", "Finished"), 0, onSelect = { selected = it })
++                Row(Modifier.width(360.dp)) {
++                    BrowsingTabSelector(
++                        title = "Library",
++                        labels = List(9) { "Category $it" },
++                        selectedIndex = selected.intValue,
++                        onSelect = { selected.intValue = it },
++                        modifier = Modifier.weight(1f),
++                    )
++                    Box(Modifier.width(96.dp).height(40.dp).testTag("controls"))
+                 }
+             }
+         }
+-        onNodeWithText("Reading").performClick()
+-        onNodeWithText("Finished").performClick()
+-        runOnIdle { assertEquals(1, selected) }
++        onNodeWithText("Library").assertIsDisplayed()
++        val title = onNodeWithText("Library").fetchSemanticsNode().boundsInRoot
++        val controls = onNodeWithTag("controls").fetchSemanticsNode().boundsInRoot
++        onNode(hasScrollToIndexAction()).performScrollToIndex(8)
++        onNodeWithText("Category 8").performClick().assertIsSelected()
++        runOnIdle { assertEquals(8, selected.intValue) }
++        assertEquals(title, onNodeWithText("Library").fetchSemanticsNode().boundsInRoot)
++        assertEquals(controls, onNodeWithTag("controls").fetchSemanticsNode().boundsInRoot)
++        val category = onNodeWithText("Category 8").fetchSemanticsNode().boundsInRoot
++        assertTrue(category.left >= title.right && category.right <= controls.left)
+     }
+ }
+diff --git a/presentation-core/src/test/java/tachiyomi/presentation/core/components/material/NavigationChromeRefreshTest.kt b/presentation-core/src/test/java/tachiyomi/presentation/core/components/material/NavigationChromeRefreshTest.kt
+new file mode 100644
+index 000000000..df5ed6120
+--- /dev/null
++++ b/presentation-core/src/test/java/tachiyomi/presentation/core/components/material/NavigationChromeRefreshTest.kt
+@@ -0,0 +1,175 @@
++package tachiyomi.presentation.core.components.material
++
++import androidx.compose.foundation.layout.Box
++import androidx.compose.foundation.layout.PaddingValues
++import androidx.compose.foundation.layout.WindowInsets
++import androidx.compose.foundation.layout.fillMaxSize
++import androidx.compose.foundation.layout.fillMaxWidth
++import androidx.compose.foundation.layout.height
++import androidx.compose.foundation.layout.padding
++import androidx.compose.foundation.layout.size
++import androidx.compose.foundation.layout.width
++import androidx.compose.material3.Badge
++import androidx.compose.material3.MaterialTheme
++import androidx.compose.material3.Text
++import androidx.compose.runtime.CompositionLocalProvider
++import androidx.compose.ui.Modifier
++import androidx.compose.ui.geometry.Rect
++import androidx.compose.ui.layout.onGloballyPositioned
++import androidx.compose.ui.layout.positionInRoot
++import androidx.compose.ui.platform.LocalDensity
++import androidx.compose.ui.platform.testTag
++import androidx.compose.ui.semantics.ProgressBarRangeInfo
++import androidx.compose.ui.test.ExperimentalTestApi
++import androidx.compose.ui.test.hasProgressBarRangeInfo
++import androidx.compose.ui.test.onNodeWithTag
++import androidx.compose.ui.test.onNodeWithText
++import androidx.compose.ui.test.v2.runComposeUiTest
++import androidx.compose.ui.unit.Density
++import androidx.compose.ui.unit.dp
++import org.junit.Test
++import org.junit.jupiter.api.Assertions.assertEquals
++import org.junit.jupiter.api.Assertions.assertTrue
++import org.junit.runner.RunWith
++import org.robolectric.RobolectricTestRunner
++import org.robolectric.annotation.Config
++import org.robolectric.annotation.GraphicsMode
++
++@OptIn(ExperimentalTestApi::class)
++@RunWith(RobolectricTestRunner::class)
++@GraphicsMode(GraphicsMode.Mode.LEGACY)
++@Config(sdk = [34])
++class NavigationChromeRefreshTest {
++    @Test
++    fun `five compact items keep large counters within their own bounds at larger font size`() = runComposeUiTest {
++        val badges = Array(5) { Rect.Zero }
++        val icons = Array(5) { Rect.Zero }
++        val items = Array(5) { Rect.Zero }
++        var density = 1f
++        setContent {
++            density = LocalDensity.current.density
++            CompositionLocalProvider(LocalDensity provides Density(density, fontScale = 1.3f)) {
++                MaterialTheme {
++                    Box(Modifier.width(360.dp)) {
++                        BrowsingChromeOverlay(
++                            state = rememberBrowsingNavigationBarState(enabled = false, resetKey = Unit),
++                            atBottom = true,
++                            modifier = Modifier.testTag("bar"),
++                        ) {
++                            CompactNavigationBar(windowInsets = WindowInsets(0)) {
++                                repeat(5) { index ->
++                                    CompactNavigationBarItem(
++                                        modifier = Modifier.onGloballyPositioned {
++                                            val origin = it.positionInRoot()
++                                            items[index] =
++                                                Rect(
++                                                    origin.x,
++                                                    origin.y,
++                                                    origin.x + it.size.width,
++                                                    origin.y + it.size.height,
++                                                )
++                                        },
++                                        selected = index == 0,
++                                        onClick = {},
++                                        label = "Tab$index",
++                                        showLabel = true,
++                                        icon = {
++                                            Box(
++                                                Modifier.size(24.dp).onGloballyPositioned {
++                                                    val origin = it.positionInRoot()
++                                                    icons[index] =
++                                                        Rect(
++                                                            origin.x,
++                                                            origin.y,
++                                                            origin.x + it.size.width,
++                                                            origin.y + it.size.height,
++                                                        )
++                                                },
++                                            )
++                                        },
++                                        badge = {
++                                            Badge(
++                                                Modifier.onGloballyPositioned {
++                                                    val origin = it.positionInRoot()
++                                                    badges[index] =
++                                                        Rect(
++                                                            origin.x,
++                                                            origin.y,
++                                                            origin.x + it.size.width,
++                                                            origin.y + it.size.height,
++                                                        )
++                                                },
++                                            ) { Text("999") }
++                                        },
++                                    )
++                                }
++                            }
++                        }
++                    }
++                }
++            }
++        }
++        waitForIdle()
++        val bar = onNodeWithTag("bar").fetchSemanticsNode().boundsInRoot
++        assertEquals(56f * density, bar.height, 1f)
++        repeat(5) { index ->
++            val item = items[index]
++            val badge = badges[index]
++            assertTrue(badge.height > 0f && badge.top >= item.top && badge.bottom <= item.bottom)
++            assertTrue(badge.left >= item.left && badge.right <= item.right)
++            assertEquals(item.center.x, icons[index].center.x, 1f)
++            val label = onNodeWithText("Tab$index", useUnmergedTree = true).fetchSemanticsNode().boundsInRoot
++            assertEquals(icons[index].center.x, label.center.x, 1f)
++            assertTrue(badge.bottom <= icons[index].top + 6f * density, "Badge only overlaps the icon's upper corner")
++        }
++    }
++
++    @Test
++    fun `default refresh indicator clears toolbar even inside an inset container`() = runComposeUiTest {
++        var toolbarBottom = 0f
++        setContent {
++            MaterialTheme {
++                Scaffold(
++                    contentWindowInsets = WindowInsets(0),
++                    topBar = {
++                        Box(
++                            Modifier.fillMaxWidth().height(100.dp).onGloballyPositioned {
++                                toolbarBottom = it.positionInRoot().y + it.size.height
++                            },
++                        )
++                    },
++                ) {
++                    Box(Modifier.fillMaxSize().padding(top = 30.dp)) {
++                        PullRefresh(refreshing = true, enabled = true, onRefresh = {}) {
++                            Box(Modifier.fillMaxSize())
++                        }
++                    }
++                }
++            }
++        }
++        waitForIdle()
++        val indicator = onNode(hasProgressBarRangeInfo(ProgressBarRangeInfo.Indeterminate))
++            .fetchSemanticsNode().boundsInRoot
++        assertTrue(indicator.height > 0f && indicator.top >= toolbarBottom)
++    }
++
++    @Test
++    fun `explicit detail refresh inset is preserved`() = runComposeUiTest {
++        var minimumTop = 0f
++        setContent {
++            minimumTop = with(LocalDensity.current) { 180.dp.toPx() }
++            MaterialTheme {
++                PullRefresh(
++                    refreshing = true,
++                    enabled = true,
++                    onRefresh = {},
++                    indicatorPadding = PaddingValues(top = 180.dp),
++                ) { Box(Modifier.fillMaxSize()) }
++            }
++        }
++        waitForIdle()
++        val indicator = onNode(hasProgressBarRangeInfo(ProgressBarRangeInfo.Indeterminate))
++            .fetchSemanticsNode().boundsInRoot
++        assertTrue(indicator.height > 0f && indicator.top >= minimumTop)
++    }
++}
