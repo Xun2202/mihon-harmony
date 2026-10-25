@@ -182,7 +182,10 @@ jobs:
           keyPassword: ${{ secrets.KEY_PASSWORD }}
           BUILD_TYPE: ${{ steps.build_type.outputs.name }}
         # -Penable-updater 打开 BuildConfig.UPDATER_ENABLED, 否则 App 不会检查更新.
-        run: ./gradlew "assemble${BUILD_TYPE^}" -Penable-updater --stacktrace
+        run: |
+          ./gradlew :presentation-core:testDebugUnitTest \
+            --tests '*NavigationChrome*' --tests '*PanoramaAutoColumnsTest' --tests '*PanoramaMasonryLayoutTest' \
+            "assemble${BUILD_TYPE^}" -Penable-updater --stacktrace
 
       - name: Collect release files
         if: steps.existing.outputs.skip != 'true'

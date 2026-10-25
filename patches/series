@@ -43,3 +43,5 @@
 0043-presentation-auto-columns-expanded-windows.patch
 0044-presentation-browse-cells-skip-paging-reads.patch
 0045-browse-panorama-cover-size-probe.patch
+0046-presentation-panorama-width-stable-navigation.patch
+0047-presentation-compact-scroll-navigation.patch
