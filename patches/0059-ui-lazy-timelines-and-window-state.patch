@@ -1,0 +1,1831 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Xun2202 <98207886+Xun2202@users.noreply.github.com>
+Date: Sun, 25 Oct 2026 19:54:58 +0000
+Subject: [PATCH] ui: virtualize history and updates and preserve fold
+ navigation state
+
+Replace eager history Measure cells with a native lazy timeline and stable keys. Share cover/title cards, separate resume actions, persisted display modes and responsive columns. Preserve update groups, downloads, selection and swipe actions. Restore navigation visibility and window insets consistently across rotation/folding; tighten compact shelf actions. Test 10000-record virtualization and detail-return restoration including resize and shortened data.
+---
+ .../java/eu/kanade/domain/ui/UiPreferences.kt |   6 +-
+ .../presentation/components/TimelineCard.kt   | 141 ++++++++++++
+ .../components/TimelineDisplay.kt             | 115 ++++++++++
+ .../presentation/history/HistoryScreen.kt     |  80 +++----
+ .../history/components/HistoryItem.kt         | 127 ++++-------
+ .../library/components/LibraryToolbar.kt      | 100 ++++----
+ .../presentation/updates/UpdatesScreen.kt     |  63 +++--
+ .../presentation/updates/UpdatesUiItem.kt     | 215 ++++++++----------
+ .../kanade/tachiyomi/ui/main/MainActivity.kt  |   7 +-
+ .../util/system/HarmonyWindowInsets.kt        |  50 ++--
+ .../core/components/TimelineGrid.kt           |  80 +++++++
+ .../core/components/VerticalFastScroller.kt   | 141 ++++++++++++
+ .../material/BrowsingScrollInsets.kt          |  10 +-
+ .../components/material/NavigationChrome.kt   |  32 ++-
+ .../material/NavigationChromeScrollTracker.kt |   4 +-
+ .../core/components/TimelineGridTest.kt       | 124 ++++++++++
+ .../material/NavigationChromeGeometryTest.kt  |  11 +
+ 17 files changed, 976 insertions(+), 330 deletions(-)
+ create mode 100644 app/src/main/java/eu/kanade/presentation/components/TimelineCard.kt
+ create mode 100644 app/src/main/java/eu/kanade/presentation/components/TimelineDisplay.kt
+ create mode 100644 presentation-core/src/main/java/tachiyomi/presentation/core/components/TimelineGrid.kt
+ create mode 100644 presentation-core/src/test/java/tachiyomi/presentation/core/components/TimelineGridTest.kt
+
+diff --git a/app/src/main/java/eu/kanade/domain/ui/UiPreferences.kt b/app/src/main/java/eu/kanade/domain/ui/UiPreferences.kt
+index 354b1890f..1df443bfb 100644
+--- a/app/src/main/java/eu/kanade/domain/ui/UiPreferences.kt
++++ b/app/src/main/java/eu/kanade/domain/ui/UiPreferences.kt
+@@ -18,9 +18,13 @@ import java.util.Locale
+ @Inject
+ @SingleIn(AppScope::class)
+ class UiPreferences(
+-    preferenceStore: PreferenceStore,
++    private val preferenceStore: PreferenceStore,
+ ) {
+ 
++    fun timelineDisplayMode(screen: String) = preferenceStore.getInt("harmony_${screen}_display_mode", 1)
++
++    fun timelineColumns(screen: String) = preferenceStore.getInt("harmony_${screen}_columns", 0)
++
+     val themeMode: Preference<ThemeMode> = preferenceStore.getEnum("pref_theme_mode_key", ThemeMode.SYSTEM)
+ 
+     val appTheme: Preference<AppTheme> = preferenceStore.getEnum(
+diff --git a/app/src/main/java/eu/kanade/presentation/components/TimelineCard.kt b/app/src/main/java/eu/kanade/presentation/components/TimelineCard.kt
+new file mode 100644
+index 000000000..b74df2902
+--- /dev/null
++++ b/app/src/main/java/eu/kanade/presentation/components/TimelineCard.kt
+@@ -0,0 +1,141 @@
++package eu.kanade.presentation.components
++
++import androidx.compose.foundation.background
++import androidx.compose.foundation.border
++import androidx.compose.foundation.combinedClickable
++import androidx.compose.foundation.layout.Box
++import androidx.compose.foundation.layout.Column
++import androidx.compose.foundation.layout.Row
++import androidx.compose.foundation.layout.fillMaxWidth
++import androidx.compose.foundation.layout.padding
++import androidx.compose.foundation.layout.width
++import androidx.compose.material3.MaterialTheme
++import androidx.compose.material3.Text
++import androidx.compose.runtime.Composable
++import androidx.compose.runtime.saveable.rememberSaveable
++import androidx.compose.ui.Alignment
++import androidx.compose.ui.Modifier
++import androidx.compose.ui.draw.clip
++import androidx.compose.ui.graphics.Brush
++import androidx.compose.ui.graphics.Color
++import androidx.compose.ui.hapticfeedback.HapticFeedbackType
++import androidx.compose.ui.platform.LocalHapticFeedback
++import androidx.compose.ui.text.font.FontWeight
++import androidx.compose.ui.text.style.TextOverflow
++import androidx.compose.ui.unit.dp
++import eu.kanade.presentation.library.components.PanoramaCoverShapes
++import eu.kanade.presentation.manga.components.MangaCover
++import tachiyomi.presentation.core.util.selectedBackground
++import tachiyomi.domain.manga.model.MangaCover as CoverData
++
++@Composable
++internal fun TimelineCover(data: CoverData, mode: TimelineDisplayMode, modifier: Modifier = Modifier) {
++    // Freeze only composed cards. Save the band with the item across detail return/rotation.
++    val ratio = rememberSaveable(data.mangaId) {
++        PanoramaCoverShapes.get(data.mangaId) ?: PanoramaCoverShapes.committedRatioOrNull(data.mangaId) ?: 1.5f
++    }
++    val shape = if (mode == TimelineDisplayMode.Panorama && ratio <= 0.75f) MangaCover.Panorama else MangaCover.Book
++    shape(
++        data = data,
++        modifier = modifier,
++        onCoverLoaded = { result ->
++            val image = result.result.image
++            if (image.width > 0) PanoramaCoverShapes.put(data.mangaId, image.height.toFloat() / image.width)
++        },
++    )
++}
++
++@Composable
++internal fun TimelineCard(
++    title: String,
++    subtitle: String?,
++    coverData: CoverData,
++    mode: TimelineDisplayMode,
++    onClick: () -> Unit,
++    modifier: Modifier = Modifier,
++    selected: Boolean = false,
++    muted: Boolean = false,
++    onLongClick: (() -> Unit)? = null,
++    badge: @Composable () -> Unit = {},
++    footer: @Composable () -> Unit,
++) {
++    val haptic = LocalHapticFeedback.current
++    val titleColor = if (muted) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onSurface
++    val overlayColor = Color.White.copy(alpha = if (muted) 0.65f else 1f)
++    val cardModifier = modifier.fillMaxWidth().clip(MaterialTheme.shapes.small)
++        .background(MaterialTheme.colorScheme.surfaceContainerLow)
++        .selectedBackground(selected)
++        .border(
++            2.dp,
++            if (selected) MaterialTheme.colorScheme.primary else Color.Transparent,
++            MaterialTheme.shapes.small,
++        )
++        .combinedClickable(
++            onClick = onClick,
++            onLongClick = onLongClick?.let { action ->
++                {
++                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
++                    action()
++                }
++            },
++        )
++    if (mode == TimelineDisplayMode.List) {
++        Row(cardModifier, verticalAlignment = Alignment.CenterVertically) {
++            TimelineCover(coverData, mode, Modifier.width(64.dp))
++            Column(Modifier.weight(1f).padding(horizontal = 6.dp)) {
++                Text(
++                    title,
++                    color = titleColor,
++                    maxLines = 2,
++                    overflow = TextOverflow.Ellipsis,
++                    style = MaterialTheme.typography.bodyMedium,
++                )
++                if (subtitle !=
++                    null
++                ) {
++                    Text(
++                        subtitle,
++                        maxLines = 1,
++                        overflow = TextOverflow.Ellipsis,
++                        style = MaterialTheme.typography.labelSmall,
++                    )
++                }
++                badge()
++                footer()
++            }
++        }
++    } else {
++        Column(cardModifier) {
++            Box {
++                TimelineCover(coverData, mode, Modifier.fillMaxWidth())
++                Column(
++                    Modifier.align(Alignment.BottomStart).fillMaxWidth()
++                        .background(Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(alpha = 0.85f))))
++                        .padding(start = 6.dp, end = 6.dp, top = 16.dp, bottom = 5.dp),
++                ) {
++                    Text(
++                        title,
++                        color = overlayColor,
++                        fontWeight = FontWeight.Medium,
++                        maxLines = 2,
++                        overflow = TextOverflow.Ellipsis,
++                        style = MaterialTheme.typography.bodySmall,
++                    )
++                    if (subtitle !=
++                        null
++                    ) {
++                        Text(
++                            subtitle,
++                            color = Color.White.copy(alpha = 0.85f),
++                            maxLines = 1,
++                            overflow = TextOverflow.Ellipsis,
++                            style = MaterialTheme.typography.labelSmall,
++                        )
++                    }
++                }
++                Box(Modifier.align(Alignment.TopStart).padding(4.dp)) { badge() }
++            }
++            footer()
++        }
++    }
++}
+diff --git a/app/src/main/java/eu/kanade/presentation/components/TimelineDisplay.kt b/app/src/main/java/eu/kanade/presentation/components/TimelineDisplay.kt
+new file mode 100644
+index 000000000..f8c450d3a
+--- /dev/null
++++ b/app/src/main/java/eu/kanade/presentation/components/TimelineDisplay.kt
+@@ -0,0 +1,115 @@
++package eu.kanade.presentation.components
++
++import androidx.compose.foundation.layout.Column
++import androidx.compose.foundation.layout.Row
++import androidx.compose.foundation.layout.fillMaxWidth
++import androidx.compose.foundation.layout.padding
++import androidx.compose.foundation.selection.selectable
++import androidx.compose.material3.AlertDialog
++import androidx.compose.material3.Icon
++import androidx.compose.material3.IconButton
++import androidx.compose.material3.RadioButton
++import androidx.compose.material3.Slider
++import androidx.compose.material3.Text
++import androidx.compose.material3.TextButton
++import androidx.compose.runtime.Composable
++import androidx.compose.runtime.getValue
++import androidx.compose.runtime.mutableStateOf
++import androidx.compose.runtime.remember
++import androidx.compose.runtime.setValue
++import androidx.compose.ui.Alignment
++import androidx.compose.ui.Modifier
++import androidx.compose.ui.platform.LocalContext
++import androidx.compose.ui.semantics.Role
++import androidx.compose.ui.unit.dp
++import mihon.app.di.appGraph
++import mihon.icons.materialsymbols.MaterialSymbols
++import mihon.icons.materialsymbols.rounded.Settings
++import tachiyomi.core.common.preference.Preference
++import tachiyomi.i18n.MR
++import tachiyomi.presentation.core.i18n.stringResource
++import tachiyomi.presentation.core.util.collectAsState
++import kotlin.math.roundToInt
++
++internal enum class TimelineDisplayMode { Compact, Panorama, List }
++
++internal class TimelineDisplay(
++    val mode: TimelineDisplayMode,
++    val columns: Int,
++    val modePreference: Preference<Int>,
++    val columnsPreference: Preference<Int>,
++)
++
++@Composable
++internal fun rememberTimelineDisplay(screen: String): TimelineDisplay {
++    val context = LocalContext.current
++    val preferences = remember(context) { context.appGraph.uiPreferences }
++    val modePreference = remember(preferences, screen) { preferences.timelineDisplayMode(screen) }
++    val columnsPreference = remember(preferences, screen) { preferences.timelineColumns(screen) }
++    val mode by modePreference.collectAsState()
++    val columns by columnsPreference.collectAsState()
++    return TimelineDisplay(
++        TimelineDisplayMode.entries.getOrElse(mode) {
++            TimelineDisplayMode.Panorama
++        },
++        columns.coerceIn(0, 6),
++        modePreference,
++        columnsPreference,
++    )
++}
++
++@Composable
++internal fun TimelineDisplayAction(display: TimelineDisplay) {
++    var expanded by remember { mutableStateOf(false) }
++    IconButton(onClick = { expanded = true }) {
++        Icon(MaterialSymbols.Rounded.Settings, stringResource(MR.strings.action_display_mode))
++    }
++    if (expanded) {
++        AlertDialog(
++            onDismissRequest = { expanded = false },
++            title = { Text(stringResource(MR.strings.action_display_mode)) },
++            text = {
++                Column {
++                    val names =
++                        listOf(
++                            MR.strings.action_display_grid,
++                            MR.strings.action_display_grid_panorama,
++                            MR.strings.action_display_list,
++                        )
++                    TimelineDisplayMode.entries.forEachIndexed { index, mode ->
++                        Row(
++                            Modifier.fillMaxWidth().selectable(
++                                selected = display.mode == mode,
++                                role = Role.RadioButton,
++                                onClick = { display.modePreference.set(index) },
++                            ).padding(vertical = 8.dp),
++                            verticalAlignment = Alignment.CenterVertically,
++                        ) {
++                            RadioButton(selected = display.mode == mode, onClick = null)
++                            Text(stringResource(names[index]), Modifier.padding(start = 8.dp))
++                        }
++                    }
++                    if (display.mode != TimelineDisplayMode.List) {
++                        val value = when (display.columns) {
++                            0 -> stringResource(MR.strings.label_auto)
++                            else -> display.columns.toString()
++                        }
++                        Text(stringResource(MR.strings.pref_library_columns) + ": " + value)
++                        Slider(
++                            value = if (display.columns == 0) 1f else display.columns.toFloat(),
++                            onValueChange = { value ->
++                                val count = value.roundToInt()
++                                display.columnsPreference.set(if (count == 1) 0 else count)
++                            },
++                            valueRange = 1f..6f,
++                            steps = 4,
++                        )
++                    }
++                }
++            },
++            confirmButton = {
++                TextButton(onClick = { expanded = false }) { Text(stringResource(MR.strings.action_close)) }
++            },
++        )
++    }
++}
+diff --git a/app/src/main/java/eu/kanade/presentation/history/HistoryScreen.kt b/app/src/main/java/eu/kanade/presentation/history/HistoryScreen.kt
+index 63778a8bc..a8746d0e9 100644
+--- a/app/src/main/java/eu/kanade/presentation/history/HistoryScreen.kt
++++ b/app/src/main/java/eu/kanade/presentation/history/HistoryScreen.kt
+@@ -6,6 +6,7 @@ import androidx.compose.material3.SnackbarHost
+ import androidx.compose.material3.SnackbarHostState
+ import androidx.compose.runtime.Composable
+ import androidx.compose.ui.Modifier
++import androidx.compose.ui.platform.LocalConfiguration
+ import androidx.compose.ui.tooling.preview.PreviewLightDark
+ import androidx.compose.ui.tooling.preview.PreviewParameter
+ import androidx.compose.ui.unit.dp
+@@ -13,8 +14,13 @@ import eu.kanade.presentation.components.AppBar
+ import eu.kanade.presentation.components.AppBarActions
+ import eu.kanade.presentation.components.AppBarTitle
+ import eu.kanade.presentation.components.SearchToolbar
++import eu.kanade.presentation.components.TimelineDisplay
++import eu.kanade.presentation.components.TimelineDisplayAction
++import eu.kanade.presentation.components.TimelineDisplayMode
+ import eu.kanade.presentation.components.relativeDateText
++import eu.kanade.presentation.components.rememberTimelineDisplay
+ import eu.kanade.presentation.history.components.HistoryItem
++import eu.kanade.presentation.library.components.autoColumnMinWidth
+ import eu.kanade.presentation.theme.TachiyomiPreviewTheme
+ import eu.kanade.tachiyomi.ui.history.HistoryViewModel
+ import kotlinx.datetime.LocalDate
+@@ -22,17 +28,13 @@ import mihon.icons.materialsymbols.MaterialSymbols
+ import mihon.icons.materialsymbols.rounded.DeleteSweep
+ import tachiyomi.domain.history.model.HistoryWithRelations
+ import tachiyomi.i18n.MR
+-import tachiyomi.presentation.core.components.FastScrollPanoramaMasonry
+ import tachiyomi.presentation.core.components.ListGroupHeader
+-import tachiyomi.presentation.core.components.PanoramaCellHeight
+-import tachiyomi.presentation.core.components.PanoramaColumns
+-import tachiyomi.presentation.core.components.PanoramaSpan
++import tachiyomi.presentation.core.components.TimelineGrid
+ import tachiyomi.presentation.core.components.material.Scaffold
+ import tachiyomi.presentation.core.components.material.rememberBrowsingTopAppBarScrollBehavior
+ import tachiyomi.presentation.core.i18n.stringResource
+ import tachiyomi.presentation.core.screens.EmptyScreen
+ import tachiyomi.presentation.core.screens.LoadingScreen
+-import tachiyomi.presentation.core.util.plus
+ 
+ @Composable
+ fun HistoryScreen(
+@@ -44,6 +46,8 @@ fun HistoryScreen(
+     onClickFavorite: (mangaId: Long) -> Unit,
+     onDialogChange: (HistoryViewModel.Dialog?) -> Unit,
+ ) {
++    val display = rememberTimelineDisplay("history")
++
+     Scaffold(
+         topBarScrollBehavior = rememberBrowsingTopAppBarScrollBehavior(
+             enabled = state.searchQuery == null,
+@@ -54,6 +58,7 @@ fun HistoryScreen(
+                 searchQuery = state.searchQuery,
+                 onChangeSearchQuery = onSearchQueryChange,
+                 actions = {
++                    TimelineDisplayAction(display)
+                     AppBarActions(
+                         listOf(
+                             AppBar.Action(
+@@ -88,6 +93,7 @@ fun HistoryScreen(
+                 HistoryScreenContent(
+                     history = it,
+                     contentPadding = contentPadding,
++                    display = display,
+                     onClickCover = { history -> onClickCover(history.mangaId) },
+                     onClickResume = { history -> onClickResume(history.mangaId, history.chapterId) },
+                     onClickDelete = { item -> onDialogChange(HistoryViewModel.Dialog.Delete(item)) },
+@@ -102,47 +108,41 @@ fun HistoryScreen(
+ private fun HistoryScreenContent(
+     history: List<HistoryUiModel>,
+     contentPadding: PaddingValues,
++    display: TimelineDisplay,
+     onClickCover: (HistoryWithRelations) -> Unit,
+     onClickResume: (HistoryWithRelations) -> Unit,
+     onClickDelete: (HistoryWithRelations) -> Unit,
+     onClickFavorite: (HistoryWithRelations) -> Unit,
+ ) {
+-    FastScrollPanoramaMasonry(
+-        columns = PanoramaColumns.Adaptive(160.dp),
+-        contentPadding = contentPadding + PaddingValues(horizontal = 1.dp),
+-        horizontalSpacing = 3.dp,
+-        verticalSpacing = 3.dp,
+-    ) {
+-        items(
+-            count = history.size,
+-            key = { index -> "history-${history[index].hashCode()}" },
+-            span = { index ->
+-                if (history[index] is HistoryUiModel.Header) PanoramaSpan.FullLine else PanoramaSpan.SingleLane
+-            },
+-            height = { PanoramaCellHeight.Measure },
+-            contentType = { index ->
+-                when (history[index]) {
+-                    is HistoryUiModel.Header -> "header"
+-                    is HistoryUiModel.Item -> "item"
+-                }
+-            },
+-        ) { index ->
++    TimelineGrid(
++        count = history.size,
++        key = { index ->
+             when (val item = history[index]) {
+-                is HistoryUiModel.Header -> {
+-                    ListGroupHeader(
+-                        text = relativeDateText(item.date),
+-                    )
+-                }
+-                is HistoryUiModel.Item -> {
+-                    val value = item.item
+-                    HistoryItem(
+-                        history = value,
+-                        onClickCover = { onClickCover(value) },
+-                        onClickResume = { onClickResume(value) },
+-                        onClickDelete = { onClickDelete(value) },
+-                        onClickFavorite = { onClickFavorite(value) },
+-                    )
+-                }
++                is HistoryUiModel.Header -> "history-date-${item.date}"
++                is HistoryUiModel.Item -> "history-${item.item.id}"
++            }
++        },
++        fullLine = { history[it] is HistoryUiModel.Header },
++        columns = if (display.mode == TimelineDisplayMode.List) 1 else display.columns,
++        minColumnWidth = maxOf(140.dp, autoColumnMinWidth(LocalConfiguration.current.screenWidthDp.dp)),
++        contentPadding = contentPadding,
++    ) { index ->
++        when (val item = history[index]) {
++            is HistoryUiModel.Header -> {
++                ListGroupHeader(
++                    text = relativeDateText(item.date),
++                )
++            }
++            is HistoryUiModel.Item -> {
++                val value = item.item
++                HistoryItem(
++                    history = value,
++                    mode = display.mode,
++                    onClickCover = { onClickCover(value) },
++                    onClickResume = { onClickResume(value) },
++                    onClickDelete = { onClickDelete(value) },
++                    onClickFavorite = { onClickFavorite(value) },
++                )
+             }
+         }
+     }
+diff --git a/app/src/main/java/eu/kanade/presentation/history/components/HistoryItem.kt b/app/src/main/java/eu/kanade/presentation/history/components/HistoryItem.kt
+index 337afb8af..960dcf709 100644
+--- a/app/src/main/java/eu/kanade/presentation/history/components/HistoryItem.kt
++++ b/app/src/main/java/eu/kanade/presentation/history/components/HistoryItem.kt
+@@ -1,31 +1,23 @@
+ package eu.kanade.presentation.history.components
+ 
+-import androidx.compose.foundation.background
+-import androidx.compose.foundation.clickable
+-import androidx.compose.foundation.layout.Arrangement
+-import androidx.compose.foundation.layout.Column
+ import androidx.compose.foundation.layout.Row
+-import androidx.compose.foundation.layout.Spacer
+ import androidx.compose.foundation.layout.fillMaxWidth
+ import androidx.compose.foundation.layout.padding
+ import androidx.compose.foundation.layout.size
+ import androidx.compose.material3.Icon
+ import androidx.compose.material3.IconButton
++import androidx.compose.material3.LocalMinimumInteractiveComponentSize
+ import androidx.compose.material3.MaterialTheme
+-import androidx.compose.material3.Surface
+ import androidx.compose.material3.Text
+ import androidx.compose.runtime.Composable
++import androidx.compose.runtime.CompositionLocalProvider
+ import androidx.compose.runtime.remember
+ import androidx.compose.ui.Alignment
+ import androidx.compose.ui.Modifier
+-import androidx.compose.ui.draw.clip
+-import androidx.compose.ui.text.font.FontWeight
+ import androidx.compose.ui.text.style.TextOverflow
+-import androidx.compose.ui.tooling.preview.PreviewLightDark
+-import androidx.compose.ui.tooling.preview.PreviewParameter
+ import androidx.compose.ui.unit.dp
+-import eu.kanade.presentation.manga.components.MangaCover
+-import eu.kanade.presentation.theme.TachiyomiPreviewTheme
++import eu.kanade.presentation.components.TimelineCard
++import eu.kanade.presentation.components.TimelineDisplayMode
+ import eu.kanade.presentation.util.formatChapterNumber
+ import eu.kanade.tachiyomi.util.lang.toTimestampString
+ import mihon.icons.materialsymbols.MaterialSymbols
+@@ -37,82 +29,61 @@ import tachiyomi.i18n.MR
+ import tachiyomi.presentation.core.i18n.stringResource
+ 
+ @Composable
+-fun HistoryItem(
++internal fun HistoryItem(
+     history: HistoryWithRelations,
++    mode: TimelineDisplayMode = TimelineDisplayMode.Panorama,
+     onClickCover: () -> Unit,
+     onClickResume: () -> Unit,
+     onClickDelete: () -> Unit,
+     onClickFavorite: () -> Unit,
+     modifier: Modifier = Modifier,
+ ) {
+-    Column(
+-        modifier = modifier
+-            .fillMaxWidth()
+-            .clip(MaterialTheme.shapes.small)
+-            .background(MaterialTheme.colorScheme.surfaceContainerLow)
+-            .clickable(onClick = onClickCover),
++    val readAt = remember(history.readAt) { history.readAt?.toTimestampString() ?: "" }
++    val chapter = if (history.chapterNumber > -1) {
++        stringResource(MR.strings.recent_manga_time, formatChapterNumber(history.chapterNumber), "").trim()
++    } else {
++        null
++    }
++    TimelineCard(
++        title = history.title,
++        subtitle = chapter,
++        coverData = history.coverData,
++        mode = mode,
++        modifier = modifier,
++        onClick = onClickCover,
++
+     ) {
+-        MangaCover.Book(
+-            modifier = Modifier.fillMaxWidth(),
+-            data = history.coverData,
+-            onClick = onClickCover,
+-        )
+-        Column(Modifier.padding(horizontal = 8.dp, vertical = 6.dp)) {
+-            Text(
+-                text = history.title,
+-                fontWeight = FontWeight.SemiBold,
+-                maxLines = 2,
+-                overflow = TextOverflow.Ellipsis,
+-                style = MaterialTheme.typography.bodyMedium,
+-            )
+-            val readAt = remember(history.readAt) { history.readAt?.toTimestampString() ?: "" }
+-            Text(
+-                text = if (history.chapterNumber > -1) {
+-                    stringResource(MR.strings.recent_manga_time, formatChapterNumber(history.chapterNumber), readAt)
+-                } else {
+-                    readAt
+-                },
+-                modifier = Modifier.padding(top = 4.dp),
+-                style = MaterialTheme.typography.bodySmall,
+-            )
+-        }
+-        Row(
+-            modifier = Modifier.fillMaxWidth(),
+-            horizontalArrangement = Arrangement.SpaceBetween,
+-            verticalAlignment = Alignment.CenterVertically,
+-        ) {
+-            IconButton(onClick = onClickResume, modifier = Modifier.size(48.dp)) {
+-                Icon(MaterialSymbols.RoundedFilled.PlayArrow, stringResource(MR.strings.action_resume))
+-            }
+-            if (!history.coverData.isMangaFavorite) {
+-                IconButton(onClick = onClickFavorite, modifier = Modifier.size(48.dp)) {
+-                    Icon(MaterialSymbols.Rounded.Favorite, stringResource(MR.strings.add_to_library))
++        CompositionLocalProvider(LocalMinimumInteractiveComponentSize provides 32.dp) {
++            Row(Modifier.fillMaxWidth().padding(start = 4.dp), verticalAlignment = Alignment.CenterVertically) {
++                Text(
++                    readAt,
++                    Modifier.weight(1f),
++                    maxLines = 1,
++                    overflow = TextOverflow.Ellipsis,
++                    style = MaterialTheme.typography.labelSmall,
++                )
++                IconButton(onClick = onClickResume, modifier = Modifier.size(width = 32.dp, height = 40.dp)) {
++                    Icon(
++                        MaterialSymbols.RoundedFilled.PlayArrow,
++                        stringResource(MR.strings.action_resume),
++                        Modifier.size(20.dp),
++                    )
++                }
++                IconButton(
++                    onClick = onClickFavorite,
++                    enabled = !history.coverData.isMangaFavorite,
++                    modifier = Modifier.size(width = 32.dp, height = 40.dp),
++                ) {
++                    Icon(
++                        MaterialSymbols.Rounded.Favorite,
++                        stringResource(MR.strings.add_to_library),
++                        Modifier.size(20.dp),
++                    )
++                }
++                IconButton(onClick = onClickDelete, modifier = Modifier.size(width = 32.dp, height = 40.dp)) {
++                    Icon(MaterialSymbols.Rounded.Delete, stringResource(MR.strings.action_delete), Modifier.size(20.dp))
+                 }
+-            } else {
+-                Spacer(Modifier.size(48.dp))
+-            }
+-            IconButton(onClick = onClickDelete, modifier = Modifier.size(48.dp)) {
+-                Icon(MaterialSymbols.Rounded.Delete, stringResource(MR.strings.action_delete))
+             }
+         }
+     }
+ }
+-
+-@PreviewLightDark
+-@Composable
+-private fun HistoryItemPreviews(
+-    @PreviewParameter(HistoryWithRelationsProvider::class)
+-    historyWithRelations: HistoryWithRelations,
+-) {
+-    TachiyomiPreviewTheme {
+-        Surface {
+-            HistoryItem(
+-                history = historyWithRelations,
+-                onClickCover = {},
+-                onClickResume = {},
+-                onClickDelete = {},
+-                onClickFavorite = {},
+-            )
+-        }
+-    }
+-}
+diff --git a/app/src/main/java/eu/kanade/presentation/library/components/LibraryToolbar.kt b/app/src/main/java/eu/kanade/presentation/library/components/LibraryToolbar.kt
+index 38832564d..bd77c4e8c 100644
+--- a/app/src/main/java/eu/kanade/presentation/library/components/LibraryToolbar.kt
++++ b/app/src/main/java/eu/kanade/presentation/library/components/LibraryToolbar.kt
+@@ -3,14 +3,17 @@ package eu.kanade.presentation.library.components
+ import androidx.compose.foundation.isSystemInDarkTheme
+ import androidx.compose.foundation.layout.Row
+ import androidx.compose.material3.LocalContentColor
++import androidx.compose.material3.LocalMinimumInteractiveComponentSize
+ import androidx.compose.material3.MaterialTheme
+ import androidx.compose.material3.Text
+ import androidx.compose.material3.TopAppBarScrollBehavior
+ import androidx.compose.runtime.Composable
++import androidx.compose.runtime.CompositionLocalProvider
+ import androidx.compose.runtime.Immutable
+ import androidx.compose.ui.Alignment
+ import androidx.compose.ui.Modifier
+ import androidx.compose.ui.text.style.TextOverflow
++import androidx.compose.ui.unit.dp
+ import androidx.compose.ui.unit.sp
+ import eu.kanade.presentation.components.AppBar
+ import eu.kanade.presentation.components.AppBarActions
+@@ -21,6 +24,7 @@ import mihon.icons.materialsymbols.rounded.FlipToBack
+ import mihon.icons.materialsymbols.rounded.SelectAll
+ import tachiyomi.i18n.MR
+ import tachiyomi.presentation.core.components.Pill
++import tachiyomi.presentation.core.components.material.isCompactBrowsingWindow
+ import tachiyomi.presentation.core.i18n.stringResource
+ import tachiyomi.presentation.core.theme.active
+ 
+@@ -75,53 +79,61 @@ private fun LibraryRegularToolbar(
+     scrollBehavior: TopAppBarScrollBehavior?,
+ ) {
+     val pillAlpha = if (isSystemInDarkTheme()) 0.12f else 0.08f
+-    SearchToolbar(
+-        titleContent = titleContent ?: {
+-            Row(verticalAlignment = Alignment.CenterVertically) {
+-                Text(
+-                    text = title.text,
+-                    maxLines = 1,
+-                    modifier = Modifier.weight(1f, false),
+-                    overflow = TextOverflow.Ellipsis,
+-                )
+-                if (title.numberOfManga != null) {
+-                    Pill(
+-                        text = "${title.numberOfManga}",
+-                        color = MaterialTheme.colorScheme.onBackground.copy(alpha = pillAlpha),
+-                        fontSize = 14.sp,
++    val actionMinimumSize = if (isCompactBrowsingWindow() && searchQuery == null) {
++        40.dp
++    } else {
++        LocalMinimumInteractiveComponentSize.current
++    }
++    // Scope the tighter 40dp icon containers to this shelf's three regular actions only.
++    CompositionLocalProvider(LocalMinimumInteractiveComponentSize provides actionMinimumSize) {
++        SearchToolbar(
++            titleContent = titleContent ?: {
++                Row(verticalAlignment = Alignment.CenterVertically) {
++                    Text(
++                        text = title.text,
++                        maxLines = 1,
++                        modifier = Modifier.weight(1f, false),
++                        overflow = TextOverflow.Ellipsis,
+                     )
++                    if (title.numberOfManga != null) {
++                        Pill(
++                            text = "${title.numberOfManga}",
++                            color = MaterialTheme.colorScheme.onBackground.copy(alpha = pillAlpha),
++                            fontSize = 14.sp,
++                        )
++                    }
+                 }
+-            }
+-        },
+-        searchQuery = searchQuery,
+-        onChangeSearchQuery = onSearchQueryChange,
+-        actions = {
+-            val filterTint = if (hasFilters) MaterialTheme.colorScheme.active else LocalContentColor.current
+-            AppBarActions(
+-                listOf(
+-                    AppBar.Action(
+-                        title = stringResource(MR.strings.action_filter),
+-                        icon = MaterialSymbols.Rounded.FilterList,
+-                        iconTint = filterTint,
+-                        onClick = onClickFilter,
+-                    ),
+-                    AppBar.OverflowAction(
+-                        title = stringResource(MR.strings.action_update_library),
+-                        onClick = onClickGlobalUpdate,
++            },
++            searchQuery = searchQuery,
++            onChangeSearchQuery = onSearchQueryChange,
++            actions = {
++                val filterTint = if (hasFilters) MaterialTheme.colorScheme.active else LocalContentColor.current
++                AppBarActions(
++                    listOf(
++                        AppBar.Action(
++                            title = stringResource(MR.strings.action_filter),
++                            icon = MaterialSymbols.Rounded.FilterList,
++                            iconTint = filterTint,
++                            onClick = onClickFilter,
++                        ),
++                        AppBar.OverflowAction(
++                            title = stringResource(MR.strings.action_update_library),
++                            onClick = onClickGlobalUpdate,
++                        ),
++                        AppBar.OverflowAction(
++                            title = stringResource(MR.strings.action_update_category),
++                            onClick = onClickRefresh,
++                        ),
++                        AppBar.OverflowAction(
++                            title = stringResource(MR.strings.action_open_random_manga),
++                            onClick = onClickOpenRandomManga,
++                        ),
+                     ),
+-                    AppBar.OverflowAction(
+-                        title = stringResource(MR.strings.action_update_category),
+-                        onClick = onClickRefresh,
+-                    ),
+-                    AppBar.OverflowAction(
+-                        title = stringResource(MR.strings.action_open_random_manga),
+-                        onClick = onClickOpenRandomManga,
+-                    ),
+-                ),
+-            )
+-        },
+-        scrollBehavior = scrollBehavior,
+-    )
++                )
++            },
++            scrollBehavior = scrollBehavior,
++        )
++    }
+ }
+ 
+ @Composable
+diff --git a/app/src/main/java/eu/kanade/presentation/updates/UpdatesScreen.kt b/app/src/main/java/eu/kanade/presentation/updates/UpdatesScreen.kt
+index 5b98a14ca..a01430d09 100644
+--- a/app/src/main/java/eu/kanade/presentation/updates/UpdatesScreen.kt
++++ b/app/src/main/java/eu/kanade/presentation/updates/UpdatesScreen.kt
+@@ -1,6 +1,5 @@
+ package eu.kanade.presentation.updates
+ 
+-import tachiyomi.presentation.core.components.material.rememberBrowsingTopAppBarScrollBehavior
+ import androidx.activity.compose.BackHandler
+ import androidx.compose.foundation.layout.Column
+ import androidx.compose.foundation.layout.fillMaxSize
+@@ -18,10 +17,17 @@ import androidx.compose.runtime.remember
+ import androidx.compose.runtime.rememberCoroutineScope
+ import androidx.compose.runtime.setValue
+ import androidx.compose.ui.Modifier
++import androidx.compose.ui.platform.LocalConfiguration
++import androidx.compose.ui.unit.dp
+ import androidx.compose.ui.util.fastAll
+ import androidx.compose.ui.util.fastAny
+ import eu.kanade.presentation.components.AppBar
+ import eu.kanade.presentation.components.AppBarActions
++import eu.kanade.presentation.components.TimelineDisplay
++import eu.kanade.presentation.components.TimelineDisplayAction
++import eu.kanade.presentation.components.TimelineDisplayMode
++import eu.kanade.presentation.components.rememberTimelineDisplay
++import eu.kanade.presentation.library.components.autoColumnMinWidth
+ import eu.kanade.presentation.manga.components.ChapterDownloadAction
+ import eu.kanade.presentation.manga.components.MangaBottomActionMenu
+ import eu.kanade.tachiyomi.data.download.model.Download
+@@ -37,9 +43,10 @@ import mihon.icons.materialsymbols.rounded.FlipToBack
+ import mihon.icons.materialsymbols.rounded.Refresh
+ import mihon.icons.materialsymbols.rounded.SelectAll
+ import tachiyomi.i18n.MR
+-import tachiyomi.presentation.core.components.FastScrollLazyColumn
++import tachiyomi.presentation.core.components.TimelineGrid
+ import tachiyomi.presentation.core.components.material.PullRefresh
+ import tachiyomi.presentation.core.components.material.Scaffold
++import tachiyomi.presentation.core.components.material.rememberBrowsingTopAppBarScrollBehavior
+ import tachiyomi.presentation.core.i18n.stringResource
+ import tachiyomi.presentation.core.screens.EmptyScreen
+ import tachiyomi.presentation.core.screens.LoadingScreen
+@@ -65,6 +72,8 @@ fun UpdateScreen(
+     onFilterClicked: () -> Unit,
+     hasActiveFilters: Boolean,
+ ) {
++    val display = rememberTimelineDisplay("updates")
++
+     BackHandler(enabled = state.selectionMode) {
+         onSelectAll(false)
+     }
+@@ -77,6 +86,7 @@ fun UpdateScreen(
+         ),
+         topBar = { scrollBehavior ->
+             UpdatesAppBar(
++                display = display,
+                 onCalendarClicked = { onCalendarClicked() },
+                 onUpdateLibrary = { scope.launch { onUpdateLibrary() } },
+                 onFilterClicked = { onFilterClicked() },
+@@ -135,19 +145,42 @@ fun UpdateScreen(
+                             )
+                         }
+                     } else {
+-                        FastScrollLazyColumn(
++                        val models = remember(state.items) { state.getUiModel() }
++                        TimelineGrid(
++                            count = models.size + 1,
++                            key = { index ->
++                                if (index ==
++                                    0
++                                ) {
++                                    "updates-lastUpdated"
++                                } else {
++                                    when (val item = models[index - 1]) {
++                                        is UpdatesUiModel.Header -> "updates-date-${item.date}"
++                                        is UpdatesUiModel.Item -> "updates-${item.item.update.chapterId}"
++                                    }
++                                }
++                            },
++                            fullLine = { it == 0 || models[it - 1] is UpdatesUiModel.Header },
++                            columns = if (display.mode == TimelineDisplayMode.List) 1 else display.columns,
++                            minColumnWidth = maxOf(
++                                140.dp,
++                                autoColumnMinWidth(LocalConfiguration.current.screenWidthDp.dp),
++                            ),
+                             contentPadding = contentPadding,
+-                        ) {
+-                            updatesLastUpdatedItem(lastUpdated)
+-
+-                            updatesUiItems(
+-                                uiModels = state.getUiModel(),
+-                                selectionMode = state.selectionMode,
+-                                onUpdateSelected = onUpdateSelected,
+-                                onClickCover = onClickCover,
+-                                onClickUpdate = onOpenChapter,
+-                                onDownloadChapter = onDownloadChapter,
+-                            )
++                        ) { index ->
++                            if (index == 0) {
++                                UpdatesLastUpdatedHeader(lastUpdated)
++                            } else {
++                                UpdatesTimelineItem(
++                                    item = models[index - 1],
++                                    mode = display.mode,
++                                    selectionMode = state.selectionMode,
++                                    onUpdateSelected = onUpdateSelected,
++                                    onClickCover = onClickCover,
++                                    onClickUpdate = onOpenChapter,
++                                    onDownloadChapter = onDownloadChapter,
++                                )
++                            }
+                         }
+                     }
+                 }
+@@ -158,6 +191,7 @@ fun UpdateScreen(
+ 
+ @Composable
+ private fun UpdatesAppBar(
++    display: TimelineDisplay,
+     onCalendarClicked: () -> Unit,
+     onUpdateLibrary: () -> Unit,
+     onFilterClicked: () -> Unit,
+@@ -174,6 +208,7 @@ private fun UpdatesAppBar(
+         modifier = modifier,
+         title = stringResource(MR.strings.label_recent_updates),
+         actions = {
++            TimelineDisplayAction(display)
+             AppBarActions(
+                 listOf(
+                     AppBar.Action(
+diff --git a/app/src/main/java/eu/kanade/presentation/updates/UpdatesUiItem.kt b/app/src/main/java/eu/kanade/presentation/updates/UpdatesUiItem.kt
+index 0595162bc..312f9490a 100644
+--- a/app/src/main/java/eu/kanade/presentation/updates/UpdatesUiItem.kt
++++ b/app/src/main/java/eu/kanade/presentation/updates/UpdatesUiItem.kt
+@@ -6,17 +6,21 @@ import androidx.compose.foundation.layout.Column
+ import androidx.compose.foundation.layout.Row
+ import androidx.compose.foundation.layout.Spacer
+ import androidx.compose.foundation.layout.fillMaxHeight
++import androidx.compose.foundation.layout.fillMaxWidth
+ import androidx.compose.foundation.layout.height
+ import androidx.compose.foundation.layout.padding
++import androidx.compose.foundation.layout.size
+ import androidx.compose.foundation.layout.sizeIn
+ import androidx.compose.foundation.layout.width
+ import androidx.compose.foundation.lazy.LazyListScope
+-import androidx.compose.foundation.lazy.items
+ import androidx.compose.material3.Icon
++import androidx.compose.material3.IconButton
+ import androidx.compose.material3.LocalContentColor
++import androidx.compose.material3.LocalMinimumInteractiveComponentSize
+ import androidx.compose.material3.MaterialTheme
+ import androidx.compose.material3.Text
+ import androidx.compose.runtime.Composable
++import androidx.compose.runtime.CompositionLocalProvider
+ import androidx.compose.runtime.getValue
+ import androidx.compose.runtime.mutableIntStateOf
+ import androidx.compose.runtime.remember
+@@ -29,6 +33,8 @@ import androidx.compose.ui.platform.LocalHapticFeedback
+ import androidx.compose.ui.text.font.FontStyle
+ import androidx.compose.ui.text.style.TextOverflow
+ import androidx.compose.ui.unit.dp
++import eu.kanade.presentation.components.TimelineCard
++import eu.kanade.presentation.components.TimelineDisplayMode
+ import eu.kanade.presentation.components.relativeDateText
+ import eu.kanade.presentation.manga.components.ChapterDownloadAction
+ import eu.kanade.presentation.manga.components.ChapterDownloadIndicator
+@@ -37,9 +43,11 @@ import eu.kanade.presentation.manga.components.MangaCover
+ import eu.kanade.presentation.util.relativeTimeSpanString
+ import eu.kanade.tachiyomi.data.download.model.Download
+ import eu.kanade.tachiyomi.ui.updates.UpdatesItem
++import eu.kanade.tachiyomi.util.lang.toTimestampString
+ import mihon.icons.materialsymbols.MaterialSymbols
+ import mihon.icons.materialsymbols.roundedfilled.Bookmark
+ import mihon.icons.materialsymbols.roundedfilled.Circle
++import mihon.icons.materialsymbols.roundedfilled.PlayArrow
+ import tachiyomi.domain.updates.model.UpdatesWithRelations
+ import tachiyomi.i18n.MR
+ import tachiyomi.presentation.core.components.ListGroupHeader
+@@ -75,67 +83,54 @@ internal fun UpdatesLastUpdatedHeader(
+     }
+ }
+ 
+-internal fun LazyListScope.updatesUiItems(
+-    uiModels: List<UpdatesUiModel>,
++@Composable
++internal fun UpdatesTimelineItem(
++    item: UpdatesUiModel,
++    mode: TimelineDisplayMode,
+     selectionMode: Boolean,
+     onUpdateSelected: (UpdatesItem, Boolean, Boolean) -> Unit,
+     onClickCover: (UpdatesItem) -> Unit,
+     onClickUpdate: (UpdatesItem) -> Unit,
+     onDownloadChapter: (List<UpdatesItem>, ChapterDownloadAction) -> Unit,
+ ) {
+-    items(
+-        items = uiModels,
+-        contentType = {
+-            when (it) {
+-                is UpdatesUiModel.Header -> "header"
+-                is UpdatesUiModel.Item -> "item"
+-            }
+-        },
+-        key = {
+-            when (it) {
+-                is UpdatesUiModel.Header -> "updatesHeader-${it.hashCode()}"
+-                is UpdatesUiModel.Item -> "updates-${it.item.update.mangaId}-${it.item.update.chapterId}"
+-            }
+-        },
+-    ) { item ->
+-        when (item) {
+-            is UpdatesUiModel.Header -> {
+-                ListGroupHeader(
+-                    modifier = Modifier.animateItem(),
+-                    text = relativeDateText(item.date),
+-                )
+-            }
+-            is UpdatesUiModel.Item -> {
+-                val updatesItem = item.item
+-                UpdatesUiItem(
+-                    modifier = Modifier.animateItem(),
+-                    update = updatesItem.update,
+-                    selected = updatesItem.selected,
+-                    readProgress = updatesItem.update.lastPageRead
+-                        .takeIf { !updatesItem.update.read && it > 0L }
+-                        ?.let {
+-                            stringResource(
+-                                MR.strings.chapter_progress,
+-                                it + 1,
+-                            )
+-                        },
+-                    onLongClick = {
+-                        onUpdateSelected(updatesItem, !updatesItem.selected, true)
+-                    },
+-                    onClick = {
+-                        when {
+-                            selectionMode -> onUpdateSelected(updatesItem, !updatesItem.selected, false)
+-                            else -> onClickUpdate(updatesItem)
+-                        }
++    when (item) {
++        is UpdatesUiModel.Header -> {
++            ListGroupHeader(
++                modifier = Modifier,
++                text = relativeDateText(item.date),
++            )
++        }
++        is UpdatesUiModel.Item -> {
++            val updatesItem = item.item
++            UpdatesUiItem(
++                modifier = Modifier,
++                update = updatesItem.update,
++                mode = mode,
++                selected = updatesItem.selected,
++                readProgress = updatesItem.update.lastPageRead
++                    .takeIf { !updatesItem.update.read && it > 0L }
++                    ?.let {
++                        stringResource(
++                            MR.strings.chapter_progress,
++                            it + 1,
++                        )
+                     },
+-                    onClickCover = { onClickCover(updatesItem) }.takeIf { !selectionMode },
+-                    onDownloadChapter = { action: ChapterDownloadAction ->
+-                        onDownloadChapter(listOf(updatesItem), action)
+-                    }.takeIf { !selectionMode },
+-                    downloadStateProvider = updatesItem.downloadStateProvider,
+-                    downloadProgressProvider = updatesItem.downloadProgressProvider,
+-                )
+-            }
++                onLongClick = {
++                    onUpdateSelected(updatesItem, !updatesItem.selected, true)
++                },
++                onClick = {
++                    when {
++                        selectionMode -> onUpdateSelected(updatesItem, !updatesItem.selected, false)
++                        else -> onClickUpdate(updatesItem)
++                    }
++                },
++                onClickCover = { onClickCover(updatesItem) }.takeIf { !selectionMode },
++                onDownloadChapter = { action: ChapterDownloadAction ->
++                    onDownloadChapter(listOf(updatesItem), action)
++                }.takeIf { !selectionMode },
++                downloadStateProvider = updatesItem.downloadStateProvider,
++                downloadProgressProvider = updatesItem.downloadProgressProvider,
++            )
+         }
+     }
+ }
+@@ -143,6 +138,7 @@ internal fun LazyListScope.updatesUiItems(
+ @Composable
+ private fun UpdatesUiItem(
+     update: UpdatesWithRelations,
++    mode: TimelineDisplayMode,
+     selected: Boolean,
+     readProgress: String?,
+     onClick: () -> Unit,
+@@ -154,94 +150,61 @@ private fun UpdatesUiItem(
+     downloadProgressProvider: () -> Int,
+     modifier: Modifier = Modifier,
+ ) {
+-    val haptic = LocalHapticFeedback.current
+-    val textAlpha = if (update.read) DISABLED_ALPHA else 1f
+-
+-    Row(
+-        modifier = modifier
+-            .selectedBackground(selected)
+-            .combinedClickable(
+-                onClick = onClick,
+-                onLongClick = {
+-                    onLongClick()
+-                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+-                },
+-            )
+-            .height(56.dp)
+-            .padding(horizontal = MaterialTheme.padding.medium),
+-        verticalAlignment = Alignment.CenterVertically,
+-    ) {
+-        MangaCover.Square(
+-            modifier = Modifier
+-                .padding(vertical = 6.dp)
+-                .fillMaxHeight(),
+-            data = update.coverData,
+-            onClick = onClickCover,
+-        )
+-
+-        Column(
+-            modifier = Modifier
+-                .padding(horizontal = MaterialTheme.padding.medium)
+-                .weight(1f),
+-        ) {
+-            Text(
+-                text = update.mangaTitle,
+-                maxLines = 1,
+-                style = MaterialTheme.typography.bodyMedium,
+-                color = LocalContentColor.current.copy(alpha = textAlpha),
+-                overflow = TextOverflow.Ellipsis,
+-            )
+-
+-            Row(verticalAlignment = Alignment.CenterVertically) {
+-                var textHeight by remember { mutableIntStateOf(0) }
++    TimelineCard(
++        title = update.mangaTitle,
++        subtitle = listOfNotNull(update.chapterName, readProgress).joinToString(" · "),
++        coverData = update.coverData,
++        mode = mode,
++        selected = selected,
++        muted = update.read,
++        onClick = onClickCover ?: onClick,
++        onLongClick = onLongClick,
++        badge = {
++            Row {
+                 if (!update.read) {
+                     Icon(
+-                        imageVector = MaterialSymbols.RoundedFilled.Circle,
+-                        contentDescription = stringResource(MR.strings.unread),
+-                        modifier = Modifier
+-                            .height(8.dp)
+-                            .padding(end = 4.dp),
++                        MaterialSymbols.RoundedFilled.Circle,
++                        stringResource(MR.strings.unread),
++                        Modifier.size(12.dp),
+                         tint = MaterialTheme.colorScheme.primary,
+                     )
+                 }
+                 if (update.bookmark) {
+                     Icon(
+-                        imageVector = MaterialSymbols.RoundedFilled.Bookmark,
+-                        contentDescription = stringResource(MR.strings.action_filter_bookmarked),
+-                        modifier = Modifier
+-                            .sizeIn(maxHeight = with(LocalDensity.current) { textHeight.toDp() - 2.dp }),
++                        MaterialSymbols.RoundedFilled.Bookmark,
++                        stringResource(MR.strings.action_filter_bookmarked),
++                        Modifier.size(14.dp),
+                         tint = MaterialTheme.colorScheme.primary,
+                     )
+-                    Spacer(modifier = Modifier.width(2.dp))
+                 }
++            }
++        },
++    ) {
++        CompositionLocalProvider(LocalMinimumInteractiveComponentSize provides 32.dp) {
++            Row(Modifier.fillMaxWidth().padding(start = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                 Text(
+-                    text = update.chapterName,
++                    update.dateFetch.toTimestampString(),
++                    Modifier.weight(1f),
+                     maxLines = 1,
+-                    style = MaterialTheme.typography.bodySmall,
+-                    color = LocalContentColor.current.copy(alpha = textAlpha),
+                     overflow = TextOverflow.Ellipsis,
+-                    onTextLayout = { textHeight = it.size.height },
+-                    modifier = Modifier
+-                        .weight(weight = 1f, fill = false),
++                    style = MaterialTheme.typography.labelSmall,
+                 )
+-                if (readProgress != null) {
+-                    DotSeparatorText()
+-                    Text(
+-                        text = readProgress,
+-                        maxLines = 1,
+-                        color = LocalContentColor.current.copy(alpha = DISABLED_ALPHA),
+-                        overflow = TextOverflow.Ellipsis,
++                IconButton(onClick = onClick, modifier = Modifier.size(width = 32.dp, height = 40.dp)) {
++                    Icon(
++                        MaterialSymbols.RoundedFilled.PlayArrow,
++                        stringResource(MR.strings.action_resume),
++                        Modifier.size(20.dp),
+                     )
+                 }
++
++                ChapterDownloadIndicator(
++                    enabled = onDownloadChapter != null,
++                    downloadStateProvider = downloadStateProvider,
++                    downloadProgressProvider = downloadProgressProvider,
++                    onClick = { onDownloadChapter?.invoke(it) },
++
++                )
+             }
+         }
+-
+-        ChapterDownloadIndicator(
+-            enabled = onDownloadChapter != null,
+-            modifier = Modifier.padding(start = 4.dp),
+-            downloadStateProvider = downloadStateProvider,
+-            downloadProgressProvider = downloadProgressProvider,
+-            onClick = { onDownloadChapter?.invoke(it) },
+-        )
+     }
+ }
+diff --git a/app/src/main/java/eu/kanade/tachiyomi/ui/main/MainActivity.kt b/app/src/main/java/eu/kanade/tachiyomi/ui/main/MainActivity.kt
+index d8506509d..070877b0d 100644
+--- a/app/src/main/java/eu/kanade/tachiyomi/ui/main/MainActivity.kt
++++ b/app/src/main/java/eu/kanade/tachiyomi/ui/main/MainActivity.kt
+@@ -92,6 +92,7 @@ import eu.kanade.tachiyomi.ui.more.OnboardingScreen
+ import eu.kanade.tachiyomi.ui.setting.SettingsScreen
+ import eu.kanade.tachiyomi.util.system.HarmonyFramePerf
+ import eu.kanade.tachiyomi.util.system.HarmonyFramePerfButton
++import eu.kanade.tachiyomi.util.system.applyHarmonyWindowInsets
+ import eu.kanade.tachiyomi.util.system.dpToPx
+ import eu.kanade.tachiyomi.util.system.installHarmonyWindowInsets
+ import eu.kanade.tachiyomi.util.system.isBenchmarkBuildType
+@@ -228,15 +229,13 @@ class MainActivity : BaseActivity() {
+             }
+             LaunchedEffect(isSystemInDarkTheme, statusBarBackgroundColor) {
+                 // Draw edge-to-edge and set system bars color to transparent
+-                val lightStyle = SystemBarStyle.light(Color.TRANSPARENT, Color.BLACK)
++                val lightStyle = SystemBarStyle.light(Color.TRANSPARENT, Color.TRANSPARENT)
+                 val darkStyle = SystemBarStyle.dark(Color.TRANSPARENT)
+                 enableEdgeToEdge(
+                     statusBarStyle = if (statusBarBackgroundColor.luminance() > 0.5) lightStyle else darkStyle,
+                     navigationBarStyle = if (isSystemInDarkTheme) darkStyle else lightStyle,
+                 )
+-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+-                    window.isNavigationBarContrastEnforced = false
+-                }
++                applyHarmonyWindowInsets()
+             }
+ 
+             Navigator(
+diff --git a/app/src/main/java/eu/kanade/tachiyomi/util/system/HarmonyWindowInsets.kt b/app/src/main/java/eu/kanade/tachiyomi/util/system/HarmonyWindowInsets.kt
+index 26f78e4cc..4936fab19 100644
+--- a/app/src/main/java/eu/kanade/tachiyomi/util/system/HarmonyWindowInsets.kt
++++ b/app/src/main/java/eu/kanade/tachiyomi/util/system/HarmonyWindowInsets.kt
+@@ -1,7 +1,9 @@
+ package eu.kanade.tachiyomi.util.system
+ 
++import android.graphics.Color
+ import android.os.Build
+ import android.view.View
++import android.view.ViewTreeObserver
+ import android.view.WindowManager
+ import androidx.activity.ComponentActivity
+ import androidx.core.view.ViewCompat
+@@ -12,22 +14,9 @@ import androidx.lifecycle.LifecycleOwner
+ /** Reconcile edge-to-edge geometry after rotation/folding, once the new window bounds are laid out. */
+ fun ComponentActivity.installHarmonyWindowInsets() {
+     val decor = window.decorView
+-    fun applyLayoutPolicy() {
+-        WindowCompat.setDecorFitsSystemWindows(window, false)
+-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+-            val cutoutMode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+-                WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
+-            } else {
+-                WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+-            }
+-            if (window.attributes.layoutInDisplayCutoutMode != cutoutMode) {
+-                window.attributes = window.attributes.apply { layoutInDisplayCutoutMode = cutoutMode }
+-            }
+-        }
+-    }
+     val refresh = Runnable {
+         if (!isFinishing && !isDestroyed) {
+-            applyLayoutPolicy()
++            applyHarmonyWindowInsets()
+             // Ask for insets against the new bounds, not the portrait values received before layout.
+             ViewCompat.requestApplyInsets(decor)
+         }
+@@ -51,8 +40,12 @@ fun ComponentActivity.installHarmonyWindowInsets() {
+             scheduleRefresh()
+         }
+     }
++    val focusListener = ViewTreeObserver.OnWindowFocusChangeListener { focused ->
++        if (focused) scheduleRefresh()
++    }
++    decor.viewTreeObserver.addOnWindowFocusChangeListener(focusListener)
+     // Apply before Compose/migration content is attached, including a recreated landscape Activity.
+-    applyLayoutPolicy()
++    applyHarmonyWindowInsets()
+     decor.addOnLayoutChangeListener(boundsListener)
+     lifecycle.addObserver(object : DefaultLifecycleObserver {
+         override fun onResume(owner: LifecycleOwner) = scheduleRefresh()
+@@ -60,7 +53,34 @@ fun ComponentActivity.installHarmonyWindowInsets() {
+         override fun onDestroy(owner: LifecycleOwner) {
+             decor.removeCallbacks(refresh)
+             decor.removeOnLayoutChangeListener(boundsListener)
++            if (decor.viewTreeObserver.isAlive) {
++                decor.viewTreeObserver.removeOnWindowFocusChangeListener(focusListener)
++            }
+             owner.lifecycle.removeObserver(this)
+         }
+     })
+ }
++
++/** Run after AndroidX edge-to-edge too, since it owns the same Window attributes. */
++@Suppress("DEPRECATION")
++fun ComponentActivity.applyHarmonyWindowInsets() {
++    WindowCompat.setDecorFitsSystemWindows(window, false)
++    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
++        val cutoutMode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
++            WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
++        } else {
++            WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
++        }
++        if (window.attributes.layoutInDisplayCutoutMode != cutoutMode) {
++            window.attributes = window.attributes.apply { layoutInDisplayCutoutMode = cutoutMode }
++        }
++    }
++    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
++        window.isStatusBarContrastEnforced = false
++        window.isNavigationBarContrastEnforced = false
++    }
++    if (Build.VERSION.SDK_INT < 35) {
++        window.statusBarColor = Color.TRANSPARENT
++        window.navigationBarColor = Color.TRANSPARENT
++    }
++}
+diff --git a/presentation-core/src/main/java/tachiyomi/presentation/core/components/TimelineGrid.kt b/presentation-core/src/main/java/tachiyomi/presentation/core/components/TimelineGrid.kt
+new file mode 100644
+index 000000000..45a3c3886
+--- /dev/null
++++ b/presentation-core/src/main/java/tachiyomi/presentation/core/components/TimelineGrid.kt
+@@ -0,0 +1,80 @@
++package tachiyomi.presentation.core.components
++
++import androidx.compose.foundation.layout.Arrangement
++import androidx.compose.foundation.layout.BoxWithConstraints
++import androidx.compose.foundation.layout.PaddingValues
++import androidx.compose.foundation.layout.fillMaxSize
++import androidx.compose.foundation.lazy.staggeredgrid.LazyStaggeredGridState
++import androidx.compose.foundation.lazy.staggeredgrid.LazyVerticalStaggeredGrid
++import androidx.compose.foundation.lazy.staggeredgrid.StaggeredGridCells
++import androidx.compose.foundation.lazy.staggeredgrid.StaggeredGridItemSpan
++import androidx.compose.foundation.lazy.staggeredgrid.rememberLazyStaggeredGridState
++import androidx.compose.runtime.Composable
++import androidx.compose.ui.Modifier
++import androidx.compose.ui.unit.Dp
++import androidx.compose.ui.unit.dp
++import tachiyomi.presentation.core.components.material.browsingTrailingRemaining
++import tachiyomi.presentation.core.components.material.observeBrowsingLeadingScroll
++import tachiyomi.presentation.core.util.plus
++
++/** Dates span every lane; only viewport items are composed, including on state restoration. */
++@Composable
++fun TimelineGrid(
++    count: Int,
++    key: (Int) -> Any,
++    fullLine: (Int) -> Boolean,
++    columns: Int,
++    minColumnWidth: Dp,
++    contentPadding: PaddingValues,
++    modifier: Modifier = Modifier,
++    state: LazyStaggeredGridState = rememberLazyStaggeredGridState(),
++    content: @Composable (Int) -> Unit,
++) {
++    BoxWithConstraints(modifier.fillMaxSize()) {
++        val fittedColumns = if (columns > 1) {
++            columns.coerceAtMost((maxWidth / 140.dp).toInt().coerceAtLeast(1))
++        } else {
++            columns
++        }
++        VerticalTimelineFastScroller(
++            state = state,
++            modifier = Modifier.fillMaxSize().observeBrowsingLeadingScroll(
++                trailingRemaining = {
++                    val info = state.layoutInfo
++                    browsingTrailingRemaining(
++                        terminalVisible = info.totalItemsCount > 0 &&
++                            info.visibleItemsInfo.any { it.index == info.totalItemsCount - 1 },
++                        lastItemBottom = info.visibleItemsInfo.maxOfOrNull { it.offset.y + it.size.height } ?: 0,
++                        afterPadding = info.afterContentPadding,
++                        viewportEnd = info.viewportEndOffset,
++                    )
++                },
++            ) {
++                state.layoutInfo.visibleItemsInfo.firstOrNull { it.index == 0 }
++                    ?.let { -it.offset.y.toFloat() } ?: Float.POSITIVE_INFINITY
++            },
++            topContentPadding = contentPadding.calculateTopPadding(),
++            bottomContentPadding = contentPadding.calculateBottomPadding(),
++        ) {
++            LazyVerticalStaggeredGrid(
++                columns = if (fittedColumns > 0) {
++                    StaggeredGridCells.Fixed(fittedColumns)
++                } else {
++                    StaggeredGridCells.Adaptive(minColumnWidth)
++                },
++                state = state,
++                modifier = Modifier.fillMaxSize(),
++                contentPadding = contentPadding + PaddingValues(horizontal = 1.dp, vertical = 3.dp),
++                horizontalArrangement = Arrangement.spacedBy(3.dp),
++                verticalItemSpacing = 3.dp,
++            ) {
++                items(
++                    count = count,
++                    key = key,
++                    contentType = { if (fullLine(it)) "heading" else "card" },
++                    span = { if (fullLine(it)) StaggeredGridItemSpan.FullLine else StaggeredGridItemSpan.SingleLane },
++                ) { content(it) }
++            }
++        }
++    }
++}
+diff --git a/presentation-core/src/main/java/tachiyomi/presentation/core/components/VerticalFastScroller.kt b/presentation-core/src/main/java/tachiyomi/presentation/core/components/VerticalFastScroller.kt
+index c8ebfbf99..f2198defa 100644
+--- a/presentation-core/src/main/java/tachiyomi/presentation/core/components/VerticalFastScroller.kt
++++ b/presentation-core/src/main/java/tachiyomi/presentation/core/components/VerticalFastScroller.kt
+@@ -668,6 +668,147 @@ fun VerticalMasonryFastScroller(
+     }
+ }
+ 
++// Native lazy timeline: progress is item based; no offscreen cell measurement.
++@Composable
++internal fun VerticalTimelineFastScroller(
++    state: androidx.compose.foundation.lazy.staggeredgrid.LazyStaggeredGridState,
++    modifier: Modifier = Modifier,
++    thumbAllowed: () -> Boolean = { true },
++    thumbColor: Color = MaterialTheme.colorScheme.primary,
++    topContentPadding: Dp = Dp.Hairline,
++    bottomContentPadding: Dp = Dp.Hairline,
++    endContentPadding: Dp = Dp.Hairline,
++    content: @Composable () -> Unit,
++) {
++    val thumbGlass = rememberFastScrollerGlass()
++    SubcomposeLayout(modifier = modifier) { constraints ->
++        val contentPlaceable = subcompose("content") {
++            Box(Modifier.fastScrollerGlassSource(thumbGlass), propagateMinConstraints = true) { content() }
++        }.map { it.measure(constraints) }
++        val contentHeight = contentPlaceable.fastMaxBy { it.height }?.height ?: 0
++        val contentWidth = contentPlaceable.fastMaxBy { it.width }?.width ?: 0
++
++        val scrollerConstraints = constraints.copy(minWidth = 0, minHeight = 0)
++        val scrollerPlaceable = subcompose("scroller") {
++            if (!state.canScrollForward && !state.canScrollBackward) return@subcompose
++            val dragInteractionSource = remember { MutableInteractionSource() }
++            // State object so the fade coroutine sees a drag that starts after it is already waiting.
++            val isThumbDraggedState = dragInteractionSource.collectIsDraggedAsState()
++            val isThumbDragged by isThumbDraggedState
++            val thumbPressed = rememberThumbPressed()
++            val density = LocalDensity.current
++            val (trackTopPadding, trackBottomPadding) = rememberBrowsingScrollInsets(
++                topContentPadding = topContentPadding,
++                bottomContentPadding = maxOf(
++                    bottomContentPadding,
++                    with(density) { state.layoutInfo.afterContentPadding.toDp() },
++                ),
++                dragging = isThumbDragged || thumbPressed.pressed,
++            )
++            val thumbTopPadding = with(density) { trackTopPadding.toPx() }
++            val thumbBottomPadding = with(density) { trackBottomPadding.toPx() }
++            var thumbOffsetY by remember { mutableFloatStateOf(thumbTopPadding) }
++            val scrolled = remember {
++                MutableSharedFlow<Unit>(
++                    extraBufferCapacity = 1,
++                    onBufferOverflow = BufferOverflow.DROP_OLDEST,
++                )
++            }
++
++            val heightPx = contentHeight.toFloat() - thumbTopPadding - thumbBottomPadding
++            val thumbHeightPx = with(LocalDensity.current) { ThumbLength.toPx() }
++            val trackHeightPx = heightPx - thumbHeightPx
++            if (trackHeightPx <= 0f) return@subcompose
++
++            LaunchedEffect(thumbOffsetY) {
++                if (!isThumbDragged) return@LaunchedEffect
++                val ratio = ((thumbOffsetY - thumbTopPadding) / trackHeightPx).coerceIn(0f, 1f)
++                state.scrollToItem((ratio * (state.layoutInfo.totalItemsCount - 1)).roundToInt().coerceAtLeast(0))
++                scrolled.tryEmit(Unit)
++            }
++
++            val lastScrollOffset = remember { MutableData(Float.NaN) }
++            // Harmony: a fling moves the offset every frame, and restarting this effect
++            // stalled the shelf. The collector stays up and still skips a grabbed thumb.
++            LaunchedEffect(trackHeightPx, thumbTopPadding, isThumbDragged) {
++                snapshotFlow {
++                    Triple(
++                        state.firstVisibleItemIndex.toFloat(),
++                        (state.layoutInfo.totalItemsCount - 1).coerceAtLeast(1).toFloat(),
++                        state.canScrollForward,
++                    )
++                }.collect { (scrollOffset, maxScroll, canScrollForward) ->
++                    if (isThumbDraggedState.value) return@collect
++                    val proportion = if (!canScrollForward) {
++                        1f
++                    } else {
++                        (scrollOffset / maxScroll).coerceIn(0f, 1f)
++                    }
++                    val target = trackHeightPx * proportion + thumbTopPadding
++                    if (scrollOffset != lastScrollOffset.value) {
++                        lastScrollOffset.value = scrollOffset
++                        scrolled.tryEmit(Unit)
++                    }
++                    thumbOffsetY = target
++                }
++            }
++
++            val alpha = remember { Animatable(0f) }
++            val isThumbVisible = alpha.value > 0f
++            LaunchedEffect(scrolled, alpha) {
++                scrolled
++                    .sample(100)
++                    .collectLatest {
++                        alpha.holdOpaqueWhileThumbGrabbed(
++                            held = { thumbPressed.pressed || isThumbDraggedState.value },
++                            thumbAllowed = thumbAllowed,
++                        ) {
++                            animateTo(
++                                0f,
++                                animationSpec = FastScrollerFadeOutAnimationSpec,
++                            )
++                        }
++                    }
++            }
++
++            // Stay draggable while scrollToOffset reports a scroll, or the drag gesture is
++            // cancelled on the frame that applies it. pressed / isThumbDragged keep the same
++            // pointer attached after the thumb would otherwise have faded out.
++            HarmonyScrollerThumb(
++                offsetY = thumbOffsetY,
++                alpha = alpha.value,
++                thumbColor = thumbColor,
++                glassState = thumbGlass,
++                endInset = endContentPadding,
++                touchEnabled = isThumbVisible || thumbPressed.pressed || isThumbDragged,
++                pressState = thumbPressed,
++                interactionSource = dragInteractionSource,
++                contentScrolling = { state.isScrollInProgress },
++                onDragDelta = { delta ->
++                    val newOffsetY = thumbOffsetY + delta
++                    thumbOffsetY = newOffsetY.coerceIn(
++                        thumbTopPadding,
++                        thumbTopPadding + trackHeightPx,
++                    )
++                },
++                excludeSystemGestures = (isThumbVisible || thumbPressed.pressed) &&
++                    !isThumbDragged &&
++                    !state.isScrollInProgress,
++            )
++        }.map { it.measure(scrollerConstraints) }
++        val scrollerWidth = scrollerPlaceable.fastMaxBy { it.width }?.width ?: 0
++
++        layout(contentWidth, contentHeight) {
++            contentPlaceable.fastForEach {
++                it.place(0, 0)
++            }
++            scrollerPlaceable.fastForEach {
++                it.placeRelative(contentWidth - scrollerWidth, 0)
++            }
++        }
++    }
++}
++
+ /**
+  * Drawn thumb stays [ThumbThickness] by [ThumbLength] on the end edge. The hit area is
+  * [ThumbTouchWidth] plus [endInset] wide and [ThumbLength] tall, in two parts:
+diff --git a/presentation-core/src/main/java/tachiyomi/presentation/core/components/material/BrowsingScrollInsets.kt b/presentation-core/src/main/java/tachiyomi/presentation/core/components/material/BrowsingScrollInsets.kt
+index d008abf76..17032b065 100644
+--- a/presentation-core/src/main/java/tachiyomi/presentation/core/components/material/BrowsingScrollInsets.kt
++++ b/presentation-core/src/main/java/tachiyomi/presentation/core/components/material/BrowsingScrollInsets.kt
+@@ -17,6 +17,7 @@ import androidx.compose.ui.input.nestedscroll.NestedScrollSource
+ import androidx.compose.ui.input.nestedscroll.nestedScroll
+ import androidx.compose.ui.layout.boundsInWindow
+ import androidx.compose.ui.layout.onGloballyPositioned
++import androidx.compose.ui.platform.LocalConfiguration
+ import androidx.compose.ui.platform.LocalDensity
+ import androidx.compose.ui.unit.Dp
+ import kotlinx.coroutines.flow.collect
+@@ -105,7 +106,14 @@ fun rememberBrowsingScrollInsets(topContentPadding: Dp, bottomContentPadding: Dp
+             top.toDp() to bottom.toDp()
+         }
+     }
+-    val frozen = remember(chrome, density.density) { FrozenBrowsingTrack() }
++    val configuration = LocalConfiguration.current
++    val frozen = remember(
++        chrome,
++        density.density,
++        density.fontScale,
++        configuration.screenWidthDp,
++        configuration.screenHeightDp,
++    ) { FrozenBrowsingTrack() }
+     // Keep the last displayed track on the first down as well as while dragging.
+     if (!dragging || frozen.insets == null) frozen.insets = live
+     return frozen.insets!!
+diff --git a/presentation-core/src/main/java/tachiyomi/presentation/core/components/material/NavigationChrome.kt b/presentation-core/src/main/java/tachiyomi/presentation/core/components/material/NavigationChrome.kt
+index 3d68c8272..b4ead8298 100644
+--- a/presentation-core/src/main/java/tachiyomi/presentation/core/components/material/NavigationChrome.kt
++++ b/presentation-core/src/main/java/tachiyomi/presentation/core/components/material/NavigationChrome.kt
+@@ -13,6 +13,7 @@ import androidx.compose.material3.TopAppBarScrollBehavior
+ import androidx.compose.runtime.Composable
+ import androidx.compose.runtime.DisposableEffect
+ import androidx.compose.runtime.LaunchedEffect
++import androidx.compose.runtime.SideEffect
+ import androidx.compose.runtime.Stable
+ import androidx.compose.runtime.State
+ import androidx.compose.runtime.getValue
+@@ -21,6 +22,7 @@ import androidx.compose.runtime.mutableIntStateOf
+ import androidx.compose.runtime.mutableStateOf
+ import androidx.compose.runtime.remember
+ import androidx.compose.runtime.rememberUpdatedState
++import androidx.compose.runtime.saveable.rememberSaveable
+ import androidx.compose.runtime.setValue
+ import androidx.compose.runtime.staticCompositionLocalOf
+ import androidx.compose.ui.Modifier
+@@ -73,7 +75,11 @@ fun rememberBrowsingTopAppBarScrollBehavior(
+         chrome.setPinned(owner, !canHide)
+         onDispose { chrome.setPinned(owner, false) }
+     }
+-    LaunchedEffect(chrome, resetKey) { chrome.reset() }
++    val previousResetKey = remember(chrome) { arrayOf(resetKey) }
++    LaunchedEffect(chrome, resetKey) {
++        if (previousResetKey[0] != resetKey) chrome.reset()
++        previousResetKey[0] = resetKey
++    }
+     val delegate = TopAppBarDefaults.pinnedScrollBehavior()
+     return remember(chrome, delegate) { BrowsingTopAppBarScrollBehavior(delegate, chrome) }
+ }
+@@ -117,9 +123,10 @@ fun BrowsingChromeOverlay(
+ @Stable
+ class BrowsingNavigationBarState internal constructor(
+     intentDistance: Float = 6f,
++    initialVisible: Boolean = true,
+     private val enabled: () -> Boolean,
+ ) {
+-    private val tracker = NavigationChromeScrollTracker(intentDistance)
++    private val tracker = NavigationChromeScrollTracker(intentDistance, initialVisible)
+     private val pinnedOwners = mutableSetOf<Any>()
+     internal var animation: State<Float>? = null
+     internal val glassState = HazeState()
+@@ -133,7 +140,7 @@ class BrowsingNavigationBarState internal constructor(
+             trailingRemaining?.invoke(),
+             bottomHeightPx,
+         )
+-    var visible by mutableStateOf(true)
++    var visible by mutableStateOf(initialVisible)
+         private set
+     internal var animationDurationMillis by mutableIntStateOf(225)
+         private set
+@@ -251,7 +258,17 @@ fun rememberBrowsingNavigationBarState(enabled: Boolean, resetKey: Any?): Browsi
+     val canHide = enabled && !rememberTouchExplorationEnabled()
+     val currentEnabled by rememberUpdatedState(canHide)
+     val intentDistance = with(LocalDensity.current) { 6.dp.toPx() }
+-    val state = remember(intentDistance) { BrowsingNavigationBarState(intentDistance) { currentEnabled } }
++    var savedVisible by rememberSaveable { mutableStateOf(true) }
++    val state = remember(intentDistance) {
++        BrowsingNavigationBarState(intentDistance, savedVisible) { currentEnabled }
++    }
++    SideEffect { savedVisible = state.visible }
++    val configuration = LocalConfiguration.current
++    val fontScale = LocalDensity.current.fontScale
++    LaunchedEffect(state, configuration.screenWidthDp, configuration.screenHeightDp, fontScale) {
++        // A window/density change cancels the old finger sequence, not its visible/hidden choice.
++        state.endGesture()
++    }
+     state.animation = animateFloatAsState(
+         targetValue = if (state.visible) 0f else 1f,
+         animationSpec = tween(
+@@ -260,7 +277,12 @@ fun rememberBrowsingNavigationBarState(enabled: Boolean, resetKey: Any?): Browsi
+         ),
+         label = "browsingChrome",
+     )
+-    LaunchedEffect(state, canHide, resetKey) { state.reset() }
++    val previousReset = remember(state) { arrayOf<Any?>(canHide, resetKey) }
++    LaunchedEffect(state, canHide, resetKey) {
++        if (!canHide || previousReset[0] != canHide || previousReset[1] != resetKey) state.reset()
++        previousReset[0] = canHide
++        previousReset[1] = resetKey
++    }
+     return state
+ }
+ 
+diff --git a/presentation-core/src/main/java/tachiyomi/presentation/core/components/material/NavigationChromeScrollTracker.kt b/presentation-core/src/main/java/tachiyomi/presentation/core/components/material/NavigationChromeScrollTracker.kt
+index fdf75265f..5dff174a6 100644
+--- a/presentation-core/src/main/java/tachiyomi/presentation/core/components/material/NavigationChromeScrollTracker.kt
++++ b/presentation-core/src/main/java/tachiyomi/presentation/core/components/material/NavigationChromeScrollTracker.kt
+@@ -3,8 +3,8 @@ package tachiyomi.presentation.core.components.material
+ import kotlin.math.abs
+ 
+ /** One deliberate state change per touch, so reversing an ongoing drag cannot flash the controls. */
+-internal class NavigationChromeScrollTracker(private val intentDistance: Float = 6f) {
+-    var visible = true
++internal class NavigationChromeScrollTracker(private val intentDistance: Float = 6f, initialVisible: Boolean = true) {
++    var visible = initialVisible
+         private set
+     private var gestureActive = false
+     private var switchedThisGesture = false
+diff --git a/presentation-core/src/test/java/tachiyomi/presentation/core/components/TimelineGridTest.kt b/presentation-core/src/test/java/tachiyomi/presentation/core/components/TimelineGridTest.kt
+new file mode 100644
+index 000000000..175791d8a
+--- /dev/null
++++ b/presentation-core/src/test/java/tachiyomi/presentation/core/components/TimelineGridTest.kt
+@@ -0,0 +1,124 @@
++package tachiyomi.presentation.core.components
++
++import androidx.compose.foundation.layout.Box
++import androidx.compose.foundation.layout.PaddingValues
++import androidx.compose.foundation.layout.height
++import androidx.compose.foundation.layout.width
++import androidx.compose.foundation.lazy.staggeredgrid.LazyStaggeredGridState
++import androidx.compose.foundation.lazy.staggeredgrid.rememberLazyStaggeredGridState
++import androidx.compose.material3.MaterialTheme
++import androidx.compose.runtime.SideEffect
++import androidx.compose.runtime.getValue
++import androidx.compose.runtime.mutableIntStateOf
++import androidx.compose.runtime.mutableStateOf
++import androidx.compose.runtime.rememberCoroutineScope
++import androidx.compose.runtime.saveable.rememberSaveableStateHolder
++import androidx.compose.runtime.setValue
++import androidx.compose.ui.Modifier
++import androidx.compose.ui.test.ExperimentalTestApi
++import androidx.compose.ui.test.v2.runComposeUiTest
++import androidx.compose.ui.unit.dp
++import kotlinx.coroutines.CoroutineScope
++import kotlinx.coroutines.launch
++import org.junit.Test
++import org.junit.jupiter.api.Assertions.assertTrue
++import org.junit.runner.RunWith
++import org.robolectric.RobolectricTestRunner
++import org.robolectric.annotation.Config
++import org.robolectric.annotation.GraphicsMode
++
++@OptIn(ExperimentalTestApi::class)
++@RunWith(RobolectricTestRunner::class)
++@GraphicsMode(GraphicsMode.Mode.LEGACY)
++@Config(sdk = [34])
++class TimelineGridTest {
++    @Test
++    fun `ten thousand records compose only viewport cells including distant jumps`() = runComposeUiTest {
++        val composed = mutableSetOf<Int>()
++        lateinit var state: LazyStaggeredGridState
++        lateinit var scope: CoroutineScope
++        setContent {
++            MaterialTheme {
++                state = rememberLazyStaggeredGridState()
++                scope = rememberCoroutineScope()
++                Box(Modifier.width(360.dp).height(640.dp)) {
++                    TimelineGrid(10000, {
++                        "record-$it"
++                    }, { it % 25 == 0 }, 2, 140.dp, PaddingValues(), state = state) { index ->
++                        SideEffect { composed.add(index) }
++                        Box(
++                            Modifier.height(
++                                if (index % 25 == 0) {
++                                    32.dp
++                                } else if (index % 2 == 0) {
++                                    150.dp
++                                } else {
++                                    220.dp
++                                },
++                            ),
++                        )
++                    }
++                }
++            }
++        }
++        waitForIdle()
++        runOnIdle {
++            assertTrue(composed.size in 1..100, "Initial composition: ${composed.size}")
++            scope.launch { state.scrollToItem(8000) }
++        }
++        waitForIdle()
++        runOnIdle {
++            assertTrue(state.firstVisibleItemIndex > 7900)
++            assertTrue(composed.size < 200, "Offscreen records were composed: ${composed.size}")
++        }
++    }
++
++    @Test
++    fun `detail return restores position and survives fold and a shortened history`() = runComposeUiTest {
++        var shown by mutableStateOf(true)
++        var expanded by mutableStateOf(false)
++        var count by mutableIntStateOf(10000)
++        lateinit var state: LazyStaggeredGridState
++        lateinit var scope: CoroutineScope
++        setContent {
++            val holder = rememberSaveableStateHolder()
++            MaterialTheme {
++                scope = rememberCoroutineScope()
++                if (shown) {
++                    holder.SaveableStateProvider("history") {
++                        state = rememberLazyStaggeredGridState()
++                        Box(Modifier.width(if (expanded) 700.dp else 360.dp).height(640.dp)) {
++                            TimelineGrid(count, {
++                                "record-$it"
++                            }, { it % 25 == 0 }, 0, 140.dp, PaddingValues(), state = state) { index ->
++                                Box(Modifier.height(if (index % 25 == 0) 32.dp else 180.dp))
++                            }
++                        }
++                    }
++                }
++            }
++        }
++        runOnIdle { scope.launch { state.scrollToItem(8000) } }
++        waitForIdle()
++        runOnIdle { shown = false }
++        waitForIdle()
++        runOnIdle {
++            shown = true
++            expanded = true
++        }
++        waitForIdle()
++        runOnIdle { assertTrue(state.firstVisibleItemIndex in 7900..8100) }
++        runOnIdle { shown = false }
++        waitForIdle()
++        runOnIdle {
++            count = 40
++            shown = true
++            expanded = false
++        }
++        waitForIdle()
++        runOnIdle {
++            assertTrue(state.layoutInfo.visibleItemsInfo.isNotEmpty())
++            assertTrue(state.firstVisibleItemIndex in 0..39)
++        }
++    }
++}
+diff --git a/presentation-core/src/test/java/tachiyomi/presentation/core/components/material/NavigationChromeGeometryTest.kt b/presentation-core/src/test/java/tachiyomi/presentation/core/components/material/NavigationChromeGeometryTest.kt
+index 015666943..386a2ccb5 100644
+--- a/presentation-core/src/test/java/tachiyomi/presentation/core/components/material/NavigationChromeGeometryTest.kt
++++ b/presentation-core/src/test/java/tachiyomi/presentation/core/components/material/NavigationChromeGeometryTest.kt
+@@ -61,4 +61,15 @@ class NavigationChromeGeometryTest {
+         assertTrue(tracker.onPreScroll(0f, 20f, true))
+         assertFalse(tracker.onPostScroll(0f, -20f, true))
+     }
++
++    @Test
++    fun `restored visibility starts tracker in the same state after a window recreation`() {
++        val hidden = NavigationChromeScrollTracker(initialVisible = false)
++        assertFalse(hidden.visible)
++        hidden.beginGesture()
++        assertFalse(hidden.onPreScroll(0f, 3f, true))
++        assertTrue(hidden.onPreScroll(0f, 3f, true))
++        val shown = NavigationChromeScrollTracker(initialVisible = true)
++        assertTrue(shown.visible)
++    }
+ }

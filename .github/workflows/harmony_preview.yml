@@ -184,7 +184,7 @@ jobs:
         # -Penable-updater 打开 BuildConfig.UPDATER_ENABLED, 否则 App 不会检查更新.
         run: |
           ./gradlew :presentation-core:testDebugUnitTest \
-            --tests '*NavigationChrome*' --tests '*PanoramaAutoColumnsTest' --tests '*PanoramaMasonryLayoutTest' \
+            --tests '*NavigationChrome*' --tests '*TimelineGridTest' --tests '*PanoramaAutoColumnsTest' --tests '*PanoramaMasonryLayoutTest' \
             "assemble${BUILD_TYPE^}" -Penable-updater --stacktrace
 
       - name: Print navigation regression failures
