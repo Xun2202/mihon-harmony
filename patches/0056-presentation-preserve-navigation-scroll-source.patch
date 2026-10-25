@@ -1,17 +1,31 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Xun2202 <98207886+Xun2202@users.noreply.github.com>
-Date: Sun, 25 Oct 2026 18:47:48 +0000
-Subject: [PATCH] presentation: preserve scroll observer registration across
- navigation reset
+Date: Sun, 25 Oct 2026 18:53:38 +0000
+Subject: [PATCH] presentation: preserve navigation scroll source and
+ single-line badges
 
-Shared Mihon and Anikku 0056. Observer lifetime owns the active source; reset cannot erase a registration after first placement. Keep badge assertions tied to visible icon geometry rather than a fixed font-metric estimate.
+Shared Mihon and Anikku 0056. Keep observer registration across reset and count badges on one line.
 ---
+ .../java/eu/kanade/tachiyomi/ui/home/HomeScreen.kt  |  2 ++
  .../components/material/BrowsingScrollInsets.kt     | 10 +++++++++-
  .../core/components/material/NavigationChrome.kt    |  4 ++--
  .../material/NavigationChromeLayoutTest.kt          | 13 ++++++++++++-
- .../material/NavigationChromeRefreshTest.kt         |  5 ++++-
- 4 files changed, 27 insertions(+), 5 deletions(-)
+ .../material/NavigationChromeRefreshTest.kt         |  7 +++++--
+ 5 files changed, 30 insertions(+), 6 deletions(-)
 
+diff --git a/app/src/main/java/eu/kanade/tachiyomi/ui/home/HomeScreen.kt b/app/src/main/java/eu/kanade/tachiyomi/ui/home/HomeScreen.kt
+index 30b101c99..f196b10e9 100644
+--- a/app/src/main/java/eu/kanade/tachiyomi/ui/home/HomeScreen.kt
++++ b/app/src/main/java/eu/kanade/tachiyomi/ui/home/HomeScreen.kt
+@@ -340,6 +340,8 @@ object HomeScreen : Screen() {
+                 }
+                 Text(
+                     text = if (compact && count > 99) "99+" else count.toString(),
++                    maxLines = 1,
++                    softWrap = false,
+                     modifier = Modifier.semantics {
+                         if (desc != null) contentDescription = desc
+                     },
 diff --git a/presentation-core/src/main/java/tachiyomi/presentation/core/components/material/BrowsingScrollInsets.kt b/presentation-core/src/main/java/tachiyomi/presentation/core/components/material/BrowsingScrollInsets.kt
 index 295da5620..d008abf76 100644
 --- a/presentation-core/src/main/java/tachiyomi/presentation/core/components/material/BrowsingScrollInsets.kt
@@ -80,9 +94,18 @@ index 0ba7959b1..1384652dd 100644
              assertEquals(viewport.top, headerY, 1f)
              assertEquals(viewport.bottom, bottomY + bottomHeight, 1f)
 diff --git a/presentation-core/src/test/java/tachiyomi/presentation/core/components/material/NavigationChromeRefreshTest.kt b/presentation-core/src/test/java/tachiyomi/presentation/core/components/material/NavigationChromeRefreshTest.kt
-index df5ed6120..688e2c475 100644
+index df5ed6120..7470af537 100644
 --- a/presentation-core/src/test/java/tachiyomi/presentation/core/components/material/NavigationChromeRefreshTest.kt
 +++ b/presentation-core/src/test/java/tachiyomi/presentation/core/components/material/NavigationChromeRefreshTest.kt
+@@ -99,7 +99,7 @@ class NavigationChromeRefreshTest {
+                                                             origin.y + it.size.height,
+                                                         )
+                                                 },
+-                                            ) { Text("999") }
++                                            ) { Text("99+", maxLines = 1, softWrap = false) }
+                                         },
+                                     )
+                                 }
 @@ -120,7 +120,10 @@ class NavigationChromeRefreshTest {
              assertEquals(item.center.x, icons[index].center.x, 1f)
              val label = onNodeWithText("Tab$index", useUnmergedTree = true).fetchSemanticsNode().boundsInRoot
