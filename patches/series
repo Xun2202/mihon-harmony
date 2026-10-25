@@ -50,3 +50,6 @@
 0050-presentation-gesture-latched-navigation.patch
 0051-presentation-glass-navigation-polish.patch
 0052-presentation-inline-tabs-refresh-layer.patch
+0053-reader-contained-mode-notice.patch
+0054-ui-refresh-window-insets.patch
+0055-presentation-reveal-navigation-at-end.patch
