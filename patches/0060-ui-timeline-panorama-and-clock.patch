@@ -1,0 +1,750 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Xun2202 <98207886+Xun2202@users.noreply.github.com>
+Date: Sun, 25 Oct 2026 20:33:14 +0000
+Subject: [PATCH] ui: align timeline panorama spans and compact 24-hour actions
+
+Use library cover-shape, column and spanning rules for timeline panorama. Calculate cover plus footer and date heights without composing offscreen records. Keep native compact/list modes. Share 36dp action row, 28dp controls, ASCII HH:mm and filled library hearts. Preserve download file sizes in Anikku subtitles. Cover 10000 records, two-lane landscape cards and save/restore resizing with Compose regressions.
+---
+ .../components/TimelineActionsRow.kt          |  42 ++++++
+ .../presentation/components/TimelineCard.kt   |   3 +-
+ .../presentation/components/TimelineLayout.kt |  98 +++++++++++++
+ .../presentation/components/TimelineTime.kt   |  14 ++
+ .../presentation/history/HistoryScreen.kt     |   8 +-
+ .../history/components/HistoryItem.kt         |  70 ++++------
+ .../presentation/updates/UpdatesScreen.kt     |  16 ++-
+ .../presentation/updates/UpdatesUiItem.kt     |  41 +++---
+ .../components/TimelineTimeTest.kt            |  25 ++++
+ .../core/components/PanoramaMasonry.kt        |  11 +-
+ .../core/components/TimelinePanoramaGrid.kt   |  49 +++++++
+ .../components/TimelinePanoramaGridTest.kt    | 131 ++++++++++++++++++
+ 12 files changed, 433 insertions(+), 75 deletions(-)
+ create mode 100644 app/src/main/java/eu/kanade/presentation/components/TimelineActionsRow.kt
+ create mode 100644 app/src/main/java/eu/kanade/presentation/components/TimelineLayout.kt
+ create mode 100644 app/src/main/java/eu/kanade/presentation/components/TimelineTime.kt
+ create mode 100644 app/src/test/java/eu/kanade/presentation/components/TimelineTimeTest.kt
+ create mode 100644 presentation-core/src/main/java/tachiyomi/presentation/core/components/TimelinePanoramaGrid.kt
+ create mode 100644 presentation-core/src/test/java/tachiyomi/presentation/core/components/TimelinePanoramaGridTest.kt
+
+diff --git a/app/src/main/java/eu/kanade/presentation/components/TimelineActionsRow.kt b/app/src/main/java/eu/kanade/presentation/components/TimelineActionsRow.kt
+new file mode 100644
+index 000000000..ba787ab61
+--- /dev/null
++++ b/app/src/main/java/eu/kanade/presentation/components/TimelineActionsRow.kt
+@@ -0,0 +1,42 @@
++package eu.kanade.presentation.components
++
++import androidx.compose.foundation.layout.Row
++import androidx.compose.foundation.layout.RowScope
++import androidx.compose.foundation.layout.fillMaxWidth
++import androidx.compose.foundation.layout.height
++import androidx.compose.foundation.layout.padding
++import androidx.compose.foundation.layout.widthIn
++import androidx.compose.material3.LocalMinimumInteractiveComponentSize
++import androidx.compose.material3.MaterialTheme
++import androidx.compose.material3.Text
++import androidx.compose.runtime.Composable
++import androidx.compose.runtime.CompositionLocalProvider
++import androidx.compose.ui.Alignment
++import androidx.compose.ui.Modifier
++import androidx.compose.ui.text.font.FontFamily
++import androidx.compose.ui.unit.dp
++import androidx.compose.ui.unit.sp
++
++/** Fixed footer height used by timeline geometry; five clock digits precede compact actions. */
++@Composable
++internal fun TimelineActionsRow(time: String, actions: @Composable RowScope.() -> Unit) {
++    CompositionLocalProvider(LocalMinimumInteractiveComponentSize provides 28.dp) {
++        Row(
++            Modifier.fillMaxWidth().height(36.dp).padding(horizontal = 4.dp),
++            verticalAlignment = Alignment.CenterVertically,
++        ) {
++            Text(
++                text = time,
++                modifier = Modifier.weight(1f).widthIn(min = 44.dp),
++                maxLines = 1,
++                softWrap = false,
++                style = MaterialTheme.typography.labelSmall.copy(
++                    fontFamily = FontFamily.Monospace,
++                    fontSize = 11.sp,
++                    letterSpacing = 0.sp,
++                ),
++            )
++            actions()
++        }
++    }
++}
+diff --git a/app/src/main/java/eu/kanade/presentation/components/TimelineCard.kt b/app/src/main/java/eu/kanade/presentation/components/TimelineCard.kt
+index b74df2902..b7cc46a59 100644
+--- a/app/src/main/java/eu/kanade/presentation/components/TimelineCard.kt
++++ b/app/src/main/java/eu/kanade/presentation/components/TimelineCard.kt
+@@ -34,7 +34,8 @@ internal fun TimelineCover(data: CoverData, mode: TimelineDisplayMode, modifier:
+     val ratio = rememberSaveable(data.mangaId) {
+         PanoramaCoverShapes.get(data.mangaId) ?: PanoramaCoverShapes.committedRatioOrNull(data.mangaId) ?: 1.5f
+     }
+-    val shape = if (mode == TimelineDisplayMode.Panorama && ratio <= 0.75f) MangaCover.Panorama else MangaCover.Book
++    val wide = LocalTimelineCoverWide.current ?: (ratio <= 0.75f)
++    val shape = if (mode == TimelineDisplayMode.Panorama && wide) MangaCover.Panorama else MangaCover.Book
+     shape(
+         data = data,
+         modifier = modifier,
+diff --git a/app/src/main/java/eu/kanade/presentation/components/TimelineLayout.kt b/app/src/main/java/eu/kanade/presentation/components/TimelineLayout.kt
+new file mode 100644
+index 000000000..97aadf194
+--- /dev/null
++++ b/app/src/main/java/eu/kanade/presentation/components/TimelineLayout.kt
+@@ -0,0 +1,98 @@
++package eu.kanade.presentation.components
++
++import androidx.compose.foundation.layout.BoxWithConstraints
++import androidx.compose.foundation.layout.PaddingValues
++import androidx.compose.foundation.layout.fillMaxSize
++import androidx.compose.runtime.Composable
++import androidx.compose.runtime.CompositionLocalProvider
++import androidx.compose.runtime.compositionLocalOf
++import androidx.compose.runtime.remember
++import androidx.compose.ui.Modifier
++import androidx.compose.ui.platform.LocalDensity
++import androidx.compose.ui.unit.Dp
++import androidx.compose.ui.unit.dp
++import androidx.compose.ui.unit.sp
++import eu.kanade.presentation.library.components.LocalPanoramaGridSettled
++import eu.kanade.presentation.library.components.PanoramaCoverShapes
++import eu.kanade.presentation.library.components.PanoramaShapeMode
++import eu.kanade.presentation.library.components.TrackPanoramaCoverShapes
++import eu.kanade.presentation.library.components.panoramaAutoColumns
++import eu.kanade.presentation.library.components.panoramaCoverSpan
++import eu.kanade.presentation.library.components.rememberPanoramaGridSettled
++import eu.kanade.presentation.library.components.rememberPanoramaShapeModeState
++import tachiyomi.presentation.core.components.PanoramaColumns
++import tachiyomi.presentation.core.components.TimelineGrid
++import tachiyomi.presentation.core.components.TimelinePanoramaGrid
++import tachiyomi.presentation.core.components.rememberPanoramaMasonryState
++
++internal val LocalTimelineCoverWide = compositionLocalOf<Boolean?> { null }
++
++@Composable
++internal fun TimelineLayout(
++    count: Int,
++    key: (Int) -> Any,
++    fullLine: (Int) -> Boolean,
++    mangaIdAt: (Int) -> Long?,
++    display: TimelineDisplay,
++    minColumnWidth: Dp,
++    contentPadding: PaddingValues,
++    content: @Composable (Int) -> Unit,
++) {
++    if (display.mode != TimelineDisplayMode.Panorama) {
++        TimelineGrid(
++            count,
++            key,
++            fullLine,
++            if (display.mode == TimelineDisplayMode.List) 1 else display.columns,
++            minColumnWidth,
++            contentPadding,
++            content = content,
++        )
++        return
++    }
++    val state = rememberPanoramaMasonryState()
++    val shapeMode = rememberPanoramaShapeModeState()
++    val settled = rememberPanoramaGridSettled { state.isScrollInProgress }
++    CompositionLocalProvider(LocalPanoramaGridSettled provides settled) {
++        TrackPanoramaCoverShapes(count, shapeMode, mangaIdAt)
++        val mode = shapeMode.mode
++        // Keep the page's chosen bands stable as covers load; a shelf mode change refreshes them.
++        val bands = remember(mode) { HashMap<Long, Boolean>() }
++        fun wide(index: Int): Boolean {
++            val id = mangaIdAt(index) ?: return false
++            return bands.getOrPut(id) {
++                (PanoramaCoverShapes.get(id) ?: PanoramaCoverShapes.committedRatioOrNull(id))
++                    ?.let { it <= 0.75f } ?: (mode == PanoramaShapeMode.Wide)
++            }
++        }
++        val minLane = with(LocalDensity.current) { maxOf(140.dp, 88.dp + 44.sp.toDp()) }
++        val shelfColumns = panoramaAutoColumns(mode)
++        BoxWithConstraints(Modifier.fillMaxSize()) {
++            val fittedColumns = display.columns.coerceAtMost(
++                ((maxWidth - 2.dp) / (minLane + 3.dp)).toInt().coerceAtLeast(1),
++            )
++            val columns = when {
++                fittedColumns > 0 -> PanoramaColumns.Fixed(fittedColumns)
++                shelfColumns is PanoramaColumns.Shaped -> shelfColumns.copy(
++                    minLane = maxOf(shelfColumns.minLane, minLane),
++                )
++                shelfColumns is PanoramaColumns.Adaptive -> PanoramaColumns.Adaptive(
++                    maxOf(shelfColumns.minSize, minLane),
++                )
++                else -> shelfColumns
++            }
++            TimelinePanoramaGrid(
++                count = count,
++                key = key,
++                fullLine = fullLine,
++                wide = ::wide,
++                span = { panoramaCoverSpan(wide(it), mode) },
++                columns = columns,
++                contentPadding = contentPadding,
++                state = state,
++            ) { index ->
++                CompositionLocalProvider(LocalTimelineCoverWide provides wide(index)) { content(index) }
++            }
++        }
++    }
++}
+diff --git a/app/src/main/java/eu/kanade/presentation/components/TimelineTime.kt b/app/src/main/java/eu/kanade/presentation/components/TimelineTime.kt
+new file mode 100644
+index 000000000..1b85c13ef
+--- /dev/null
++++ b/app/src/main/java/eu/kanade/presentation/components/TimelineTime.kt
+@@ -0,0 +1,14 @@
++package eu.kanade.presentation.components
++
++import java.time.Instant
++import java.time.ZoneId
++import java.time.format.DateTimeFormatter
++import java.time.format.DecimalStyle
++import java.util.Locale
++
++private val timelineTimeFormatter = DateTimeFormatter.ofPattern("HH:mm", Locale.ROOT)
++    .withDecimalStyle(DecimalStyle.STANDARD)
++
++/** Local 24-hour time with ASCII digits, independent of the system's 12-hour/locale format. */
++internal fun timelineTime(epochMillis: Long?, zone: ZoneId = ZoneId.systemDefault()): String =
++    epochMillis?.let { timelineTimeFormatter.format(Instant.ofEpochMilli(it).atZone(zone)) }.orEmpty()
+diff --git a/app/src/main/java/eu/kanade/presentation/history/HistoryScreen.kt b/app/src/main/java/eu/kanade/presentation/history/HistoryScreen.kt
+index a8746d0e9..b4f9d392e 100644
+--- a/app/src/main/java/eu/kanade/presentation/history/HistoryScreen.kt
++++ b/app/src/main/java/eu/kanade/presentation/history/HistoryScreen.kt
+@@ -16,7 +16,7 @@ import eu.kanade.presentation.components.AppBarTitle
+ import eu.kanade.presentation.components.SearchToolbar
+ import eu.kanade.presentation.components.TimelineDisplay
+ import eu.kanade.presentation.components.TimelineDisplayAction
+-import eu.kanade.presentation.components.TimelineDisplayMode
++import eu.kanade.presentation.components.TimelineLayout
+ import eu.kanade.presentation.components.relativeDateText
+ import eu.kanade.presentation.components.rememberTimelineDisplay
+ import eu.kanade.presentation.history.components.HistoryItem
+@@ -29,7 +29,6 @@ import mihon.icons.materialsymbols.rounded.DeleteSweep
+ import tachiyomi.domain.history.model.HistoryWithRelations
+ import tachiyomi.i18n.MR
+ import tachiyomi.presentation.core.components.ListGroupHeader
+-import tachiyomi.presentation.core.components.TimelineGrid
+ import tachiyomi.presentation.core.components.material.Scaffold
+ import tachiyomi.presentation.core.components.material.rememberBrowsingTopAppBarScrollBehavior
+ import tachiyomi.presentation.core.i18n.stringResource
+@@ -114,7 +113,7 @@ private fun HistoryScreenContent(
+     onClickDelete: (HistoryWithRelations) -> Unit,
+     onClickFavorite: (HistoryWithRelations) -> Unit,
+ ) {
+-    TimelineGrid(
++    TimelineLayout(
+         count = history.size,
+         key = { index ->
+             when (val item = history[index]) {
+@@ -123,7 +122,8 @@ private fun HistoryScreenContent(
+             }
+         },
+         fullLine = { history[it] is HistoryUiModel.Header },
+-        columns = if (display.mode == TimelineDisplayMode.List) 1 else display.columns,
++        mangaIdAt = { (history[it] as? HistoryUiModel.Item)?.item?.mangaId },
++        display = display,
+         minColumnWidth = maxOf(140.dp, autoColumnMinWidth(LocalConfiguration.current.screenWidthDp.dp)),
+         contentPadding = contentPadding,
+     ) { index ->
+diff --git a/app/src/main/java/eu/kanade/presentation/history/components/HistoryItem.kt b/app/src/main/java/eu/kanade/presentation/history/components/HistoryItem.kt
+index 960dcf709..996de439d 100644
+--- a/app/src/main/java/eu/kanade/presentation/history/components/HistoryItem.kt
++++ b/app/src/main/java/eu/kanade/presentation/history/components/HistoryItem.kt
+@@ -1,28 +1,21 @@
+ package eu.kanade.presentation.history.components
+ 
+-import androidx.compose.foundation.layout.Row
+-import androidx.compose.foundation.layout.fillMaxWidth
+-import androidx.compose.foundation.layout.padding
+ import androidx.compose.foundation.layout.size
+ import androidx.compose.material3.Icon
+ import androidx.compose.material3.IconButton
+-import androidx.compose.material3.LocalMinimumInteractiveComponentSize
+-import androidx.compose.material3.MaterialTheme
+-import androidx.compose.material3.Text
+ import androidx.compose.runtime.Composable
+-import androidx.compose.runtime.CompositionLocalProvider
+ import androidx.compose.runtime.remember
+-import androidx.compose.ui.Alignment
+ import androidx.compose.ui.Modifier
+-import androidx.compose.ui.text.style.TextOverflow
+ import androidx.compose.ui.unit.dp
++import eu.kanade.presentation.components.TimelineActionsRow
+ import eu.kanade.presentation.components.TimelineCard
+ import eu.kanade.presentation.components.TimelineDisplayMode
++import eu.kanade.presentation.components.timelineTime
+ import eu.kanade.presentation.util.formatChapterNumber
+-import eu.kanade.tachiyomi.util.lang.toTimestampString
+ import mihon.icons.materialsymbols.MaterialSymbols
+ import mihon.icons.materialsymbols.rounded.Delete
+ import mihon.icons.materialsymbols.rounded.Favorite
++import mihon.icons.materialsymbols.roundedfilled.Favorite
+ import mihon.icons.materialsymbols.roundedfilled.PlayArrow
+ import tachiyomi.domain.history.model.HistoryWithRelations
+ import tachiyomi.i18n.MR
+@@ -38,7 +31,7 @@ internal fun HistoryItem(
+     onClickFavorite: () -> Unit,
+     modifier: Modifier = Modifier,
+ ) {
+-    val readAt = remember(history.readAt) { history.readAt?.toTimestampString() ?: "" }
++    val readAt = remember(history.readAt) { timelineTime(history.readAt?.toEpochMilliseconds()) }
+     val chapter = if (history.chapterNumber > -1) {
+         stringResource(MR.strings.recent_manga_time, formatChapterNumber(history.chapterNumber), "").trim()
+     } else {
+@@ -53,36 +46,33 @@ internal fun HistoryItem(
+         onClick = onClickCover,
+ 
+     ) {
+-        CompositionLocalProvider(LocalMinimumInteractiveComponentSize provides 32.dp) {
+-            Row(Modifier.fillMaxWidth().padding(start = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+-                Text(
+-                    readAt,
+-                    Modifier.weight(1f),
+-                    maxLines = 1,
+-                    overflow = TextOverflow.Ellipsis,
+-                    style = MaterialTheme.typography.labelSmall,
++        TimelineActionsRow(readAt) {
++            IconButton(onClick = onClickResume, modifier = Modifier.size(width = 28.dp, height = 36.dp)) {
++                Icon(
++                    MaterialSymbols.RoundedFilled.PlayArrow,
++                    stringResource(MR.strings.action_resume),
++                    Modifier.size(18.dp),
+                 )
+-                IconButton(onClick = onClickResume, modifier = Modifier.size(width = 32.dp, height = 40.dp)) {
+-                    Icon(
+-                        MaterialSymbols.RoundedFilled.PlayArrow,
+-                        stringResource(MR.strings.action_resume),
+-                        Modifier.size(20.dp),
+-                    )
+-                }
+-                IconButton(
+-                    onClick = onClickFavorite,
+-                    enabled = !history.coverData.isMangaFavorite,
+-                    modifier = Modifier.size(width = 32.dp, height = 40.dp),
+-                ) {
+-                    Icon(
+-                        MaterialSymbols.Rounded.Favorite,
+-                        stringResource(MR.strings.add_to_library),
+-                        Modifier.size(20.dp),
+-                    )
+-                }
+-                IconButton(onClick = onClickDelete, modifier = Modifier.size(width = 32.dp, height = 40.dp)) {
+-                    Icon(MaterialSymbols.Rounded.Delete, stringResource(MR.strings.action_delete), Modifier.size(20.dp))
+-                }
++            }
++            IconButton(
++                onClick = onClickFavorite,
++                enabled = !history.coverData.isMangaFavorite,
++                modifier = Modifier.size(width = 28.dp, height = 36.dp),
++            ) {
++                Icon(
++                    if (history.coverData.isMangaFavorite) {
++                        MaterialSymbols.RoundedFilled.Favorite
++                    } else {
++                        MaterialSymbols.Rounded.Favorite
++                    },
++                    stringResource(
++                        if (history.coverData.isMangaFavorite) MR.strings.in_library else MR.strings.add_to_library,
++                    ),
++                    Modifier.size(18.dp),
++                )
++            }
++            IconButton(onClick = onClickDelete, modifier = Modifier.size(width = 28.dp, height = 36.dp)) {
++                Icon(MaterialSymbols.Rounded.Delete, stringResource(MR.strings.action_delete), Modifier.size(18.dp))
+             }
+         }
+     }
+diff --git a/app/src/main/java/eu/kanade/presentation/updates/UpdatesScreen.kt b/app/src/main/java/eu/kanade/presentation/updates/UpdatesScreen.kt
+index a01430d09..d1fbb6e87 100644
+--- a/app/src/main/java/eu/kanade/presentation/updates/UpdatesScreen.kt
++++ b/app/src/main/java/eu/kanade/presentation/updates/UpdatesScreen.kt
+@@ -25,7 +25,7 @@ import eu.kanade.presentation.components.AppBar
+ import eu.kanade.presentation.components.AppBarActions
+ import eu.kanade.presentation.components.TimelineDisplay
+ import eu.kanade.presentation.components.TimelineDisplayAction
+-import eu.kanade.presentation.components.TimelineDisplayMode
++import eu.kanade.presentation.components.TimelineLayout
+ import eu.kanade.presentation.components.rememberTimelineDisplay
+ import eu.kanade.presentation.library.components.autoColumnMinWidth
+ import eu.kanade.presentation.manga.components.ChapterDownloadAction
+@@ -43,7 +43,6 @@ import mihon.icons.materialsymbols.rounded.FlipToBack
+ import mihon.icons.materialsymbols.rounded.Refresh
+ import mihon.icons.materialsymbols.rounded.SelectAll
+ import tachiyomi.i18n.MR
+-import tachiyomi.presentation.core.components.TimelineGrid
+ import tachiyomi.presentation.core.components.material.PullRefresh
+ import tachiyomi.presentation.core.components.material.Scaffold
+ import tachiyomi.presentation.core.components.material.rememberBrowsingTopAppBarScrollBehavior
+@@ -146,7 +145,7 @@ fun UpdateScreen(
+                         }
+                     } else {
+                         val models = remember(state.items) { state.getUiModel() }
+-                        TimelineGrid(
++                        TimelineLayout(
+                             count = models.size + 1,
+                             key = { index ->
+                                 if (index ==
+@@ -161,7 +160,16 @@ fun UpdateScreen(
+                                 }
+                             },
+                             fullLine = { it == 0 || models[it - 1] is UpdatesUiModel.Header },
+-                            columns = if (display.mode == TimelineDisplayMode.List) 1 else display.columns,
++                            mangaIdAt = {
++                                if (it ==
++                                    0
++                                ) {
++                                    null
++                                } else {
++                                    (models[it - 1] as? UpdatesUiModel.Item)?.item?.update?.mangaId
++                                }
++                            },
++                            display = display,
+                             minColumnWidth = maxOf(
+                                 140.dp,
+                                 autoColumnMinWidth(LocalConfiguration.current.screenWidthDp.dp),
+diff --git a/app/src/main/java/eu/kanade/presentation/updates/UpdatesUiItem.kt b/app/src/main/java/eu/kanade/presentation/updates/UpdatesUiItem.kt
+index 312f9490a..a07660f55 100644
+--- a/app/src/main/java/eu/kanade/presentation/updates/UpdatesUiItem.kt
++++ b/app/src/main/java/eu/kanade/presentation/updates/UpdatesUiItem.kt
+@@ -16,11 +16,9 @@ import androidx.compose.foundation.lazy.LazyListScope
+ import androidx.compose.material3.Icon
+ import androidx.compose.material3.IconButton
+ import androidx.compose.material3.LocalContentColor
+-import androidx.compose.material3.LocalMinimumInteractiveComponentSize
+ import androidx.compose.material3.MaterialTheme
+ import androidx.compose.material3.Text
+ import androidx.compose.runtime.Composable
+-import androidx.compose.runtime.CompositionLocalProvider
+ import androidx.compose.runtime.getValue
+ import androidx.compose.runtime.mutableIntStateOf
+ import androidx.compose.runtime.remember
+@@ -33,9 +31,11 @@ import androidx.compose.ui.platform.LocalHapticFeedback
+ import androidx.compose.ui.text.font.FontStyle
+ import androidx.compose.ui.text.style.TextOverflow
+ import androidx.compose.ui.unit.dp
++import eu.kanade.presentation.components.TimelineActionsRow
+ import eu.kanade.presentation.components.TimelineCard
+ import eu.kanade.presentation.components.TimelineDisplayMode
+ import eu.kanade.presentation.components.relativeDateText
++import eu.kanade.presentation.components.timelineTime
+ import eu.kanade.presentation.manga.components.ChapterDownloadAction
+ import eu.kanade.presentation.manga.components.ChapterDownloadIndicator
+ import eu.kanade.presentation.manga.components.DotSeparatorText
+@@ -43,7 +43,6 @@ import eu.kanade.presentation.manga.components.MangaCover
+ import eu.kanade.presentation.util.relativeTimeSpanString
+ import eu.kanade.tachiyomi.data.download.model.Download
+ import eu.kanade.tachiyomi.ui.updates.UpdatesItem
+-import eu.kanade.tachiyomi.util.lang.toTimestampString
+ import mihon.icons.materialsymbols.MaterialSymbols
+ import mihon.icons.materialsymbols.roundedfilled.Bookmark
+ import mihon.icons.materialsymbols.roundedfilled.Circle
+@@ -180,31 +179,23 @@ private fun UpdatesUiItem(
+             }
+         },
+     ) {
+-        CompositionLocalProvider(LocalMinimumInteractiveComponentSize provides 32.dp) {
+-            Row(Modifier.fillMaxWidth().padding(start = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+-                Text(
+-                    update.dateFetch.toTimestampString(),
+-                    Modifier.weight(1f),
+-                    maxLines = 1,
+-                    overflow = TextOverflow.Ellipsis,
+-                    style = MaterialTheme.typography.labelSmall,
++        TimelineActionsRow(timelineTime(update.dateFetch.toEpochMilliseconds())) {
++            IconButton(onClick = onClick, modifier = Modifier.size(width = 28.dp, height = 36.dp)) {
++                Icon(
++                    MaterialSymbols.RoundedFilled.PlayArrow,
++                    stringResource(MR.strings.action_resume),
++                    Modifier.size(18.dp),
+                 )
+-                IconButton(onClick = onClick, modifier = Modifier.size(width = 32.dp, height = 40.dp)) {
+-                    Icon(
+-                        MaterialSymbols.RoundedFilled.PlayArrow,
+-                        stringResource(MR.strings.action_resume),
+-                        Modifier.size(20.dp),
+-                    )
+-                }
++            }
+ 
+-                ChapterDownloadIndicator(
+-                    enabled = onDownloadChapter != null,
+-                    downloadStateProvider = downloadStateProvider,
+-                    downloadProgressProvider = downloadProgressProvider,
+-                    onClick = { onDownloadChapter?.invoke(it) },
++            ChapterDownloadIndicator(
++                modifier = Modifier.size(width = 28.dp, height = 36.dp),
++                enabled = onDownloadChapter != null,
++                downloadStateProvider = downloadStateProvider,
++                downloadProgressProvider = downloadProgressProvider,
++                onClick = { onDownloadChapter?.invoke(it) },
+ 
+-                )
+-            }
++            )
+         }
+     }
+ }
+diff --git a/app/src/test/java/eu/kanade/presentation/components/TimelineTimeTest.kt b/app/src/test/java/eu/kanade/presentation/components/TimelineTimeTest.kt
+new file mode 100644
+index 000000000..e61dd969f
+--- /dev/null
++++ b/app/src/test/java/eu/kanade/presentation/components/TimelineTimeTest.kt
+@@ -0,0 +1,25 @@
++package eu.kanade.presentation.components
++
++import org.junit.jupiter.api.Assertions.assertEquals
++import org.junit.jupiter.api.Test
++import java.time.Instant
++import java.time.ZoneId
++import java.util.Locale
++
++class TimelineTimeTest {
++    @Test
++    fun `midnight and afternoon remain ASCII 24 hour time in AM PM and Arabic locales`() {
++        val previous = Locale.getDefault()
++        try {
++            for (locale in listOf(Locale.US, Locale.forLanguageTag("ar-EG"))) {
++                Locale.setDefault(locale)
++                val zone = ZoneId.of("UTC")
++                assertEquals("00:00", timelineTime(Instant.parse("2026-10-26T00:00:00Z").toEpochMilli(), zone))
++                assertEquals("13:05", timelineTime(Instant.parse("2026-10-26T13:05:00Z").toEpochMilli(), zone))
++                assertEquals("", timelineTime(null, zone))
++            }
++        } finally {
++            Locale.setDefault(previous)
++        }
++    }
++}
+diff --git a/presentation-core/src/main/java/tachiyomi/presentation/core/components/PanoramaMasonry.kt b/presentation-core/src/main/java/tachiyomi/presentation/core/components/PanoramaMasonry.kt
+index 62956d7a9..888a34a82 100644
+--- a/presentation-core/src/main/java/tachiyomi/presentation/core/components/PanoramaMasonry.kt
++++ b/presentation-core/src/main/java/tachiyomi/presentation/core/components/PanoramaMasonry.kt
+@@ -170,6 +170,9 @@ sealed interface PanoramaCellHeight {
+     /** Panorama cover. [wide] is the committed shape (height/width <= 0.75). */
+     data class Cover(val wide: Boolean, val titleBelow: Boolean) : PanoramaCellHeight
+ 
++    /** Full-width cover plus a fixed action row; never composes offscreen timeline records. */
++    data class TimelineCover(val wide: Boolean, val footerHeight: Dp) : PanoramaCellHeight
++
+     data class Fixed(val height: Dp) : PanoramaCellHeight
+ 
+     /** Full-line rows whose height is not known up front (search bar, section title). */
+@@ -861,6 +864,8 @@ private fun LazyLayoutMeasureScope.measureMasonry(
+                 titlePaddingPx = titlePadding,
+                 titleLineHeightPx = titleLine,
+             )
++            is PanoramaCellHeight.TimelineCover ->
++                (widthPx * if (spec.wide) 2f / 3f else 1.5f).roundToInt() + spec.footerHeight.roundToPx()
+             is PanoramaCellHeight.Fixed -> spec.height.roundToPx()
+             PanoramaCellHeight.Measure -> {
+                 measuredPlaceables[index]?.let { places ->
+@@ -880,7 +885,11 @@ private fun LazyLayoutMeasureScope.measureMasonry(
+     val previousKeys = state.lastKeys
+     val coverWideOf: (Int) -> Boolean? = { index ->
+         val spec = intervals.heightAt(index)
+-        if (spec is PanoramaCellHeight.Cover) spec.wide else null
++        when (spec) {
++            is PanoramaCellHeight.Cover -> spec.wide
++            is PanoramaCellHeight.TimelineCover -> spec.wide
++            else -> null
++        }
+     }
+     // Harmony: scrollOffset already includes the fling. The previous frame's last visible index
+     // can sit above cells that are on screen now, so the freeze line is recomputed from this offset.
+diff --git a/presentation-core/src/main/java/tachiyomi/presentation/core/components/TimelinePanoramaGrid.kt b/presentation-core/src/main/java/tachiyomi/presentation/core/components/TimelinePanoramaGrid.kt
+new file mode 100644
+index 000000000..ace3156e2
+--- /dev/null
++++ b/presentation-core/src/main/java/tachiyomi/presentation/core/components/TimelinePanoramaGrid.kt
+@@ -0,0 +1,49 @@
++package tachiyomi.presentation.core.components
++
++import androidx.compose.foundation.layout.PaddingValues
++import androidx.compose.foundation.layout.fillMaxSize
++import androidx.compose.runtime.Composable
++import androidx.compose.ui.Modifier
++import androidx.compose.ui.platform.LocalDensity
++import androidx.compose.ui.unit.dp
++import androidx.compose.ui.unit.sp
++import tachiyomi.presentation.core.util.plus
++
++/** Shelf masonry spans, with arithmetic heights for both covers and date rows. */
++@Composable
++fun TimelinePanoramaGrid(
++    count: Int,
++    key: (Int) -> Any,
++    fullLine: (Int) -> Boolean,
++    wide: (Int) -> Boolean,
++    span: (Int) -> PanoramaSpan,
++    columns: PanoramaColumns,
++    contentPadding: PaddingValues,
++    modifier: Modifier = Modifier,
++    state: PanoramaMasonryState = rememberPanoramaMasonryState(),
++    content: @Composable (Int) -> Unit,
++) {
++    val headerHeight = with(LocalDensity.current) { 24.sp.toDp() + 16.dp }
++    FastScrollPanoramaMasonry(
++        columns = columns,
++        state = state,
++        modifier = modifier.fillMaxSize(),
++        contentPadding = contentPadding + PaddingValues(horizontal = 1.dp, vertical = 3.dp),
++        horizontalSpacing = 3.dp,
++        verticalSpacing = 3.dp,
++    ) {
++        items(
++            count = count,
++            key = key,
++            span = { if (fullLine(it)) PanoramaSpan.FullLine else span(it) },
++            height = {
++                if (fullLine(it)) {
++                    PanoramaCellHeight.Fixed(headerHeight)
++                } else {
++                    PanoramaCellHeight.TimelineCover(wide(it), 36.dp)
++                }
++            },
++            contentType = { if (fullLine(it)) "heading" else "card" },
++        ) { content(it) }
++    }
++}
+diff --git a/presentation-core/src/test/java/tachiyomi/presentation/core/components/TimelinePanoramaGridTest.kt b/presentation-core/src/test/java/tachiyomi/presentation/core/components/TimelinePanoramaGridTest.kt
+new file mode 100644
+index 000000000..2028cdb4e
+--- /dev/null
++++ b/presentation-core/src/test/java/tachiyomi/presentation/core/components/TimelinePanoramaGridTest.kt
+@@ -0,0 +1,131 @@
++package tachiyomi.presentation.core.components
++
++import androidx.compose.foundation.layout.Box
++import androidx.compose.foundation.layout.PaddingValues
++import androidx.compose.foundation.layout.fillMaxSize
++import androidx.compose.foundation.layout.height
++import androidx.compose.foundation.layout.width
++import androidx.compose.material3.MaterialTheme
++import androidx.compose.runtime.SideEffect
++import androidx.compose.runtime.getValue
++import androidx.compose.runtime.mutableIntStateOf
++import androidx.compose.runtime.mutableStateOf
++import androidx.compose.runtime.rememberCoroutineScope
++import androidx.compose.runtime.saveable.rememberSaveableStateHolder
++import androidx.compose.runtime.setValue
++import androidx.compose.ui.Modifier
++import androidx.compose.ui.layout.onGloballyPositioned
++import androidx.compose.ui.test.ExperimentalTestApi
++import androidx.compose.ui.test.v2.runComposeUiTest
++import androidx.compose.ui.unit.dp
++import kotlinx.coroutines.CoroutineScope
++import kotlinx.coroutines.launch
++import org.junit.Test
++import org.junit.jupiter.api.Assertions.assertTrue
++import org.junit.runner.RunWith
++import org.robolectric.RobolectricTestRunner
++import org.robolectric.annotation.Config
++import org.robolectric.annotation.GraphicsMode
++
++@OptIn(ExperimentalTestApi::class)
++@RunWith(RobolectricTestRunner::class)
++@GraphicsMode(GraphicsMode.Mode.LEGACY)
++@Config(sdk = [34])
++class TimelinePanoramaGridTest {
++    @Test
++    fun `wide records span two lanes without composing ten thousand covers or dates`() = runComposeUiTest {
++        val composed = mutableSetOf<Int>()
++        var wideWidth = 0
++        var tallWidth = 0
++        lateinit var state: PanoramaMasonryState
++        lateinit var scope: CoroutineScope
++        setContent {
++            MaterialTheme {
++                state = rememberPanoramaMasonryState()
++                scope = rememberCoroutineScope()
++                Box(Modifier.width(460.dp).height(640.dp)) {
++                    TimelinePanoramaGrid(
++                        count = 10000,
++                        key = { "record-$it" },
++                        fullLine = { it % 25 == 0 },
++                        wide = { it % 4 == 1 },
++                        span = { if (it % 4 == 1) PanoramaSpan.TwoLanesWhenRoomy else PanoramaSpan.SingleLane },
++                        columns = PanoramaColumns.Fixed(3),
++                        contentPadding = PaddingValues(),
++                        state = state,
++                    ) { index ->
++                        SideEffect { composed.add(index) }
++                        Box(
++                            Modifier.fillMaxSize().onGloballyPositioned {
++                                if (index == 1) wideWidth = it.size.width
++                                if (index == 2) tallWidth = it.size.width
++                            },
++                        )
++                    }
++                }
++            }
++        }
++        waitForIdle()
++        runOnIdle {
++            assertTrue(tallWidth > 0 && wideWidth >= tallWidth * 2, "Wide=$wideWidth tall=$tallWidth")
++            assertTrue(composed.size in 1..100, "Initial composition=${composed.size}")
++            scope.launch { state.scrollToItem(8000) }
++        }
++        waitForIdle()
++        runOnIdle {
++            assertTrue(state.firstVisibleItemIndex > 7900)
++            assertTrue(composed.size < 200, "Composed=${composed.size}, including headers")
++        }
++    }
++
++    @Test
++    fun `panorama return keeps the anchor through width changes and deleted history`() = runComposeUiTest {
++        var shown by mutableStateOf(true)
++        var expanded by mutableStateOf(false)
++        var count by mutableIntStateOf(10000)
++        lateinit var state: PanoramaMasonryState
++        lateinit var scope: CoroutineScope
++        setContent {
++            val holder = rememberSaveableStateHolder()
++            MaterialTheme {
++                scope = rememberCoroutineScope()
++                if (shown) {
++                    holder.SaveableStateProvider("panorama-history") {
++                        state = rememberPanoramaMasonryState()
++                        Box(Modifier.width(if (expanded) 700.dp else 460.dp).height(640.dp)) {
++                            TimelinePanoramaGrid(
++                                count,
++                                { "record-$it" },
++                                { it % 25 == 0 },
++                                { it % 4 == 1 },
++                                { if (it % 4 == 1) PanoramaSpan.TwoLanesWhenRoomy else PanoramaSpan.SingleLane },
++                                PanoramaColumns.Adaptive(140.dp),
++                                PaddingValues(),
++                                state = state,
++                            ) { Box(Modifier.fillMaxSize()) }
++                        }
++                    }
++                }
++            }
++        }
++        runOnIdle { scope.launch { state.scrollToItem(8000) } }
++        waitForIdle()
++        runOnIdle { shown = false }
++        waitForIdle()
++        runOnIdle {
++            shown = true
++            expanded = true
++        }
++        waitForIdle()
++        runOnIdle { assertTrue(state.firstVisibleItemIndex in 7900..8100) }
++        runOnIdle { shown = false }
++        waitForIdle()
++        runOnIdle {
++            count = 40
++            shown = true
++            expanded = false
++        }
++        waitForIdle()
++        runOnIdle { assertTrue(state.firstVisibleItemIndex in 0..39) }
++    }
++}
