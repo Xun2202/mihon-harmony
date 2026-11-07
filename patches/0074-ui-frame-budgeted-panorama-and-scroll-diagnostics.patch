@@ -1,0 +1,1277 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Xun2202 <98207886+Xun2202@users.noreply.github.com>
+Date: Sat, 7 Nov 2026 15:11:11 +0000
+Subject: [PATCH] perf(ui): defer panorama prefetch and gate scroller capture
+
+Shared core optimization with Anikku 0076. User preview.27 traces still show 40.68ms re-entry / 19.77ms masonry measurement and a 21.52ms fling frame. Measure/place only viewport cells and submit one approaching row to Compose frame-budgeted prefetch, cancelling stale requests. Stop the independent fast-scroller Haze source/effect when its thumb is hidden or disallowed. Record inclusive source and layout stages only when diagnostics are enabled. Preserve existing scrolling, anchors, corners, touch handling and glass defaults. Mihon additionally exports format4 arrival timestamps and bounded worst/recent work samples, retains phase consensus for repeated frame times, and provides an in-memory glass A/B switch restored when recording is disabled. Anikku retains its existing format1 recorder; no unrelated diagnostics or image toggles are ported.
+---
+ .../tachiyomi/util/system/HarmonyFramePerf.kt | 217 ++++++++++++++++--
+ .../util/system/HarmonyPerfToggles.kt         |   4 +-
+ .../util/system/HarmonyFramePerfTest.kt       | 116 +++++++++-
+ .../core/components/FastScrollerGlass.kt      |   9 +-
+ .../core/components/PanoramaFrameCounters.kt  |  63 +++++
+ .../core/components/PanoramaMasonry.kt        |  34 ++-
+ .../components/PanoramaMasonryPrefetch.kt     |  71 ++++++
+ .../components/ScrollSourceDiagnostics.kt     |  35 +++
+ .../core/components/VerticalFastScroller.kt   |  93 ++++++--
+ .../core/components/material/BrowsingGlass.kt |   9 +-
+ .../components/material/CapsuleRefraction.kt  |   2 +
+ .../NavigationChromeMasonryWorkTest.kt        | 110 +++++++++
+ 12 files changed, 711 insertions(+), 52 deletions(-)
+ create mode 100644 presentation-core/src/main/java/tachiyomi/presentation/core/components/PanoramaMasonryPrefetch.kt
+ create mode 100644 presentation-core/src/main/java/tachiyomi/presentation/core/components/ScrollSourceDiagnostics.kt
+ create mode 100644 presentation-core/src/test/java/tachiyomi/presentation/core/components/NavigationChromeMasonryWorkTest.kt
+
+diff --git a/app/src/main/java/eu/kanade/tachiyomi/util/system/HarmonyFramePerf.kt b/app/src/main/java/eu/kanade/tachiyomi/util/system/HarmonyFramePerf.kt
+index 9556ecbfd..47b1500e4 100644
+--- a/app/src/main/java/eu/kanade/tachiyomi/util/system/HarmonyFramePerf.kt
++++ b/app/src/main/java/eu/kanade/tachiyomi/util/system/HarmonyFramePerf.kt
+@@ -66,6 +66,7 @@ import kotlinx.coroutines.launch
+ import kotlinx.coroutines.withContext
+ import tachiyomi.presentation.core.components.PanoramaFrameCounters
+ import tachiyomi.presentation.core.components.PanoramaScrollTrace
++import tachiyomi.presentation.core.components.ScrollGlassDiagnostics
+ import java.text.SimpleDateFormat
+ import java.util.Date
+ import java.util.Locale
+@@ -104,7 +105,7 @@ object HarmonyFramePerf {
+     private const val CPU_SAMPLE_STRIDE = 4
+     private const val COIL_COUNTERS = 7
+ 
+-    /** About 1.2 MB, allocated on the first attach and dropped when the switch is turned off. */
++    /** About 1.8 MB, allocated on the first attach and dropped when the switch is turned off. */
+     private class Buffers {
+         val frames = PerfRing(FRAME_CAPACITY, PerfReport.FRAME_WIDTH)
+         val ticks = PerfRing(TICK_CAPACITY, PerfReport.TICK_WIDTH)
+@@ -124,6 +125,7 @@ object HarmonyFramePerf {
+     private var metricsListener: Window.OnFrameMetricsAvailableListener? = null
+     private var ticking = false
+     private var lastTickNanos = 0L
++    private var lastArrivalNanos = 0L
+ 
+     // Written on the main thread, read on the sampler thread.
+     @Volatile private var handler: Handler? = null
+@@ -293,6 +295,8 @@ object HarmonyFramePerf {
+         samplerHandler.post(sampler)
+         samplerHandler.postDelayed(firstFrameCheck, FIRST_FRAME_TIMEOUT_MS)
+         lastTickNanos = 0L
++        lastArrivalNanos = 0L
++        PanoramaFrameCounters.enabled = true
+         PanoramaFrameCounters.reset()
+         ticking = true
+         Choreographer.getInstance().postFrameCallback(tickCallback)
+@@ -302,6 +306,8 @@ object HarmonyFramePerf {
+     }
+ 
+     private fun detach() {
++        PanoramaFrameCounters.enabled = false
++        PanoramaFrameCounters.reset()
+         active = false
+         val attached = window ?: return
+         metricsListener?.let { listener -> runCatching { attached.removeOnFrameMetricsAvailableListener(listener) } }
+@@ -322,6 +328,7 @@ object HarmonyFramePerf {
+     }
+ 
+     private fun clear() {
++        ScrollGlassDiagnostics.enabled = true
+         buffers = null
+         startedWallMs = 0L
+         startedNanos = 0L
+@@ -333,6 +340,9 @@ object HarmonyFramePerf {
+ 
+     private fun onTick(frameTimeNanos: Long) {
+         if (!ticking) return
++        val arrival = System.nanoTime()
++        val previousArrival = lastArrivalNanos
++        lastArrivalNanos = arrival
+         val previous = lastTickNanos
+         lastTickNanos = frameTimeNanos
+         val ticks = buffers?.ticks ?: return
+@@ -343,8 +353,24 @@ object HarmonyFramePerf {
+                 ticks[last + PerfReport.T_MEASURES] = PanoramaFrameCounters.measureCount.toLong()
+                 ticks[last + PerfReport.T_MEASURE_NS] = PanoramaFrameCounters.measureNanos
+                 ticks[last + PerfReport.T_COMPOSED] = PanoramaFrameCounters.composedCells.toLong()
++                // Include sources attached after the preceding callback (for example reveal).
++                ticks[last + PerfReport.T_NAV_ACTIVE] = PanoramaFrameCounters.navigationSources.toLong()
++                ticks[last + PerfReport.T_SCROLLER_ACTIVE] = PanoramaFrameCounters.scrollerSources.toLong()
++                ticks[last + PerfReport.T_NAV_NS] = PanoramaFrameCounters.navigationDrawNanos
++                ticks[last + PerfReport.T_SCROLLER_NS] = PanoramaFrameCounters.scrollerDrawNanos
++                ticks[last + PerfReport.T_PLAN_NS] = PanoramaFrameCounters.planNanos
++                ticks[last + PerfReport.T_CELLS_NS] = PanoramaFrameCounters.cellsNanos
++                ticks[last + PerfReport.T_VISIBLE] = PanoramaFrameCounters.visibleCells.toLong()
++                ticks[last + PerfReport.T_PREFETCH] = PanoramaFrameCounters.prefetchCells.toLong()
++                ticks[last + PerfReport.T_SCANNED] = PanoramaFrameCounters.scannedRects.toLong()
+             }
+             val row = ticks.appendRow()
++            // Ring slots are reused; clear all work columns, not only the old six columns.
++            for (column in 0 until PerfReport.TICK_WIDTH) ticks[row + column] = 0L
++            ticks[row + PerfReport.T_ARRIVAL] = arrival
++            ticks[row + PerfReport.T_ARRIVAL_INTERVAL] = if (previousArrival == 0L) 0L else arrival - previousArrival
++            ticks[row + PerfReport.T_NAV_ACTIVE] = PanoramaFrameCounters.navigationSources.toLong()
++            ticks[row + PerfReport.T_SCROLLER_ACTIVE] = PanoramaFrameCounters.scrollerSources.toLong()
+             ticks[row + PerfReport.T_TIME] = frameTimeNanos
+             ticks[row + PerfReport.T_INTERVAL] = if (previous == 0L) 0L else frameTimeNanos - previous
+             ticks[row + PerfReport.T_PHASE] = PanoramaScrollTrace.phase.toLong()
+@@ -735,6 +761,7 @@ fun HarmonyFramePerfButton() {
+     val crossfade = HarmonyPerfToggles.coverCrossfade
+     val hardware = HarmonyPerfToggles.coverHardware
+     val prefetch = HarmonyPerfToggles.prefetch
++    val glass = ScrollGlassDiagnostics.enabled
+     fun exportReport() {
+         val activity = context.findActivity() ?: return
+         PanoramaScrollTrace.log(0, "mark user")
+@@ -778,6 +805,13 @@ fun HarmonyFramePerfButton() {
+         ) {
+             Text(text = "记录", color = Color.White, fontSize = 12.sp)
+             DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
++                DropdownMenuItem(
++                    text = { Text(text = "玻璃采样：${if (glass) "开" else "关"}（诊断）") },
++                    onClick = {
++                        ScrollGlassDiagnostics.enabled = !glass
++                        markToggles()
++                    },
++                )
+                 DropdownMenuItem(
+                     text = { Text(text = "封面淡入：${if (crossfade) "开" else "关"}") },
+                     onClick = {
+@@ -895,7 +929,8 @@ internal class PerfRing(private val capacity: Int, private val width: Int) {
+ }
+ 
+ class PerfTable(val rows: Int, val width: Int, val data: LongArray) {
+-    operator fun get(row: Int, column: Int): Long = data[row * width + column]
++    // Old six-column tick fixtures remain valid; missing diagnostics are unavailable.
++    operator fun get(row: Int, column: Int): Long = if (column < width) data[row * width + column] else -1L
+ 
+     companion object {
+         fun of(width: Int, vararg rows: LongArray): PerfTable {
+@@ -952,7 +987,18 @@ object PerfReport {
+     const val T_MEASURES = 3
+     const val T_MEASURE_NS = 4
+     const val T_COMPOSED = 5
+-    const val TICK_WIDTH = 6
++    const val T_ARRIVAL = 6
++    const val T_ARRIVAL_INTERVAL = 7
++    const val T_NAV_ACTIVE = 8
++    const val T_SCROLLER_ACTIVE = 9
++    const val T_NAV_NS = 10
++    const val T_SCROLLER_NS = 11
++    const val T_PLAN_NS = 12
++    const val T_CELLS_NS = 13
++    const val T_VISIBLE = 14
++    const val T_PREFETCH = 15
++    const val T_SCANNED = 16
++    const val TICK_WIDTH = 17
+ 
+     const val S_TIME = 0
+     const val S_GC = 1
+@@ -1052,7 +1098,8 @@ object PerfReport {
+     fun phaseName(phase: Int): String = when (phase) {
+         PanoramaScrollTrace.PHASE_DRAG -> "drag"
+         PanoramaScrollTrace.PHASE_FLING -> "fling"
+-        else -> "idle"
++        PanoramaScrollTrace.PHASE_IDLE -> "idle"
++        else -> "unknown"
+     }
+ 
+     /** Nearest-rank percentile of an ascending array; -1 when empty. */
+@@ -1120,17 +1167,44 @@ object PerfReport {
+         return merged
+     }
+ 
+-    /** Index of the tick nearest [time], or -1. */
+-    private fun nearestTick(ticks: PerfTable, time: Long): Int {
+-        if (ticks.rows == 0) return -1
+-        var low = 0
+-        var high = ticks.rows - 1
+-        while (low < high) {
+-            val mid = (low + high) ushr 1
+-            if (ticks[mid, T_TIME] < time) low = mid + 1 else high = mid
++    /** Built once per export: timestamp groups keep phase consensus separate from work identity. */
++    private class TickIndex(ticks: PerfTable) {
++        private val times = LongArray(ticks.rows)
++        private val workRows = IntArray(ticks.rows)
++        private val phases = IntArray(ticks.rows)
++        private var size = 0
++
++        init {
++            for (row in (0 until ticks.rows).sortedBy { ticks[it, T_TIME] }) {
++                val time = ticks[row, T_TIME]
++                val phase = ticks[row, T_PHASE].toInt()
++                if (size > 0 && times[size - 1] == time) {
++                    workRows[size - 1] = -1
++                    if (phases[size - 1] != phase) phases[size - 1] = -1
++                } else {
++                    times[size] = time
++                    workRows[size] = row
++                    phases[size] = phase
++                    size++
++                }
++            }
++        }
++
++        /** Binary nearest timestamp group. Duplicate groups may still have an unambiguous phase. */
++        fun nearest(time: Long): Int {
++            if (size == 0) return -1
++            var low = 0
++            var high = size - 1
++            while (low < high) {
++                val mid = (low + high) ushr 1
++                if (times[mid] < time) low = mid + 1 else high = mid
++            }
++            return if (low > 0 && abs(times[low - 1] - time) <= abs(times[low] - time)) low - 1 else low
+         }
+-        if (low > 0 && abs(ticks[low - 1, T_TIME] - time) <= abs(ticks[low, T_TIME] - time)) return low - 1
+-        return low
++
++        fun phase(group: Int): Int = if (group >= 0) phases[group] else -1
++
++        fun workRow(group: Int): Int = if (group >= 0) workRows[group] else -1
+     }
+ 
+     /** Vsync period in effect at [time], from the 500 ms samples. */
+@@ -1321,7 +1395,7 @@ object PerfReport {
+         val haveFrames = frames.rows > 0
+ 
+         out.appendLine("# ${header.appLabel} scroll performance log")
+-        out.appendLine("format: harmony-scroll-perf 3")
++        out.appendLine("format: harmony-scroll-perf 4")
+         out.appendLine("app_id: ${header.appId}")
+         out.appendLine("version: ${header.versionName} (${header.versionCode})")
+         out.appendLine("device: ${header.brand} / ${header.model}")
+@@ -1363,23 +1437,20 @@ object PerfReport {
+         out.appendLine()
+ 
+         val segments = segments(ticks)
++        val tickIndex = TickIndex(ticks)
+         val framePhase = IntArray(frames.rows)
+         val frameTick = IntArray(frames.rows)
+         val framePeriod = LongArray(frames.rows)
+         val frameJank = BooleanArray(frames.rows)
+         for (row in 0 until frames.rows) {
+             val vsync = frames[row, F_VSYNC]
+-            val tick = nearestTick(ticks, vsync)
++            val group = tickIndex.nearest(vsync)
++            val tick = tickIndex.workRow(group)
+             val period = periodAt(samples, vsync, fallbackRate)
+             framePeriod[row] = period
+             frameJank[row] = isJank(frames[row, F_TOTAL], frames[row, F_DEADLINE], period)
+-            if (tick >= 0) {
+-                framePhase[row] = ticks[tick, T_PHASE].toInt()
+-                frameTick[row] = if (abs(ticks[tick, T_TIME] - vsync) * 2 <= period) tick else -1
+-            } else {
+-                framePhase[row] = PanoramaScrollTrace.PHASE_IDLE
+-                frameTick[row] = -1
+-            }
++            framePhase[row] = tickIndex.phase(group)
++            frameTick[row] = if (tick >= 0 && abs(ticks[tick, T_TIME] - vsync) * 2 <= period) tick else -1
+         }
+ 
+         out.appendLine("## Summary by scroll segment")
+@@ -1419,6 +1490,7 @@ object PerfReport {
+             out.append(" idle_holes=").append(gap.idleHoles)
+             appendWork(out, work)
+             out.appendLine()
++            appendDiagnostics(out, "segment_${phaseName(segment.phase)}", ticks) { tickInSegment(ticks, it, segment) }
+             out.appendLine(
+                 stagesText(
+                     type = phaseName(segment.phase),
+@@ -1462,6 +1534,8 @@ object PerfReport {
+         }
+ 
+         out.appendLine("## Choreographer intervals")
++        out.appendLine("# frameTime intervals may repeat or reverse; long intervals are not visible dropped frames.")
++        out.appendLine("# arrival uses System.nanoTime at callback entry; first callback has no interval.")
+         out.appendLine(choreographerLine("all", ticks, samples, fallbackRate) { true })
+         for (phase in PHASES) {
+             out.appendLine(
+@@ -1474,6 +1548,8 @@ object PerfReport {
+ 
+         val recentFrom = input.nowNanos - RECENT_SECONDS * SECOND_NS
+         appendSeconds(out, input, clock, frames, ticks, framePeriod)
++        appendDiagnostics(out, "all", ticks) { true }
++        appendSlowWork(out, ticks, recentFrom, clock)
+         out.appendLine("## Last 30 s: jank frames")
+         out.appendLine(
+             "# columns: time phase total delay input animation layout draw sync command swap gpu deadline " +
+@@ -1847,6 +1923,9 @@ object PerfReport {
+         var second = startSec
+         while (second <= endSec) {
+             out.appendLine(secondLine(second, bySecond[second], frames, clock))
++            appendDiagnostics(out, "sec_${clock.second(second)}", ticks) {
++                clock.epochSecond(tickArrival(ticks, it)) == second
++            }
+             second++
+         }
+         out.appendLine()
+@@ -1976,15 +2055,103 @@ object PerfReport {
+     ): String {
+         val intervals = ArrayList<Long>()
+         var over = 0
++        var nonpositive = 0
++        val arrivals = ArrayList<Long>()
++        var callbackCount = 0
+         for (row in 0 until ticks.rows) {
++            if (!include(row)) continue
++            callbackCount++
++            val arrivalInterval = ticks[row, T_ARRIVAL_INTERVAL]
++            if (arrivalInterval > 0L) arrivals += arrivalInterval
++            if (ticks[row, T_INTERVAL] <= 0L && (arrivalInterval > 0L || row > 0)) nonpositive++
+             val interval = ticks[row, T_INTERVAL]
+-            if (interval <= 0 || !include(row)) continue
++            if (interval <= 0) continue
+             intervals += interval
+             if (interval * 2 > periodAt(samples, ticks[row, T_TIME], fallbackRate) * 3) over++
+         }
+         val sorted = intervals.toLongArray().also { it.sort() }
++        val arrivalSorted = arrivals.toLongArray().also { it.sort() }
+         return "choreographer scope=$scope ticks=${sorted.size} p50=${ms(percentile(sorted, 50.0))} " +
+-            "p90=${ms(percentile(sorted, 90.0))} max=${ms(sorted.lastOrNull() ?: -1L)} over_1_5x=$over"
++            "p90=${ms(percentile(sorted, 90.0))} max=${ms(sorted.lastOrNull() ?: -1L)} over_1_5x=$over" +
++            " callbacks=$callbackCount frame_time_nonpositive=$nonpositive arrival_intervals=${arrivalSorted.size}" +
++            " arrival_p50=${ms(percentile(arrivalSorted, 50.0))} arrival_p90=${ms(percentile(arrivalSorted, 90.0))}" +
++            " arrival_p99=${ms(percentile(arrivalSorted, 99.0))} arrival_max=${ms(arrivalSorted.lastOrNull() ?: -1L)}"
++    }
++
++    private val DIAGNOSTICS = listOf(
++        "nav_active" to T_NAV_ACTIVE, "scroller_active" to T_SCROLLER_ACTIVE,
++        "nav_ms" to T_NAV_NS, "scroller_ms" to T_SCROLLER_NS,
++        "plan_ms" to T_PLAN_NS, "cells_ms" to T_CELLS_NS,
++        "visible" to T_VISIBLE, "prefetch" to T_PREFETCH, "scanned" to T_SCANNED,
++    )
++
++    private fun tickArrival(ticks: PerfTable, row: Int): Long =
++        ticks[row, T_ARRIVAL].takeIf { it > 0L } ?: ticks[row, T_TIME]
++
++    private fun diagnosticValue(column: Int, value: Long): String =
++        if (column in T_NAV_NS..T_CELLS_NS) ms(value) else value.toString()
++
++    private fun appendDiagnostics(out: StringBuilder, scope: String, ticks: PerfTable, include: (Int) -> Boolean) {
++        out.append("work_diag scope=").append(scope)
++        val rows = (0 until ticks.rows).filter { include(it) }
++        val arrivals = rows.map { ticks[it, T_ARRIVAL_INTERVAL] }.filter { it > 0L }
++            .toLongArray().also { it.sort() }
++        out.append(" callbacks=").append(rows.size)
++        out.append(" frame_time_nonpositive=").append(
++            rows.count {
++                ticks[it, T_INTERVAL] <= 0L && (ticks[it, T_ARRIVAL_INTERVAL] > 0L || it > 0)
++            },
++        )
++        out.append(" arrival_p90=").append(ms(percentile(arrivals, 90.0)))
++        out.append(" arrival_max=").append(ms(arrivals.lastOrNull() ?: -1L))
++        for ((key, column) in DIAGNOSTICS) {
++            val values = rows.map { ticks[it, column] }
++                .filter { it >= 0L }.toLongArray().also { it.sort() }
++            // Active source counts describe lifetime, so report maximum rather than their sum.
++            if (column != T_NAV_ACTIVE && column != T_SCROLLER_ACTIVE) {
++                out.append(' ').append(key).append("_sum=")
++                    .append(diagnosticValue(column, if (values.isEmpty()) -1L else values.sum()))
++            }
++            out.append(' ').append(key).append("_p90=").append(diagnosticValue(column, percentile(values, 90.0)))
++            out.append(' ').append(key).append("_max=").append(diagnosticValue(column, values.lastOrNull() ?: -1L))
++        }
++        out.appendLine()
++    }
++
++    private fun appendSlowWork(out: StringBuilder, ticks: PerfTable, recentFrom: Long, clock: Clock) {
++        out.appendLine("## Last 30 s: slow work ticks (slowest 60 + latest 60, deduplicated, time order)")
++        out.appendLine("# measure/plan/cells/nav/scroller are inclusive wall ms and overlap; never add them.")
++        out.appendLine("# visible counts measured cells; prefetch counts new scheduled requests, not completed work.")
++        out.appendLine(
++            "# Work belongs to the callback's following frame; association is not a precise node root cause.",
++        )
++        fun longestWork(row: Int): Long = maxOf(
++            ticks[row, T_MEASURE_NS],
++            ticks[row, T_PLAN_NS],
++            ticks[row, T_CELLS_NS],
++            ticks[row, T_NAV_NS],
++            ticks[row, T_SCROLLER_NS],
++        )
++        val candidates = (0 until ticks.rows).filter {
++            tickArrival(ticks, it) >= recentFrom && longestWork(it) >= 4_000_000L
++        }
++        val slowest = candidates.sortedByDescending { longestWork(it) }.take(60)
++        val latest = candidates.sortedByDescending { tickArrival(ticks, it) }.take(60)
++        val selected = (slowest + latest).distinct().sortedBy { tickArrival(ticks, it) }
++        for (row in selected) {
++            out.append("slow_work ").append(clock.time(tickArrival(ticks, row)))
++            out.append(" phase=").append(phaseName(ticks[row, T_PHASE].toInt()))
++            out.append(" frame_interval_ms=").append(ms(ticks[row, T_INTERVAL]))
++            out.append(" arrival_interval_ms=").append(ms(ticks[row, T_ARRIVAL_INTERVAL]))
++            out.append(" measure_ms=").append(ms(ticks[row, T_MEASURE_NS]))
++            out.append(" composed=").append(ticks[row, T_COMPOSED])
++            for ((key, column) in DIAGNOSTICS) {
++                out.append(' ').append(key).append('=').append(diagnosticValue(column, ticks[row, column]))
++            }
++            out.appendLine()
++        }
++        if (selected.isEmpty()) out.appendLine("# none")
++        out.appendLine()
+     }
+ 
+     fun ms(nanos: Long): String = if (nanos < 0) "-1" else String.format(Locale.US, "%.2f", nanos / 1_000_000.0)
+diff --git a/app/src/main/java/eu/kanade/tachiyomi/util/system/HarmonyPerfToggles.kt b/app/src/main/java/eu/kanade/tachiyomi/util/system/HarmonyPerfToggles.kt
+index 5b3d4c751..a37736a4b 100644
+--- a/app/src/main/java/eu/kanade/tachiyomi/util/system/HarmonyPerfToggles.kt
++++ b/app/src/main/java/eu/kanade/tachiyomi/util/system/HarmonyPerfToggles.kt
+@@ -3,6 +3,7 @@ package eu.kanade.tachiyomi.util.system
+ import androidx.compose.runtime.getValue
+ import androidx.compose.runtime.mutableStateOf
+ import androidx.compose.runtime.setValue
++import tachiyomi.presentation.core.components.ScrollGlassDiagnostics
+ 
+ /**
+  * A/B switches for grid cover loading, flipped from the scroll performance recorder so one
+@@ -29,5 +30,6 @@ object HarmonyPerfToggles {
+     fun describe(): String =
+         "crossfade=${if (coverCrossfade) "on" else "off"} " +
+             "hardware=${if (coverHardware) "on" else "off"} " +
+-            "prefetch=${prefetch.name.lowercase()}"
++            "prefetch=${prefetch.name.lowercase()} " +
++            "glass=${if (ScrollGlassDiagnostics.enabled) "on" else "off"}"
+ }
+diff --git a/app/src/test/java/eu/kanade/tachiyomi/util/system/HarmonyFramePerfTest.kt b/app/src/test/java/eu/kanade/tachiyomi/util/system/HarmonyFramePerfTest.kt
+index 82a8453b0..b5f576b07 100644
+--- a/app/src/test/java/eu/kanade/tachiyomi/util/system/HarmonyFramePerfTest.kt
++++ b/app/src/test/java/eu/kanade/tachiyomi/util/system/HarmonyFramePerfTest.kt
+@@ -4,6 +4,7 @@ import org.junit.jupiter.api.Assertions.assertEquals
+ import org.junit.jupiter.api.Assertions.assertFalse
+ import org.junit.jupiter.api.Assertions.assertTrue
+ import org.junit.jupiter.api.Test
++import tachiyomi.presentation.core.components.PanoramaFrameCounters
+ import tachiyomi.presentation.core.components.PanoramaScrollTrace
+ import java.io.File
+ import java.util.TimeZone
+@@ -80,7 +81,7 @@ class HarmonyFramePerfTest {
+         File("build/tmp").mkdirs()
+         File("build/tmp/harmony_scroll_perf_sample.txt").writeText(text)
+ 
+-        assertTrue(text.contains("format: harmony-scroll-perf 3"), text)
++        assertTrue(text.contains("format: harmony-scroll-perf 4"), text)
+         assertTrue(text.contains("frame_metrics: provided"), text)
+         assertTrue(Regex("segment type=fling .* jank=[1-9]").containsMatchIn(text), text)
+         assertTrue(text.contains("segment type=drag"), text)
+@@ -348,6 +349,119 @@ class HarmonyFramePerfTest {
+         )
+     }
+ 
++    @Test
++    fun `duplicate frame times keep normal arrivals and bounded inclusive work diagnostics`() {
++        val full = syntheticInput()
++        val rows = (0 until 150).map { index ->
++            tick(BASE, FLING, 0L).also {
++                it[PerfReport.T_ARRIVAL] = BASE + index * 10 * MS
++                it[PerfReport.T_ARRIVAL_INTERVAL] = if (index == 0) 0L else 10 * MS
++                it[PerfReport.T_NAV_ACTIVE] = 1L
++                it[PerfReport.T_SCROLLER_ACTIVE] = 2L
++                // A reveal spike at the start must survive 149 later slow ticks.
++                it[PerfReport.T_MEASURE_NS] = if (index == 0) 40 * MS else 0L
++                it[PerfReport.T_NAV_NS] = 6 * MS
++                it[PerfReport.T_SCROLLER_NS] = 4 * MS
++                it[PerfReport.T_PLAN_NS] = 2 * MS
++                it[PerfReport.T_CELLS_NS] = 5 * MS
++                it[PerfReport.T_VISIBLE] = 12L
++                it[PerfReport.T_PREFETCH] = 4L
++                it[PerfReport.T_SCANNED] = 20L
++            }
++        }
++        val frame = LongArray(PerfReport.FRAME_WIDTH).also {
++            it[PerfReport.F_VSYNC] = BASE
++            it[PerfReport.F_INTENDED_VSYNC] = BASE
++            it[PerfReport.F_TOTAL] = 30 * MS
++            it[PerfReport.F_DEADLINE] = 10 * MS
++        }
++        val input = PerfReportInput(
++            header = testHeader(100f),
++            frames = PerfTable.of(PerfReport.FRAME_WIDTH, frame),
++            ticks = PerfTable.of(PerfReport.TICK_WIDTH, *rows.toTypedArray()),
++            samples = full.samples,
++            frameMetricsLate = false,
++            frameMetricsError = null,
++            noiseMarkers = emptyList(),
++            noise = TreeMap(),
++            trace = emptyList(),
++            startedNanos = BASE,
++            startedWallMs = full.nowWallMs - 2_000L,
++            nowNanos = BASE + 2 * SECOND,
++            nowWallMs = full.nowWallMs,
++            timeZone = full.timeZone,
++        )
++        val text = PerfReport.format(input)
++        assertTrue(text.contains("callbacks=150 frame_time_nonpositive=149 arrival_intervals=149"), text)
++        assertTrue(text.contains("arrival_p50=10.00 arrival_p90=10.00 arrival_p99=10.00 arrival_max=10.00"), text)
++        assertTrue(text.contains("nav_active_p90=1 nav_active_max=1 scroller_active_p90=2"), text)
++        assertTrue(text.contains("plan_ms_sum=300.00 plan_ms_p90=2.00"), text)
++        assertTrue(text.contains("cells_ms_sum=750.00 cells_ms_p90=5.00"), text)
++        assertTrue(text.contains("visible_sum=1800"), text)
++        assertTrue(text.contains("work_diag scope=segment_fling"), text)
++        assertTrue(text.contains("work_diag scope=sec_"), text)
++        val slowWork = text.lineSequence().filter { it.startsWith("slow_work ") }.toList()
++        assertEquals(120, slowWork.size)
++        assertTrue(slowWork.first().contains("measure_ms=40.00"), text)
++        assertEquals(120, slowWork.map { it.substringBefore(" phase=") }.distinct().size)
++        val expectedLatestTime = java.text.SimpleDateFormat("HH:mm:ss.SSS", java.util.Locale.US).apply {
++            timeZone = input.timeZone
++        }.format(java.util.Date(input.nowWallMs - 510L))
++        assertTrue(slowWork.last().startsWith("slow_work $expectedLatestTime "), text)
++        assertTrue(text.contains("inclusive wall ms and overlap; never add them"), text)
++        assertTrue(text.contains("long intervals are not visible dropped frames"), text)
++        // Same-phase duplicates retain the fling frame and FPS classification, without guessing work.
++        assertTrue(Regex("segment type=fling .* frames=1 .* reported=1").containsMatchIn(text), text)
++        val jankLine = text.lineSequence().first { it.startsWith("jank ") }
++        assertTrue(jankLine.contains(" fling "), text)
++        assertTrue(jankLine.endsWith(" -1 -1 -1"), text)
++        // A timestamp shared by different phases is unknown, rather than falsely idle.
++        input.ticks.data[149 * PerfReport.TICK_WIDTH + PerfReport.T_PHASE] = IDLE.toLong()
++        val mixed = PerfReport.format(input)
++        val mixedJank = mixed.lineSequence().first { it.startsWith("jank ") }
++        assertTrue(mixedJank.contains(" unknown "), mixed)
++        assertTrue(mixedJank.endsWith(" -1 -1 -1"), mixed)
++    }
++
++    @Test
++    fun `source attachment persists across recorder reset while disabled work is ignored`() {
++        val counters = PanoramaFrameCounters
++        val initialNav = counters.navigationSources
++        val initialScroller = counters.scrollerSources
++        try {
++            counters.enabled = false
++            counters.reset()
++            counters.sourceAttached(PanoramaFrameCounters.NAVIGATION_SOURCE)
++            counters.sourceAttached(PanoramaFrameCounters.SCROLLER_SOURCE)
++            counters.sourceDraw(PanoramaFrameCounters.NAVIGATION_SOURCE, 5 * MS)
++            counters.masonryWork(MS, 2 * MS, 10, 4, 30)
++            assertEquals(0L, counters.navigationDrawNanos)
++            assertEquals(0L, counters.planNanos)
++            counters.enabled = true
++            counters.sourceDraw(PanoramaFrameCounters.NAVIGATION_SOURCE, 5 * MS)
++            counters.sourceDraw(PanoramaFrameCounters.SCROLLER_SOURCE, 3 * MS)
++            counters.masonryWork(MS, 2 * MS, 10, 4, 30)
++            assertEquals(5 * MS, counters.navigationDrawNanos)
++            assertEquals(3 * MS, counters.scrollerDrawNanos)
++            assertEquals(2 * MS, counters.cellsNanos)
++            assertEquals(30, counters.scannedRects)
++            counters.reset()
++            assertEquals(initialNav + 1, counters.navigationSources)
++            assertEquals(initialScroller + 1, counters.scrollerSources)
++            assertEquals(0L, counters.cellsNanos)
++            counters.enabled = false
++            counters.sourceDraw(PanoramaFrameCounters.SCROLLER_SOURCE, MS)
++            assertEquals(0L, counters.scrollerDrawNanos)
++        } finally {
++            counters.enabled = false
++            counters.reset()
++            counters.sourceDetached(PanoramaFrameCounters.NAVIGATION_SOURCE)
++            counters.sourceDetached(PanoramaFrameCounters.SCROLLER_SOURCE)
++        }
++        assertEquals(initialNav, counters.navigationSources)
++        assertEquals(initialScroller, counters.scrollerSources)
++    }
++
+     private fun testHeader(refresh: Float): PerfHeader {
+         return PerfHeader(
+             appId = "app.mihon.test",
+diff --git a/presentation-core/src/main/java/tachiyomi/presentation/core/components/FastScrollerGlass.kt b/presentation-core/src/main/java/tachiyomi/presentation/core/components/FastScrollerGlass.kt
+index c3c253a7d..03a78388e 100644
+--- a/presentation-core/src/main/java/tachiyomi/presentation/core/components/FastScrollerGlass.kt
++++ b/presentation-core/src/main/java/tachiyomi/presentation/core/components/FastScrollerGlass.kt
+@@ -27,8 +27,13 @@ internal fun rememberFastScrollerGlass(): HazeState? {
+ 
+ // Capture only the list sibling. Capturing an ancestor that also contains the thumb cannot
+ // supply its backdrop: Haze deliberately excludes that area to prevent drawing itself.
++@Composable
+ internal fun Modifier.fastScrollerGlassSource(state: HazeState?): Modifier =
+-    if (state == null) this else hazeSource(state)
++    if (state == null || !ScrollGlassDiagnostics.enabled) {
++        this
++    } else {
++        recordScrollSource(PanoramaFrameCounters.SCROLLER_SOURCE).hazeSource(state)
++    }
+ 
+ @Composable
+ internal fun Modifier.fastScrollerGlass(
+@@ -39,7 +44,7 @@ internal fun Modifier.fastScrollerGlass(
+     val surface = MaterialTheme.colorScheme.surface
+     val shape = RoundedCornerShape(8.dp)
+     val tint = accent.copy(alpha = if (pressed) 0.3f else 0.18f)
+-    val base = if (state == null) {
++    val base = if (state == null || !ScrollGlassDiagnostics.enabled) {
+         Modifier.background(surface.copy(alpha = 0.78f)).background(tint)
+     } else {
+         Modifier.hazeEffect(
+diff --git a/presentation-core/src/main/java/tachiyomi/presentation/core/components/PanoramaFrameCounters.kt b/presentation-core/src/main/java/tachiyomi/presentation/core/components/PanoramaFrameCounters.kt
+index aad6f5ead..0ce363fdb 100644
+--- a/presentation-core/src/main/java/tachiyomi/presentation/core/components/PanoramaFrameCounters.kt
++++ b/presentation-core/src/main/java/tachiyomi/presentation/core/components/PanoramaFrameCounters.kt
+@@ -9,6 +9,62 @@ package tachiyomi.presentation.core.components
+  */
+ object PanoramaFrameCounters {
+ 
++    var enabled: Boolean = false
++    const val NAVIGATION_SOURCE = 0
++    const val SCROLLER_SOURCE = 1
++
++    var navigationSources: Int = 0
++        private set
++    var scrollerSources: Int = 0
++        private set
++    var navigationDrawNanos: Long = 0L
++        private set
++    var scrollerDrawNanos: Long = 0L
++        private set
++    var planNanos: Long = 0L
++        private set
++    var cellsNanos: Long = 0L
++        private set
++    var visibleCells: Int = 0
++        private set
++    var prefetchCells: Int = 0
++        private set
++    var scannedRects: Int = 0
++        private set
++
++    // Attachment lifetime is independent of the recorder lifetime.
++    fun sourceAttached(kind: Int) {
++        when (kind) {
++            NAVIGATION_SOURCE -> navigationSources++
++            SCROLLER_SOURCE -> scrollerSources++
++        }
++    }
++
++    fun sourceDetached(kind: Int) {
++        when (kind) {
++            NAVIGATION_SOURCE -> navigationSources = (navigationSources - 1).coerceAtLeast(0)
++            SCROLLER_SOURCE -> scrollerSources = (scrollerSources - 1).coerceAtLeast(0)
++        }
++    }
++
++    /** Inclusive durations: these can overlap measure and must not be added together. */
++    fun sourceDraw(kind: Int, nanos: Long) {
++        if (!enabled) return
++        when (kind) {
++            NAVIGATION_SOURCE -> navigationDrawNanos += nanos
++            SCROLLER_SOURCE -> scrollerDrawNanos += nanos
++        }
++    }
++
++    fun masonryWork(planNanos: Long, cellsNanos: Long, visibleCells: Int, prefetchCells: Int, scannedRects: Int) {
++        if (!enabled) return
++        this.planNanos += planNanos
++        this.cellsNanos += cellsNanos
++        this.visibleCells += visibleCells
++        this.prefetchCells += prefetchCells
++        this.scannedRects += scannedRects
++    }
++
+     /** [PanoramaMasonry] measure passes since the last [reset]. */
+     var measureCount: Int = 0
+         private set
+@@ -37,5 +93,12 @@ object PanoramaFrameCounters {
+         measureCount = 0
+         measureNanos = 0L
+         composedCells = 0
++        navigationDrawNanos = 0L
++        scrollerDrawNanos = 0L
++        planNanos = 0L
++        cellsNanos = 0L
++        visibleCells = 0
++        prefetchCells = 0
++        scannedRects = 0
+     }
+ }
+diff --git a/presentation-core/src/main/java/tachiyomi/presentation/core/components/PanoramaMasonry.kt b/presentation-core/src/main/java/tachiyomi/presentation/core/components/PanoramaMasonry.kt
+index 888a34a82..edbf49c3f 100644
+--- a/presentation-core/src/main/java/tachiyomi/presentation/core/components/PanoramaMasonry.kt
++++ b/presentation-core/src/main/java/tachiyomi/presentation/core/components/PanoramaMasonry.kt
+@@ -661,6 +661,10 @@ fun PanoramaMasonry(
+     userScrollEnabled: Boolean = true,
+     content: PanoramaMasonryScope.() -> Unit,
+ ) {
++    val prefetcher = remember(state) { PanoramaMasonryPrefetch() }
++    DisposableEffect(prefetcher) {
++        onDispose { prefetcher.clear() }
++    }
+     val latestContent = rememberUpdatedState(content)
+     val defaultFling = ScrollableDefaults.flingBehavior()
+     val flingBehavior = remember(defaultFling, state) { TracedFlingBehavior(defaultFling, state.traceId, state) }
+@@ -702,6 +706,7 @@ fun PanoramaMasonry(
+                 enabled = userScrollEnabled,
+                 flingBehavior = flingBehavior,
+             ),
++        prefetchState = prefetcher.state,
+         itemProvider = {
+             // Harmony: one provider per items lambda. Rebuilding the intervals here scanned every key.
+             state.itemProviderFor(latestContent.value)
+@@ -713,6 +718,7 @@ fun PanoramaMasonry(
+             state = state,
+             args = args.value,
+             content = latestContent.value,
++            prefetcher = prefetcher,
+         ).also { PanoramaFrameCounters.onMeasure(System.nanoTime() - measureStart) }
+     }
+ }
+@@ -777,7 +783,10 @@ private fun LazyLayoutMeasureScope.measureMasonry(
+     state: PanoramaMasonryState,
+     args: MasonryMeasureArgs,
+     content: PanoramaMasonryScope.() -> Unit,
++    prefetcher: PanoramaMasonryPrefetch,
+ ): MeasureResult {
++    val profiling = PanoramaFrameCounters.enabled
++    val planStart = if (profiling) System.nanoTime() else 0L
+     // Subscribes this measure to scroll-to-item requests.
+     state.scrollRequest
+ 
+@@ -964,14 +973,20 @@ private fun LazyLayoutMeasureScope.measureMasonry(
+     )
+     val scrollPx = state.scrollOffset.roundToInt()
+ 
+-    val prefetch = viewport / 2
+-    val windowStart = scrollPx - prefetch
+-    val windowEnd = scrollPx + viewport + prefetch
++    val planEnd = if (profiling) System.nanoTime() else 0L
++    val windowStart = scrollPx
++    val windowEnd = scrollPx + viewport
++    var visibleCells = 0
++    prefetcher.begin(masonry, keys, scrollPx)
+     val placed = ArrayList<Pair<PanoramaMasonryRect, List<Placeable>>>(16)
+     for (rect in masonry.rects) {
+         val top = topPad + rect.y
+         val bottom = top + rect.height
+-        if (bottom <= windowStart || top >= windowEnd) continue
++        if (bottom <= windowStart || top >= windowEnd) {
++            prefetcher.offer(rect, top, bottom, windowStart, windowEnd, masonry.laneCount)
++            continue
++        }
++        visibleCells++
+         val placeables = measuredPlaceables[rect.index] ?: compose(rect.index).map { measurable ->
+             measurable.measure(
+                 Constraints(
+@@ -985,6 +1000,17 @@ private fun LazyLayoutMeasureScope.measureMasonry(
+         placed.add(rect to placeables)
+     }
+ 
++    prefetcher.submit()
++    if (profiling) {
++        PanoramaFrameCounters.masonryWork(
++            planNanos = planEnd - planStart,
++            cellsNanos = System.nanoTime() - planEnd,
++            visibleCells = visibleCells,
++            prefetchCells = 0,
++            scannedRects = masonry.rects.size,
++        )
++    }
++
+     val layoutWidth = if (constraints.hasBoundedWidth) constraints.maxWidth else available + left + right
+     val layoutHeight = if (constraints.hasBoundedHeight) constraints.maxHeight else total.coerceAtLeast(0)
+     return layout(layoutWidth, layoutHeight) {
+diff --git a/presentation-core/src/main/java/tachiyomi/presentation/core/components/PanoramaMasonryPrefetch.kt b/presentation-core/src/main/java/tachiyomi/presentation/core/components/PanoramaMasonryPrefetch.kt
+new file mode 100644
+index 000000000..70468f639
+--- /dev/null
++++ b/presentation-core/src/main/java/tachiyomi/presentation/core/components/PanoramaMasonryPrefetch.kt
+@@ -0,0 +1,71 @@
++package tachiyomi.presentation.core.components
++
++import androidx.compose.foundation.lazy.layout.LazyLayoutPrefetchState
++import androidx.compose.ui.unit.Constraints
++
++/** Offscreen composition runs in Compose's frame-budgeted scheduler, never in visible measure. */
++internal class PanoramaMasonryPrefetch {
++    val state = LazyLayoutPrefetchState()
++    private var previousLayout: PanoramaMasonryLayout? = null
++    private var previousKeys: List<Any>? = null
++    private var previousScroll = 0
++    private var forward = true
++    private val candidates = ArrayList<PanoramaMasonryRect>()
++    private val requests = HashMap<Int, Request>()
++
++    private class Request(
++        val width: Int,
++        val height: Int,
++        val handle: LazyLayoutPrefetchState.PrefetchHandle,
++    )
++
++    fun begin(layout: PanoramaMasonryLayout, keys: List<Any>, scroll: Int) {
++        if (layout !== previousLayout || keys !== previousKeys) clear()
++        previousLayout = layout
++        previousKeys = keys
++        if (scroll != previousScroll) forward = scroll > previousScroll
++        previousScroll = scroll
++        candidates.clear()
++    }
++
++    fun offer(rect: PanoramaMasonryRect, top: Int, bottom: Int, start: Int, end: Int, lanes: Int) {
++        // Keep at most one nearby row, on the side the user is approaching.
++        val distance = if (forward) top - end else start - bottom
++        if (distance < 0 || distance > (end - start) / 2 || lanes <= 0) return
++        if (candidates.size < lanes) {
++            candidates.add(rect)
++        } else {
++            val farthest = candidates.indices.maxByOrNull { index ->
++                if (forward) candidates[index].y else -candidates[index].y
++            } ?: return
++            val old = candidates[farthest]
++            if (if (forward) rect.y < old.y else rect.y > old.y) candidates[farthest] = rect
++        }
++    }
++
++    fun submit() {
++        val iterator = requests.iterator()
++        while (iterator.hasNext()) {
++            val (index, request) = iterator.next()
++            val next = candidates.firstOrNull { it.index == index }
++            if (next == null || request.width != next.width || request.height != next.height) {
++                request.handle.cancel()
++                iterator.remove()
++            }
++        }
++        for (rect in candidates) {
++            if (requests.containsKey(rect.index)) continue
++            val handle = state.schedulePrecompositionAndPremeasure(
++                rect.index,
++                Constraints.fixed(rect.width, rect.height),
++            )
++            PanoramaFrameCounters.masonryWork(0L, 0L, 0, 1, 0)
++            requests[rect.index] = Request(rect.width, rect.height, handle)
++        }
++    }
++
++    fun clear() {
++        requests.values.forEach { it.handle.cancel() }
++        requests.clear()
++    }
++}
+diff --git a/presentation-core/src/main/java/tachiyomi/presentation/core/components/ScrollSourceDiagnostics.kt b/presentation-core/src/main/java/tachiyomi/presentation/core/components/ScrollSourceDiagnostics.kt
+new file mode 100644
+index 000000000..ffabc9720
+--- /dev/null
++++ b/presentation-core/src/main/java/tachiyomi/presentation/core/components/ScrollSourceDiagnostics.kt
+@@ -0,0 +1,35 @@
++package tachiyomi.presentation.core.components
++
++import androidx.compose.runtime.Composable
++import androidx.compose.runtime.DisposableEffect
++import androidx.compose.runtime.getValue
++import androidx.compose.runtime.mutableStateOf
++import androidx.compose.runtime.setValue
++import androidx.compose.ui.Modifier
++import androidx.compose.ui.draw.drawWithContent
++
++/** In-memory A/B switch; the recorder restores it when recording is disabled. */
++object ScrollGlassDiagnostics {
++    var enabled by mutableStateOf(true)
++}
++
++/** Inclusive CPU draw time, not GPU blur time. No clock reads when recording is disabled. */
++@Composable
++internal fun Modifier.recordScrollSource(kind: Int): Modifier {
++    DisposableEffect(kind) {
++        PanoramaFrameCounters.sourceAttached(kind)
++        onDispose { PanoramaFrameCounters.sourceDetached(kind) }
++    }
++    return drawWithContent {
++        if (PanoramaFrameCounters.enabled) {
++            val start = System.nanoTime()
++            try {
++                drawContent()
++            } finally {
++                PanoramaFrameCounters.sourceDraw(kind, System.nanoTime() - start)
++            }
++        } else {
++            drawContent()
++        }
++    }
++}
+diff --git a/presentation-core/src/main/java/tachiyomi/presentation/core/components/VerticalFastScroller.kt b/presentation-core/src/main/java/tachiyomi/presentation/core/components/VerticalFastScroller.kt
+index f2198defa..952b52a8e 100644
+--- a/presentation-core/src/main/java/tachiyomi/presentation/core/components/VerticalFastScroller.kt
++++ b/presentation-core/src/main/java/tachiyomi/presentation/core/components/VerticalFastScroller.kt
+@@ -31,6 +31,7 @@ import androidx.compose.foundation.systemGestureExclusion
+ import androidx.compose.material3.MaterialTheme
+ import androidx.compose.runtime.Composable
+ import androidx.compose.runtime.LaunchedEffect
++import androidx.compose.runtime.derivedStateOf
+ import androidx.compose.runtime.getValue
+ import androidx.compose.runtime.mutableFloatStateOf
+ import androidx.compose.runtime.mutableStateOf
+@@ -100,9 +101,22 @@ fun VerticalFastScroller(
+     content: @Composable () -> Unit,
+ ) {
+     val thumbGlass = rememberFastScrollerGlass()
++    val alpha = remember { Animatable(0f) }
++    val glassVisible = remember(alpha, thumbAllowed, listState) {
++        derivedStateOf {
++            alpha.value > 0f && thumbAllowed() && (listState.canScrollBackward || listState.canScrollForward)
++        }
++    }
+     SubcomposeLayout(modifier = modifier) { constraints ->
+         val contentPlaceable = subcompose("content") {
+-            Box(Modifier.fastScrollerGlassSource(thumbGlass), propagateMinConstraints = true) { content() }
++            Box(
++                Modifier.fastScrollerGlassSource(
++                    thumbGlass.takeIf {
++                        glassVisible.value
++                    },
++                ),
++                propagateMinConstraints = true,
++            ) { content() }
+         }.map { it.measure(constraints) }
+         val contentHeight = contentPlaceable.fastMaxBy { it.height }?.height ?: 0
+         val contentWidth = contentPlaceable.fastMaxBy { it.width }?.width ?: 0
+@@ -148,7 +162,10 @@ fun VerticalFastScroller(
+             val heightPx = contentHeight.toFloat() - thumbTopPadding - thumbBottomPadding
+             val thumbHeightPx = with(LocalDensity.current) { ThumbLength.toPx() }
+             val trackHeightPx = heightPx - thumbHeightPx
+-            if (trackHeightPx <= 0f) return@subcompose
++            if (trackHeightPx <= 0f) {
++                LaunchedEffect(alpha) { alpha.snapTo(0f) }
++                return@subcompose
++            }
+             val scrollHeightPx = contentHeight.toFloat() -
+                 listState.layoutInfo.beforeContentPadding -
+                 listState.layoutInfo.afterContentPadding
+@@ -221,7 +238,6 @@ fun VerticalFastScroller(
+             }
+ 
+             // Thumb alpha
+-            val alpha = remember { Animatable(0f) }
+             val isThumbVisible = alpha.value > 0f
+             LaunchedEffect(scrolled, alpha) {
+                 scrolled
+@@ -245,7 +261,7 @@ fun VerticalFastScroller(
+                 offsetY = thumbOffsetY,
+                 alpha = alpha.value,
+                 thumbColor = thumbColor,
+-                glassState = thumbGlass,
++                glassState = thumbGlass.takeIf { glassVisible.value },
+                 endInset = 8.dp + endContentPadding,
+                 touchEnabled = isThumbVisible || thumbPressed.pressed || isThumbDragged,
+                 pressState = thumbPressed,
+@@ -333,9 +349,22 @@ fun VerticalGridFastScroller(
+     )
+ 
+     val thumbGlass = rememberFastScrollerGlass()
++    val alpha = remember { Animatable(0f) }
++    val glassVisible = remember(alpha, thumbAllowed, state) {
++        derivedStateOf {
++            alpha.value > 0f && thumbAllowed() && (state.canScrollBackward || state.canScrollForward)
++        }
++    }
+     SubcomposeLayout(modifier = modifier) { constraints ->
+         val contentPlaceable = subcompose("content") {
+-            Box(Modifier.fastScrollerGlassSource(thumbGlass), propagateMinConstraints = true) { content() }
++            Box(
++                Modifier.fastScrollerGlassSource(
++                    thumbGlass.takeIf {
++                        glassVisible.value
++                    },
++                ),
++                propagateMinConstraints = true,
++            ) { content() }
+         }.map { it.measure(constraints) }
+         val contentHeight = contentPlaceable.fastMaxBy { it.height }?.height ?: 0
+         val contentWidth = contentPlaceable.fastMaxBy { it.width }?.width ?: 0
+@@ -378,7 +407,10 @@ fun VerticalGridFastScroller(
+             val heightPx = contentHeight.toFloat() - thumbTopPadding - thumbBottomPadding
+             val thumbHeightPx = with(LocalDensity.current) { ThumbLength.toPx() }
+             val trackHeightPx = heightPx - thumbHeightPx
+-            if (trackHeightPx <= 0f) return@subcompose
++            if (trackHeightPx <= 0f) {
++                LaunchedEffect(alpha) { alpha.snapTo(0f) }
++                return@subcompose
++            }
+             val scrollViewportHeightPx = contentHeight.toFloat() -
+                 state.layoutInfo.beforeContentPadding - state.layoutInfo.afterContentPadding
+ 
+@@ -438,7 +470,6 @@ fun VerticalGridFastScroller(
+             }
+ 
+             // Thumb alpha
+-            val alpha = remember { Animatable(0f) }
+             val isThumbVisible = alpha.value > 0f
+             LaunchedEffect(scrolled, alpha) {
+                 scrolled
+@@ -460,7 +491,7 @@ fun VerticalGridFastScroller(
+                 offsetY = thumbOffsetY,
+                 alpha = alpha.value,
+                 thumbColor = thumbColor,
+-                glassState = thumbGlass,
++                glassState = thumbGlass.takeIf { glassVisible.value },
+                 endInset = endContentPadding,
+                 touchEnabled = isThumbVisible || thumbPressed.pressed || isThumbDragged,
+                 pressState = thumbPressed,
+@@ -544,9 +575,22 @@ fun VerticalMasonryFastScroller(
+     content: @Composable () -> Unit,
+ ) {
+     val thumbGlass = rememberFastScrollerGlass()
++    val alpha = remember { Animatable(0f) }
++    val glassVisible = remember(alpha, thumbAllowed, state) {
++        derivedStateOf {
++            alpha.value > 0f && thumbAllowed() && (state.canScrollBackward || state.canScrollForward)
++        }
++    }
+     SubcomposeLayout(modifier = modifier) { constraints ->
+         val contentPlaceable = subcompose("content") {
+-            Box(Modifier.fastScrollerGlassSource(thumbGlass), propagateMinConstraints = true) { content() }
++            Box(
++                Modifier.fastScrollerGlassSource(
++                    thumbGlass.takeIf {
++                        glassVisible.value
++                    },
++                ),
++                propagateMinConstraints = true,
++            ) { content() }
+         }.map { it.measure(constraints) }
+         val contentHeight = contentPlaceable.fastMaxBy { it.height }?.height ?: 0
+         val contentWidth = contentPlaceable.fastMaxBy { it.width }?.width ?: 0
+@@ -581,7 +625,10 @@ fun VerticalMasonryFastScroller(
+             val heightPx = contentHeight.toFloat() - thumbTopPadding - thumbBottomPadding
+             val thumbHeightPx = with(LocalDensity.current) { ThumbLength.toPx() }
+             val trackHeightPx = heightPx - thumbHeightPx
+-            if (trackHeightPx <= 0f) return@subcompose
++            if (trackHeightPx <= 0f) {
++                LaunchedEffect(alpha) { alpha.snapTo(0f) }
++                return@subcompose
++            }
+ 
+             LaunchedEffect(thumbOffsetY) {
+                 if (!isThumbDragged) return@LaunchedEffect
+@@ -612,7 +659,6 @@ fun VerticalMasonryFastScroller(
+                 }
+             }
+ 
+-            val alpha = remember { Animatable(0f) }
+             val isThumbVisible = alpha.value > 0f
+             LaunchedEffect(scrolled, alpha) {
+                 scrolled
+@@ -637,7 +683,7 @@ fun VerticalMasonryFastScroller(
+                 offsetY = thumbOffsetY,
+                 alpha = alpha.value,
+                 thumbColor = thumbColor,
+-                glassState = thumbGlass,
++                glassState = thumbGlass.takeIf { glassVisible.value },
+                 endInset = endContentPadding,
+                 touchEnabled = isThumbVisible || thumbPressed.pressed || isThumbDragged,
+                 pressState = thumbPressed,
+@@ -681,9 +727,22 @@ internal fun VerticalTimelineFastScroller(
+     content: @Composable () -> Unit,
+ ) {
+     val thumbGlass = rememberFastScrollerGlass()
++    val alpha = remember { Animatable(0f) }
++    val glassVisible = remember(alpha, thumbAllowed, state) {
++        derivedStateOf {
++            alpha.value > 0f && thumbAllowed() && (state.canScrollBackward || state.canScrollForward)
++        }
++    }
+     SubcomposeLayout(modifier = modifier) { constraints ->
+         val contentPlaceable = subcompose("content") {
+-            Box(Modifier.fastScrollerGlassSource(thumbGlass), propagateMinConstraints = true) { content() }
++            Box(
++                Modifier.fastScrollerGlassSource(
++                    thumbGlass.takeIf {
++                        glassVisible.value
++                    },
++                ),
++                propagateMinConstraints = true,
++            ) { content() }
+         }.map { it.measure(constraints) }
+         val contentHeight = contentPlaceable.fastMaxBy { it.height }?.height ?: 0
+         val contentWidth = contentPlaceable.fastMaxBy { it.width }?.width ?: 0
+@@ -718,7 +777,10 @@ internal fun VerticalTimelineFastScroller(
+             val heightPx = contentHeight.toFloat() - thumbTopPadding - thumbBottomPadding
+             val thumbHeightPx = with(LocalDensity.current) { ThumbLength.toPx() }
+             val trackHeightPx = heightPx - thumbHeightPx
+-            if (trackHeightPx <= 0f) return@subcompose
++            if (trackHeightPx <= 0f) {
++                LaunchedEffect(alpha) { alpha.snapTo(0f) }
++                return@subcompose
++            }
+ 
+             LaunchedEffect(thumbOffsetY) {
+                 if (!isThumbDragged) return@LaunchedEffect
+@@ -753,7 +815,6 @@ internal fun VerticalTimelineFastScroller(
+                 }
+             }
+ 
+-            val alpha = remember { Animatable(0f) }
+             val isThumbVisible = alpha.value > 0f
+             LaunchedEffect(scrolled, alpha) {
+                 scrolled
+@@ -778,7 +839,7 @@ internal fun VerticalTimelineFastScroller(
+                 offsetY = thumbOffsetY,
+                 alpha = alpha.value,
+                 thumbColor = thumbColor,
+-                glassState = thumbGlass,
++                glassState = thumbGlass.takeIf { glassVisible.value },
+                 endInset = endContentPadding,
+                 touchEnabled = isThumbVisible || thumbPressed.pressed || isThumbDragged,
+                 pressState = thumbPressed,
+diff --git a/presentation-core/src/main/java/tachiyomi/presentation/core/components/material/BrowsingGlass.kt b/presentation-core/src/main/java/tachiyomi/presentation/core/components/material/BrowsingGlass.kt
+index 50af7bd5b..f71499aa5 100644
+--- a/presentation-core/src/main/java/tachiyomi/presentation/core/components/material/BrowsingGlass.kt
++++ b/presentation-core/src/main/java/tachiyomi/presentation/core/components/material/BrowsingGlass.kt
+@@ -13,6 +13,9 @@ import dev.chrisbanes.haze.HazeStyle
+ import dev.chrisbanes.haze.HazeTint
+ import dev.chrisbanes.haze.hazeEffect
+ import dev.chrisbanes.haze.hazeSource
++import tachiyomi.presentation.core.components.PanoramaFrameCounters
++import tachiyomi.presentation.core.components.ScrollGlassDiagnostics
++import tachiyomi.presentation.core.components.recordScrollSource
+ 
+ /** Blur only the content behind the controls, leaving icons, labels and badges sharp. */
+ @Composable
+@@ -26,7 +29,7 @@ internal fun Modifier.browsingGlassBackground(state: BrowsingNavigationBarState,
+         if (dark) 0.72f else 0.64f
+     }
+     val fallback = if (thin) 0.18f else 0.94f
+-    if (Build.VERSION.SDK_INT < 31 || !LocalView.current.isHardwareAccelerated) {
++    if (Build.VERSION.SDK_INT < 31 || !LocalView.current.isHardwareAccelerated || !ScrollGlassDiagnostics.enabled) {
+         return background(surface.copy(alpha = fallback))
+     }
+     return hazeEffect(
+@@ -44,11 +47,11 @@ internal fun Modifier.browsingGlassBackground(state: BrowsingNavigationBarState,
+ @Composable
+ internal fun Modifier.browsingGlassSource(state: BrowsingNavigationBarState?): Modifier =
+     if (state == null || Build.VERSION.SDK_INT < 31 ||
+-        !LocalView.current.isHardwareAccelerated || !state.glassVisible
++        !LocalView.current.isHardwareAccelerated || !state.glassVisible || !ScrollGlassDiagnostics.enabled
+     ) {
+         this
+     } else {
+-        hazeSource(state.glassState)
++        recordScrollSource(PanoramaFrameCounters.NAVIGATION_SOURCE).hazeSource(state.glassState)
+     }
+ 
+ @Composable
+diff --git a/presentation-core/src/main/java/tachiyomi/presentation/core/components/material/CapsuleRefraction.kt b/presentation-core/src/main/java/tachiyomi/presentation/core/components/material/CapsuleRefraction.kt
+index f27c350c7..e17363f13 100644
+--- a/presentation-core/src/main/java/tachiyomi/presentation/core/components/material/CapsuleRefraction.kt
++++ b/presentation-core/src/main/java/tachiyomi/presentation/core/components/material/CapsuleRefraction.kt
+@@ -12,10 +12,12 @@ import androidx.compose.ui.graphics.asComposeRenderEffect
+ import androidx.compose.ui.graphics.graphicsLayer
+ import androidx.compose.ui.platform.LocalView
+ import androidx.compose.ui.unit.IntSize
++import tachiyomi.presentation.core.components.ScrollGlassDiagnostics
+ 
+ /** Bend the already sampled backdrop only; labels are a separate, sharp sibling layer. */
+ @Composable
+ internal fun Modifier.capsuleRefraction(size: IntSize, radii: CapsuleCornerRadii): Modifier {
++    if (!ScrollGlassDiagnostics.enabled) return this
+     if (Build.VERSION.SDK_INT < 33 || !LocalView.current.isHardwareAccelerated || size.width <= 0 || size.height <= 0) {
+         return this
+     }
+diff --git a/presentation-core/src/test/java/tachiyomi/presentation/core/components/NavigationChromeMasonryWorkTest.kt b/presentation-core/src/test/java/tachiyomi/presentation/core/components/NavigationChromeMasonryWorkTest.kt
+new file mode 100644
+index 000000000..bdcb90a89
+--- /dev/null
++++ b/presentation-core/src/test/java/tachiyomi/presentation/core/components/NavigationChromeMasonryWorkTest.kt
+@@ -0,0 +1,110 @@
++package tachiyomi.presentation.core.components
++
++import androidx.compose.foundation.layout.Box
++import androidx.compose.foundation.layout.fillMaxSize
++import androidx.compose.foundation.layout.requiredSize
++import androidx.compose.runtime.mutableStateOf
++import androidx.compose.runtime.rememberCoroutineScope
++import androidx.compose.ui.Modifier
++import androidx.compose.ui.layout.onPlaced
++import androidx.compose.ui.layout.positionInParent
++import androidx.compose.ui.platform.testTag
++import androidx.compose.ui.test.ExperimentalTestApi
++import androidx.compose.ui.test.assertIsDisplayed
++import androidx.compose.ui.test.onNodeWithTag
++import androidx.compose.ui.test.v2.runComposeUiTest
++import androidx.compose.ui.unit.dp
++import dev.chrisbanes.haze.HazeState
++import kotlinx.coroutines.CoroutineScope
++import kotlinx.coroutines.launch
++import org.junit.After
++import org.junit.Test
++import org.junit.jupiter.api.Assertions.assertEquals
++import org.junit.jupiter.api.Assertions.assertTrue
++import org.junit.runner.RunWith
++import org.robolectric.RobolectricTestRunner
++import org.robolectric.annotation.Config
++import org.robolectric.annotation.GraphicsMode
++
++@OptIn(ExperimentalTestApi::class)
++@RunWith(RobolectricTestRunner::class)
++@GraphicsMode(GraphicsMode.Mode.NATIVE)
++@Config(sdk = [34])
++class NavigationChromeMasonryWorkTest {
++    @After
++    fun restoreDiagnostics() {
++        ScrollGlassDiagnostics.enabled = true
++        PanoramaFrameCounters.enabled = false
++        PanoramaFrameCounters.reset()
++    }
++
++    @Test
++    fun `cold viewport places only visible cells and jumps still reveal complete rows`() {
++        val placed = mutableSetOf<Int>()
++        val state = PanoramaMasonryState()
++        lateinit var scope: CoroutineScope
++        var rowHeight = 0f
++        runComposeUiTest {
++            setContent {
++                scope = rememberCoroutineScope()
++                PanoramaMasonry(
++                    columns = PanoramaColumns.Fixed(2),
++                    modifier = Modifier.requiredSize(360.dp, 640.dp),
++                    state = state,
++                ) {
++                    items(count = 2000, key = { it }, height = { PanoramaCellHeight.Fixed(150.dp) }) { index ->
++                        Box(
++                            Modifier.fillMaxSize().testTag("cell$index").onPlaced {
++                                rowHeight = it.size.height.toFloat()
++                                if (it.positionInParent().y >= 0) placed.add(index)
++                            },
++                        )
++                    }
++                }
++            }
++            runOnIdle {
++                assertEquals((0..9).toSet(), placed, "Offscreen rows must not be placed by the visible measure pass")
++                scope.launch { state.scrollToOffset(rowHeight * 10) }
++            }
++            waitForIdle()
++            onNodeWithTag("cell20").assertIsDisplayed()
++            onNodeWithTag("cell21").assertIsDisplayed()
++            runOnIdle { scope.launch { state.scrollToOffset(0f) } }
++            waitForIdle()
++            onNodeWithTag("cell0").assertIsDisplayed()
++            onNodeWithTag("cell1").assertIsDisplayed()
++        }
++    }
++
++    @Test
++    fun `scroller source detaches when hidden and recording off skips source timing`() {
++        val show = mutableStateOf(true)
++        val haze = HazeState()
++        val baseline = PanoramaFrameCounters.scrollerSources
++        PanoramaFrameCounters.enabled = false
++        PanoramaFrameCounters.reset()
++        runComposeUiTest {
++            setContent {
++                Box(Modifier.requiredSize(40.dp, 40.dp).fastScrollerGlassSource(haze.takeIf { show.value }))
++            }
++            runOnIdle {
++                assertEquals(baseline + 1, PanoramaFrameCounters.scrollerSources)
++                assertEquals(0L, PanoramaFrameCounters.scrollerDrawNanos)
++                show.value = false
++            }
++            waitForIdle()
++            runOnIdle {
++                assertEquals(baseline, PanoramaFrameCounters.scrollerSources)
++                show.value = true
++            }
++            waitForIdle()
++            runOnIdle {
++                assertTrue(PanoramaFrameCounters.scrollerSources > baseline)
++                ScrollGlassDiagnostics.enabled = false
++            }
++            waitForIdle()
++            runOnIdle { assertEquals(baseline, PanoramaFrameCounters.scrollerSources) }
++        }
++        assertEquals(baseline, PanoramaFrameCounters.scrollerSources, "Disposal releases the active-source counter")
++    }
++}
