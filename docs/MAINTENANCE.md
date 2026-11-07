@@ -952,3 +952,6 @@ gh release list --repo Xun2202/mihon-harmony
 - 新增纯数量与inclusive CPU阶段记录源：导航/滑块活跃源数、源绘制、布局规划/卡片测量、可见卡片及预加载请求数。额外计时只在记录器enabled时启用，不记录书名/URL。六份共享helper逐字节一致，主网格和滑块保留两应用已有差异。Animeko不直接移植此Tachiyomi组件。
 - Mihon格式4保留旧字段，加真实回调arrival间隔和非正frameTime计数；重复时间戳保持phase共识，work不明确则-1。近30秒最慢60+最新60去重，最多120条；明确inclusive阶段不可相加。长按“记录”新增“玻璃采样”诊断开关（同时关闭blur/refraction/source，保留可读回退）；标记开关时间，关闭录制自动恢复。现有封面A/B默认不变。
 - CI新增实际可视放置/跳转返回与采样启停测试、关键惯性回归，并运行app HarmonyFramePerfTest（重复时间戳/phase、最早尖峰保留和禁用计时）。签名构建与版本/hash/更新索引核验见私有归档现状；不以模拟器或平均fps声称Pura已丝滑。
+
+- 0075只更新旧惯性回归的坐标合同：28dp抓取带内20dp应抓住，30dp属于外侧hold-only带，快速甩动应保留惯性；中心/40dp及6dp断言保留。未缩小用户要求的触控区。UI测试先通过再开始APK组装，失败报告扩大到全部实际执行的单测。
+- 报告器13项纯模型测试已由真实源码后半段/计数器在独立JVM通过（22s），新增scripts/check-scroll-report.sh从目标源码动态提取同一模型、常量和原测试在CI复验，输出hash绑定；不编另一套App Debug变体。Android接入由目标APK编译，UI回归由presentation-core完成。
