@@ -185,7 +185,7 @@ jobs:
         run: |
           ./gradlew :presentation-core:testDebugUnitTest \
             --tests '*NavigationChrome*' --tests '*Timeline*Test' --tests '*PanoramaAutoColumnsTest' --tests '*PanoramaMasonryLayoutTest' --tests '*PanoramaMasonryFlingTest.a coast from the content survives and a coast from the thumb does not' \
-            ":app:test${BUILD_TYPE^}UnitTest" --tests '*HarmonyFramePerfTest' \
+            :app:testDebugUnitTest --tests '*HarmonyFramePerfTest' \
             "assemble${BUILD_TYPE^}" -Penable-updater --stacktrace
 
       - name: Print navigation regression failures
