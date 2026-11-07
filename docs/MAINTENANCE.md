@@ -891,3 +891,5 @@ gh release list --repo Xun2202/mihon-harmony
 - 选中透镜弹簧位移、途经时轻微延展、切换时局部高光；横拖跟手预览、松手仅提交最终tab，取消回弹；点击/重复点当前页仍走原导航操作。支持RTL、深浅色与系统动画倍率，无常驻循环动画。Anikku保留启用tab筛选/标签偏好/投屏mini controller；Mihon保留侧栏，横屏黑条及分类动画既有修复继续生效。
 - 参考华为官方沉浸光感组件适配与功耗建议，采用局部悬浮材质和短暂交互反馈：本项目是Android Compose APK实现，并非直接调用ArkUI系统材质。官方：https://developer.huawei.com/consumer/cn/doc/HarmonyOS-Guides/arkts-immersive-light-sense-component-adaptation/ ；https://developer.huawei.com/consumer/cn/doc/HarmonyOS-Guides/arkts-immersive-light-sense-constraints/ 。Animeko使用独立AniTopAppBar，未运行本tracker/胶囊，不直接移植。
 - 检查：真实tracker的13项JVM回归通过；正式CI继续跑NavigationChrome系列，新增短上滑/密度/连续快甩/取消/触底与锁定、真实快速触摸、深浅色及320/432/939dp边距与徽标、点击/拖拽提交/取消。最终构建、签名和版本索引以归档现状为准，Pura真机观感由用户安装反馈。
+
+- 本轮自动Check检测到新上游v0.21.3，旧0005在下载设置/偏好/字符串冲突，并非本轮UI补丁。当前用户版本及本轮正式目标仍为v0.21.2；check_patches新增upstream_tag可选输入，与正式构建显式基线一致后再验。默认/定时仍测试最新稳定版，未掩盖v0.21.3待rebase状态；上游升级另行处理，避免扩大本轮UI交付。

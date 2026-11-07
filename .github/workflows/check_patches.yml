@@ -1,6 +1,6 @@
 name: Check patches
 
-# 补丁必须能干净地套到官方最新稳定版上 (这是 Harmony Preview 实际编译的版本).
+# 默认检查官方最新稳定版；手动发布旧基线时可指定与 harmony_preview 相同的 upstream_tag。
 # 同时试套官方 main, 提前发现即将到来的冲突; main 冲突只警告, 不算失败.
 # 只检查补丁能否套用, 不编译.
 
@@ -19,6 +19,12 @@ on:
   schedule:
     - cron: '41 2 * * 1'
   workflow_dispatch:
+    inputs:
+      upstream_tag:
+        description: 'Release baseline to verify (empty = latest stable)'
+        type: string
+        required: false
+        default: ''
 
 permissions:
   contents: read
@@ -51,10 +57,16 @@ jobs:
         id: ref
         env:
           TARGET_REF: ${{ matrix.target.ref }}
+          RELEASE_REF: ${{ inputs.upstream_tag }}
         run: |
           set -euo pipefail
           if [[ "$TARGET_REF" == "latest" ]]; then
-            ref="$(gh api "repos/$UPSTREAM_REPO/releases/latest" --jq '.tag_name')"
+            if [[ -n "$RELEASE_REF" ]]; then
+              [[ "$RELEASE_REF" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "Invalid stable release tag" >&2; exit 1; }
+              ref="$RELEASE_REF"
+            else
+              ref="$(gh api "repos/$UPSTREAM_REPO/releases/latest" --jq '.tag_name')"
+            fi
           else
             ref="$TARGET_REF"
           fi
