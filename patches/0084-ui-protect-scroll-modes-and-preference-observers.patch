@@ -1,0 +1,1173 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Xun2202 <98207886+Xun2202@users.noreply.github.com>
+Date: Tue, 10 Nov 2026 13:04:19 +0000
+Subject: [PATCH] perf(ui): protect default scroll modes and reuse library
+ preference collectors
+
+Shared policy and Compose regression with Anikku 0089. User confirms category swipes improved, but filtering/switching to compact mode followed by folding still stutters. Regular native lists/grids/timeline/ScrollState paths bypassed the existing per-fling frame-time protection; apply the existing guard to every default Compose scroll entry in app and shared UI, preserving native velocity, bounds, consumption and cancellation. Wrap the wheel picker native snap without changing its snapping policy. Keep preview-only scrollbar examples unchanged and preserve Anikku-specific irregular grids. Cache the three library display/orientation PreferenceMutableState values for the model lifetime instead of starting model-scoped collectors on every getter call. Include density and layout direction in the scrollbar padding cache. Cover native scrolling through filter shrink, viewport changes, reverse fling, empty/short content and restoration, plus repeated timestamp and delegation behavior. Existing frame-clock algorithm, paging, layout, glass and decode behavior remain unchanged. No quantitative device FPS gain is claimed.
+---
+ .../browse/ExtensionFilterScreen.kt           |   2 +
+ .../presentation/browse/GlobalSearchScreen.kt |   2 +
+ .../components/BrowseSourceComfortableGrid.kt |   2 +
+ .../components/BrowseSourceCompactGrid.kt     |   2 +
+ .../browse/components/BrowseSourceList.kt     |   2 +
+ .../browse/components/GlobalSearchCardRow.kt  |   2 +
+ .../browse/components/GlobalSearchToolbar.kt  |   3 +-
+ .../presentation/category/CategoryScreen.kt   |   2 +
+ .../category/components/CategoryDialogs.kt    |   3 +-
+ .../library/LibrarySettingsDialog.kt          |   3 +-
+ .../library/components/LibraryPager.kt        |   3 +-
+ .../manga/ChapterSettingsDialog.kt            |   3 +-
+ .../manga/DuplicateMangaDialog.kt             |   4 +-
+ .../kanade/presentation/manga/MangaScreen.kt  |   5 +-
+ .../manga/components/MangaInfoHeader.kt       |   2 +
+ .../manga/components/MangaNotesTextArea.kt    |   2 +
+ .../manga/components/ScanlatorFilterDialog.kt |   3 +-
+ .../settings/screen/SettingsMainScreen.kt     |   2 +
+ .../settings/screen/SettingsSearchScreen.kt   |   2 +
+ .../screen/appearance/AppLanguageScreen.kt    |   2 +
+ .../components/ExtensionStoresContent.kt      |   2 +
+ .../screen/debug/BackupSchemaScreen.kt        |   3 +-
+ .../settings/screen/debug/WorkerInfoScreen.kt |   4 +-
+ .../widget/AppThemePreferenceWidget.kt        |   2 +
+ .../settings/widget/TriStateListDialog.kt     |   3 +-
+ .../more/stats/StatsScreenContent.kt          |   2 +
+ .../reader/settings/ReaderSettingsDialog.kt   |   3 +-
+ .../presentation/track/TrackInfoDialogHome.kt |   3 +-
+ .../updates/UpdatesFilterDialog.kt            |   3 +-
+ .../source/browse/BrowseSourceScreen.kt       |   5 +-
+ .../tachiyomi/ui/library/LibraryViewModel.kt  |  15 +-
+ .../kanade/tachiyomi/ui/main/MainActivity.kt  |   3 +-
+ .../config/MigrationConfigScreenSheet.kt      |   3 +-
+ .../migration/dialog/MigrateMangaDialog.kt    |   3 +-
+ .../mihon/feature/support/SupportUsScreen.kt  |   3 +-
+ .../mihon/feature/upcoming/UpcomingScreen.kt  |   3 +-
+ .../core/components/LazyColumnWithAction.kt   |   1 +
+ .../presentation/core/components/LazyGrid.kt  |   1 +
+ .../presentation/core/components/LazyList.kt  |   4 +-
+ .../core/components/SettingsItems.kt          |   1 +
+ .../core/components/TimelineGrid.kt           |   1 +
+ .../core/components/WheelPicker.kt            |   2 +-
+ .../presentation/core/screens/EmptyScreen.kt  |   3 +-
+ .../presentation/core/screens/InfoScreen.kt   |   3 +-
+ .../NavigationChromeScrollModesTest.kt        | 199 ++++++++++++++++++
+ 45 files changed, 294 insertions(+), 32 deletions(-)
+ create mode 100644 presentation-core/src/test/java/tachiyomi/presentation/core/components/NavigationChromeScrollModesTest.kt
+
+diff --git a/app/src/main/java/eu/kanade/presentation/browse/ExtensionFilterScreen.kt b/app/src/main/java/eu/kanade/presentation/browse/ExtensionFilterScreen.kt
+index 7f7e18baa..324d75f5a 100644
+--- a/app/src/main/java/eu/kanade/presentation/browse/ExtensionFilterScreen.kt
++++ b/app/src/main/java/eu/kanade/presentation/browse/ExtensionFilterScreen.kt
+@@ -13,6 +13,7 @@ import eu.kanade.tachiyomi.ui.browse.extension.ExtensionFilterState
+ import eu.kanade.tachiyomi.util.system.LocaleHelper
+ import tachiyomi.i18n.MR
+ import tachiyomi.presentation.core.components.material.Scaffold
++import tachiyomi.presentation.core.components.rememberFrameTimeProtectedFlingBehavior
+ import tachiyomi.presentation.core.i18n.stringResource
+ import tachiyomi.presentation.core.screens.EmptyScreen
+ 
+@@ -55,6 +56,7 @@ private fun ExtensionFilterContent(
+     val context = LocalContext.current
+     LazyColumn(
+         contentPadding = contentPadding,
++        flingBehavior = rememberFrameTimeProtectedFlingBehavior(),
+     ) {
+         items(state.languages) { language ->
+             SwitchPreferenceWidget(
+diff --git a/app/src/main/java/eu/kanade/presentation/browse/GlobalSearchScreen.kt b/app/src/main/java/eu/kanade/presentation/browse/GlobalSearchScreen.kt
+index 1f9e2d447..897eb72fa 100644
+--- a/app/src/main/java/eu/kanade/presentation/browse/GlobalSearchScreen.kt
++++ b/app/src/main/java/eu/kanade/presentation/browse/GlobalSearchScreen.kt
+@@ -17,6 +17,7 @@ import eu.kanade.tachiyomi.ui.browse.source.globalsearch.SourceFilter
+ import eu.kanade.tachiyomi.util.system.LocaleHelper
+ import tachiyomi.domain.manga.model.Manga
+ import tachiyomi.presentation.core.components.material.Scaffold
++import tachiyomi.presentation.core.components.rememberFrameTimeProtectedFlingBehavior
+ 
+ @Composable
+ fun GlobalSearchScreen(
+@@ -72,6 +73,7 @@ internal fun GlobalSearchContent(
+ ) {
+     LazyColumn(
+         contentPadding = contentPadding,
++        flingBehavior = rememberFrameTimeProtectedFlingBehavior(),
+     ) {
+         items.forEach { (source, result) ->
+             item(key = source.id) {
+diff --git a/app/src/main/java/eu/kanade/presentation/browse/components/BrowseSourceComfortableGrid.kt b/app/src/main/java/eu/kanade/presentation/browse/components/BrowseSourceComfortableGrid.kt
+index c4e4a6cef..6d5069143 100644
+--- a/app/src/main/java/eu/kanade/presentation/browse/components/BrowseSourceComfortableGrid.kt
++++ b/app/src/main/java/eu/kanade/presentation/browse/components/BrowseSourceComfortableGrid.kt
+@@ -29,6 +29,7 @@ import tachiyomi.presentation.core.components.PanoramaColumns
+ import tachiyomi.presentation.core.components.PanoramaMasonry
+ import tachiyomi.presentation.core.components.PanoramaSpan
+ import tachiyomi.presentation.core.components.material.browsingContentVerticalPadding
++import tachiyomi.presentation.core.components.rememberFrameTimeProtectedFlingBehavior
+ import tachiyomi.presentation.core.components.rememberPanoramaMasonryState
+ import tachiyomi.presentation.core.util.plus
+ 
+@@ -133,6 +134,7 @@ fun BrowseSourceComfortableGrid(
+         contentPadding = contentPadding + PaddingValues(horizontal = 1.dp, vertical = browsingContentVerticalPadding()),
+         verticalArrangement = Arrangement.spacedBy(CommonMangaItemDefaults.GridVerticalSpacer),
+         horizontalArrangement = Arrangement.spacedBy(CommonMangaItemDefaults.GridHorizontalSpacer),
++        flingBehavior = rememberFrameTimeProtectedFlingBehavior(),
+     ) {
+         if (mangaList.loadState.prepend is LoadState.Loading) {
+             item(
+diff --git a/app/src/main/java/eu/kanade/presentation/browse/components/BrowseSourceCompactGrid.kt b/app/src/main/java/eu/kanade/presentation/browse/components/BrowseSourceCompactGrid.kt
+index 03ff8b7ff..394d8cdee 100644
+--- a/app/src/main/java/eu/kanade/presentation/browse/components/BrowseSourceCompactGrid.kt
++++ b/app/src/main/java/eu/kanade/presentation/browse/components/BrowseSourceCompactGrid.kt
+@@ -29,6 +29,7 @@ import tachiyomi.presentation.core.components.PanoramaColumns
+ import tachiyomi.presentation.core.components.PanoramaMasonry
+ import tachiyomi.presentation.core.components.PanoramaSpan
+ import tachiyomi.presentation.core.components.material.browsingContentVerticalPadding
++import tachiyomi.presentation.core.components.rememberFrameTimeProtectedFlingBehavior
+ import tachiyomi.presentation.core.components.rememberPanoramaMasonryState
+ import tachiyomi.presentation.core.util.plus
+ 
+@@ -133,6 +134,7 @@ fun BrowseSourceCompactGrid(
+         contentPadding = contentPadding + PaddingValues(horizontal = 1.dp, vertical = browsingContentVerticalPadding()),
+         verticalArrangement = Arrangement.spacedBy(CommonMangaItemDefaults.GridVerticalSpacer),
+         horizontalArrangement = Arrangement.spacedBy(CommonMangaItemDefaults.GridHorizontalSpacer),
++        flingBehavior = rememberFrameTimeProtectedFlingBehavior(),
+     ) {
+         if (mangaList.loadState.prepend is LoadState.Loading) {
+             item(
+diff --git a/app/src/main/java/eu/kanade/presentation/browse/components/BrowseSourceList.kt b/app/src/main/java/eu/kanade/presentation/browse/components/BrowseSourceList.kt
+index 484673397..e3a356de6 100644
+--- a/app/src/main/java/eu/kanade/presentation/browse/components/BrowseSourceList.kt
++++ b/app/src/main/java/eu/kanade/presentation/browse/components/BrowseSourceList.kt
+@@ -11,6 +11,7 @@ import kotlinx.coroutines.flow.StateFlow
+ import tachiyomi.domain.manga.model.Manga
+ import tachiyomi.domain.manga.model.MangaCover
+ import tachiyomi.presentation.core.components.material.browsingContentVerticalPadding
++import tachiyomi.presentation.core.components.rememberFrameTimeProtectedFlingBehavior
+ import tachiyomi.presentation.core.util.plus
+ 
+ @Composable
+@@ -22,6 +23,7 @@ fun BrowseSourceList(
+ ) {
+     LazyColumn(
+         contentPadding = contentPadding + PaddingValues(vertical = browsingContentVerticalPadding()),
++        flingBehavior = rememberFrameTimeProtectedFlingBehavior(),
+     ) {
+         item(contentType = BROWSE_SOURCE_LOADING_TYPE) {
+             if (mangaList.loadState.prepend is LoadState.Loading) {
+diff --git a/app/src/main/java/eu/kanade/presentation/browse/components/GlobalSearchCardRow.kt b/app/src/main/java/eu/kanade/presentation/browse/components/GlobalSearchCardRow.kt
+index 7e1cf212c..056db66d3 100644
+--- a/app/src/main/java/eu/kanade/presentation/browse/components/GlobalSearchCardRow.kt
++++ b/app/src/main/java/eu/kanade/presentation/browse/components/GlobalSearchCardRow.kt
+@@ -21,6 +21,7 @@ import tachiyomi.domain.manga.model.MangaCover
+ import tachiyomi.domain.manga.model.asMangaCover
+ import tachiyomi.i18n.MR
+ import tachiyomi.presentation.core.components.material.padding
++import tachiyomi.presentation.core.components.rememberFrameTimeProtectedFlingBehavior
+ import tachiyomi.presentation.core.i18n.stringResource
+ 
+ @Composable
+@@ -38,6 +39,7 @@ fun GlobalSearchCardRow(
+     LazyRow(
+         contentPadding = PaddingValues(horizontal = 1.dp, vertical = MaterialTheme.padding.small),
+         horizontalArrangement = Arrangement.spacedBy(CommonMangaItemDefaults.GridHorizontalSpacer),
++        flingBehavior = rememberFrameTimeProtectedFlingBehavior(),
+     ) {
+         items(titles) {
+             val title by getManga(it)
+diff --git a/app/src/main/java/eu/kanade/presentation/browse/components/GlobalSearchToolbar.kt b/app/src/main/java/eu/kanade/presentation/browse/components/GlobalSearchToolbar.kt
+index 19ea6d8b2..24502f22e 100644
+--- a/app/src/main/java/eu/kanade/presentation/browse/components/GlobalSearchToolbar.kt
++++ b/app/src/main/java/eu/kanade/presentation/browse/components/GlobalSearchToolbar.kt
+@@ -31,6 +31,7 @@ import mihon.icons.materialsymbols.rounded.FilterList
+ import mihon.icons.materialsymbols.rounded.Keep
+ import tachiyomi.i18n.MR
+ import tachiyomi.presentation.core.components.material.padding
++import tachiyomi.presentation.core.components.rememberFrameTimeProtectedFlingBehavior
+ import tachiyomi.presentation.core.i18n.stringResource
+ 
+ @Composable
+@@ -70,7 +71,7 @@ fun GlobalSearchToolbar(
+ 
+         Row(
+             modifier = Modifier
+-                .horizontalScroll(rememberScrollState())
++                .horizontalScroll(rememberScrollState(), flingBehavior = rememberFrameTimeProtectedFlingBehavior())
+                 .padding(horizontal = MaterialTheme.padding.small),
+             horizontalArrangement = Arrangement.spacedBy(MaterialTheme.padding.small),
+             verticalAlignment = Alignment.CenterVertically,
+diff --git a/app/src/main/java/eu/kanade/presentation/category/CategoryScreen.kt b/app/src/main/java/eu/kanade/presentation/category/CategoryScreen.kt
+index e26a6bfea..a50aed0f5 100644
+--- a/app/src/main/java/eu/kanade/presentation/category/CategoryScreen.kt
++++ b/app/src/main/java/eu/kanade/presentation/category/CategoryScreen.kt
+@@ -25,6 +25,7 @@ import tachiyomi.i18n.MR
+ import tachiyomi.presentation.core.components.material.Scaffold
+ import tachiyomi.presentation.core.components.material.padding
+ import tachiyomi.presentation.core.components.material.topSmallPaddingValues
++import tachiyomi.presentation.core.components.rememberFrameTimeProtectedFlingBehavior
+ import tachiyomi.presentation.core.i18n.stringResource
+ import tachiyomi.presentation.core.screens.EmptyScreen
+ import tachiyomi.presentation.core.util.plus
+@@ -103,6 +104,7 @@ private fun CategoryContent(
+             topSmallPaddingValues +
+             PaddingValues(horizontal = MaterialTheme.padding.medium),
+         verticalArrangement = Arrangement.spacedBy(MaterialTheme.padding.small),
++        flingBehavior = rememberFrameTimeProtectedFlingBehavior(),
+     ) {
+         items(
+             items = categoriesState,
+diff --git a/app/src/main/java/eu/kanade/presentation/category/components/CategoryDialogs.kt b/app/src/main/java/eu/kanade/presentation/category/components/CategoryDialogs.kt
+index 96430f85a..cecabeda8 100644
+--- a/app/src/main/java/eu/kanade/presentation/category/components/CategoryDialogs.kt
++++ b/app/src/main/java/eu/kanade/presentation/category/components/CategoryDialogs.kt
+@@ -31,6 +31,7 @@ import tachiyomi.core.common.preference.CheckboxState
+ import tachiyomi.domain.category.model.Category
+ import tachiyomi.i18n.MR
+ import tachiyomi.presentation.core.components.material.padding
++import tachiyomi.presentation.core.components.rememberFrameTimeProtectedFlingBehavior
+ import tachiyomi.presentation.core.i18n.stringResource
+ 
+ @Composable
+@@ -251,7 +252,7 @@ fun ChangeCategoryDialog(
+         },
+         text = {
+             Column(
+-                modifier = Modifier.verticalScroll(rememberScrollState()),
++                modifier = Modifier.verticalScroll(rememberScrollState(), flingBehavior = rememberFrameTimeProtectedFlingBehavior()),
+             ) {
+                 selection.forEach { checkbox ->
+                     val onChange: (CheckboxState<Category>) -> Unit = {
+diff --git a/app/src/main/java/eu/kanade/presentation/library/LibrarySettingsDialog.kt b/app/src/main/java/eu/kanade/presentation/library/LibrarySettingsDialog.kt
+index 30164c505..9391ac1b0 100644
+--- a/app/src/main/java/eu/kanade/presentation/library/LibrarySettingsDialog.kt
++++ b/app/src/main/java/eu/kanade/presentation/library/LibrarySettingsDialog.kt
+@@ -35,6 +35,7 @@ import tachiyomi.presentation.core.components.SettingsChipRow
+ import tachiyomi.presentation.core.components.SliderItem
+ import tachiyomi.presentation.core.components.SortItem
+ import tachiyomi.presentation.core.components.TriStateItem
++import tachiyomi.presentation.core.components.rememberFrameTimeProtectedFlingBehavior
+ import tachiyomi.presentation.core.i18n.stringResource
+ import tachiyomi.presentation.core.util.collectAsState
+ 
+@@ -55,7 +56,7 @@ fun LibrarySettingsDialog(
+         Column(
+             modifier = Modifier
+                 .padding(vertical = TabbedDialogPaddings.Vertical)
+-                .verticalScroll(rememberScrollState()),
++                .verticalScroll(rememberScrollState(), flingBehavior = rememberFrameTimeProtectedFlingBehavior()),
+         ) {
+             when (page) {
+                 0 -> FilterPage(
+diff --git a/app/src/main/java/eu/kanade/presentation/library/components/LibraryPager.kt b/app/src/main/java/eu/kanade/presentation/library/components/LibraryPager.kt
+index 209ed2c71..355a4a9b1 100644
+--- a/app/src/main/java/eu/kanade/presentation/library/components/LibraryPager.kt
++++ b/app/src/main/java/eu/kanade/presentation/library/components/LibraryPager.kt
+@@ -25,6 +25,7 @@ import tachiyomi.domain.library.model.LibraryDisplayMode
+ import tachiyomi.domain.library.model.LibraryManga
+ import tachiyomi.i18n.MR
+ import tachiyomi.presentation.core.components.material.browsingContentVerticalPadding
++import tachiyomi.presentation.core.components.rememberFrameTimeProtectedFlingBehavior
+ import tachiyomi.presentation.core.components.rememberFrameTimeProtectedPagerFlingBehavior
+ import tachiyomi.presentation.core.screens.EmptyScreen
+ import tachiyomi.presentation.core.util.plus
+@@ -175,7 +176,7 @@ private fun LibraryPagerEmptyScreen(
+         modifier = Modifier
+             .padding(contentPadding + PaddingValues(horizontal = 1.dp, vertical = browsingContentVerticalPadding()))
+             .fillMaxSize()
+-            .verticalScroll(rememberScrollState()),
++            .verticalScroll(rememberScrollState(), flingBehavior = rememberFrameTimeProtectedFlingBehavior()),
+     ) {
+         if (!searchQuery.isNullOrEmpty()) {
+             GlobalSearchItem(
+diff --git a/app/src/main/java/eu/kanade/presentation/manga/ChapterSettingsDialog.kt b/app/src/main/java/eu/kanade/presentation/manga/ChapterSettingsDialog.kt
+index 166f540d8..bfb46af5d 100644
+--- a/app/src/main/java/eu/kanade/presentation/manga/ChapterSettingsDialog.kt
++++ b/app/src/main/java/eu/kanade/presentation/manga/ChapterSettingsDialog.kt
+@@ -39,6 +39,7 @@ import tachiyomi.presentation.core.components.LabeledCheckbox
+ import tachiyomi.presentation.core.components.RadioItem
+ import tachiyomi.presentation.core.components.SortItem
+ import tachiyomi.presentation.core.components.TriStateItem
++import tachiyomi.presentation.core.components.rememberFrameTimeProtectedFlingBehavior
+ import tachiyomi.presentation.core.i18n.stringResource
+ import tachiyomi.presentation.core.theme.active
+ 
+@@ -94,7 +95,7 @@ fun ChapterSettingsDialog(
+         Column(
+             modifier = Modifier
+                 .padding(vertical = TabbedDialogPaddings.Vertical)
+-                .verticalScroll(rememberScrollState()),
++                .verticalScroll(rememberScrollState(), flingBehavior = rememberFrameTimeProtectedFlingBehavior()),
+         ) {
+             when (page) {
+                 0 -> {
+diff --git a/app/src/main/java/eu/kanade/presentation/manga/DuplicateMangaDialog.kt b/app/src/main/java/eu/kanade/presentation/manga/DuplicateMangaDialog.kt
+index bdfaa05bd..54e826c0b 100644
+--- a/app/src/main/java/eu/kanade/presentation/manga/DuplicateMangaDialog.kt
++++ b/app/src/main/java/eu/kanade/presentation/manga/DuplicateMangaDialog.kt
+@@ -73,6 +73,7 @@ import tachiyomi.i18n.MR
+ import tachiyomi.presentation.core.components.Badge
+ import tachiyomi.presentation.core.components.BadgeGroup
+ import tachiyomi.presentation.core.components.material.padding
++import tachiyomi.presentation.core.components.rememberFrameTimeProtectedFlingBehavior
+ import tachiyomi.presentation.core.i18n.pluralStringResource
+ import tachiyomi.presentation.core.i18n.stringResource
+ import tachiyomi.presentation.core.util.secondaryItemAlpha
+@@ -99,7 +100,7 @@ fun DuplicateMangaDialog(
+         Column(
+             modifier = Modifier
+                 .padding(vertical = TabbedDialogPaddings.Vertical)
+-                .verticalScroll(rememberScrollState())
++                .verticalScroll(rememberScrollState(), flingBehavior = rememberFrameTimeProtectedFlingBehavior())
+                 .fillMaxWidth(),
+             verticalArrangement = Arrangement.spacedBy(MaterialTheme.padding.medium),
+         ) {
+@@ -121,6 +122,7 @@ fun DuplicateMangaDialog(
+                 horizontalArrangement = Arrangement.spacedBy(MaterialTheme.padding.small),
+                 modifier = Modifier.height(getMaximumMangaCardHeight(duplicates)),
+                 contentPadding = horizontalPadding,
++                flingBehavior = rememberFrameTimeProtectedFlingBehavior(),
+             ) {
+                 items(
+                     items = duplicates,
+diff --git a/app/src/main/java/eu/kanade/presentation/manga/MangaScreen.kt b/app/src/main/java/eu/kanade/presentation/manga/MangaScreen.kt
+index 30c4eec6c..7a3a6cffd 100644
+--- a/app/src/main/java/eu/kanade/presentation/manga/MangaScreen.kt
++++ b/app/src/main/java/eu/kanade/presentation/manga/MangaScreen.kt
+@@ -72,6 +72,7 @@ import tachiyomi.presentation.core.components.TwoPanelBox
+ import tachiyomi.presentation.core.components.VerticalFastScroller
+ import tachiyomi.presentation.core.components.material.PullRefresh
+ import tachiyomi.presentation.core.components.material.Scaffold
++import tachiyomi.presentation.core.components.rememberFrameTimeProtectedFlingBehavior
+ import tachiyomi.presentation.core.i18n.stringResource
+ import tachiyomi.presentation.core.util.shouldExpandFAB
+ import tachiyomi.source.local.isLocal
+@@ -357,6 +358,7 @@ private fun MangaScreenSmallImpl(
+                         end = contentPadding.calculateEndPadding(layoutDirection),
+                         bottom = contentPadding.calculateBottomPadding(),
+                     ),
++                    flingBehavior = rememberFrameTimeProtectedFlingBehavior(),
+                 ) {
+                     item(
+                         key = MangaScreenItem.INFO_BOX,
+@@ -583,7 +585,7 @@ fun MangaScreenLargeImpl(
+                 startContent = {
+                     Column(
+                         modifier = Modifier
+-                            .verticalScroll(rememberScrollState())
++                            .verticalScroll(rememberScrollState(), flingBehavior = rememberFrameTimeProtectedFlingBehavior())
+                             .padding(bottom = contentPadding.calculateBottomPadding()),
+                     ) {
+                         MangaInfoBox(
+@@ -630,6 +632,7 @@ fun MangaScreenLargeImpl(
+                                 top = contentPadding.calculateTopPadding(),
+                                 bottom = contentPadding.calculateBottomPadding(),
+                             ),
++                            flingBehavior = rememberFrameTimeProtectedFlingBehavior(),
+                         ) {
+                             item(
+                                 key = MangaScreenItem.CHAPTER_HEADER,
+diff --git a/app/src/main/java/eu/kanade/presentation/manga/components/MangaInfoHeader.kt b/app/src/main/java/eu/kanade/presentation/manga/components/MangaInfoHeader.kt
+index 6d4a7206d..09cab1578 100644
+--- a/app/src/main/java/eu/kanade/presentation/manga/components/MangaInfoHeader.kt
++++ b/app/src/main/java/eu/kanade/presentation/manga/components/MangaInfoHeader.kt
+@@ -103,6 +103,7 @@ import tachiyomi.i18n.MR
+ import tachiyomi.presentation.core.components.material.DISABLED_ALPHA
+ import tachiyomi.presentation.core.components.material.TextButton
+ import tachiyomi.presentation.core.components.material.padding
++import tachiyomi.presentation.core.components.rememberFrameTimeProtectedFlingBehavior
+ import tachiyomi.presentation.core.i18n.pluralStringResource
+ import tachiyomi.presentation.core.i18n.stringResource
+ import tachiyomi.presentation.core.util.clickableNoIndication
+@@ -324,6 +325,7 @@ fun ExpandableMangaDescription(
+                     LazyRow(
+                         contentPadding = PaddingValues(horizontal = MaterialTheme.padding.medium),
+                         horizontalArrangement = Arrangement.spacedBy(MaterialTheme.padding.extraSmall),
++                        flingBehavior = rememberFrameTimeProtectedFlingBehavior(),
+                     ) {
+                         items(items = tags) {
+                             TagsChip(
+diff --git a/app/src/main/java/eu/kanade/presentation/manga/components/MangaNotesTextArea.kt b/app/src/main/java/eu/kanade/presentation/manga/components/MangaNotesTextArea.kt
+index e5f1bbfca..2bd86599d 100644
+--- a/app/src/main/java/eu/kanade/presentation/manga/components/MangaNotesTextArea.kt
++++ b/app/src/main/java/eu/kanade/presentation/manga/components/MangaNotesTextArea.kt
+@@ -52,6 +52,7 @@ import mihon.icons.materialsymbols.rounded.FormatListNumbered
+ import mihon.icons.materialsymbols.rounded.FormatUnderlined
+ import tachiyomi.i18n.MR
+ import tachiyomi.presentation.core.components.material.padding
++import tachiyomi.presentation.core.components.rememberFrameTimeProtectedFlingBehavior
+ import tachiyomi.presentation.core.i18n.stringResource
+ import kotlin.time.Duration.Companion.seconds
+ 
+@@ -125,6 +126,7 @@ fun MangaNotesTextArea(
+             LazyRow(
+                 verticalAlignment = Alignment.CenterVertically,
+                 horizontalArrangement = Arrangement.spacedBy(2.dp),
++                flingBehavior = rememberFrameTimeProtectedFlingBehavior(),
+             ) {
+                 item {
+                     MangaNotesTextAreaButton(
+diff --git a/app/src/main/java/eu/kanade/presentation/manga/components/ScanlatorFilterDialog.kt b/app/src/main/java/eu/kanade/presentation/manga/components/ScanlatorFilterDialog.kt
+index 5a7e30b6d..636cb4a46 100644
+--- a/app/src/main/java/eu/kanade/presentation/manga/components/ScanlatorFilterDialog.kt
++++ b/app/src/main/java/eu/kanade/presentation/manga/components/ScanlatorFilterDialog.kt
+@@ -30,6 +30,7 @@ import mihon.icons.materialsymbols.roundedfilled.DisabledByDefault
+ import tachiyomi.i18n.MR
+ import tachiyomi.presentation.core.components.material.TextButton
+ import tachiyomi.presentation.core.components.material.padding
++import tachiyomi.presentation.core.components.rememberFrameTimeProtectedFlingBehavior
+ import tachiyomi.presentation.core.i18n.stringResource
+ 
+ @Composable
+@@ -53,7 +54,7 @@ fun ScanlatorFilterDialog(
+             }
+             Box {
+                 val state = rememberLazyListState()
+-                LazyColumn(state = state) {
++                LazyColumn(state = state, flingBehavior = rememberFrameTimeProtectedFlingBehavior()) {
+                     sortedAvailableScanlators.forEach { scanlator ->
+                         item {
+                             val isExcluded = mutableExcludedScanlators.contains(scanlator)
+diff --git a/app/src/main/java/eu/kanade/presentation/more/settings/screen/SettingsMainScreen.kt b/app/src/main/java/eu/kanade/presentation/more/settings/screen/SettingsMainScreen.kt
+index a8c9e936a..3c0272a4f 100644
+--- a/app/src/main/java/eu/kanade/presentation/more/settings/screen/SettingsMainScreen.kt
++++ b/app/src/main/java/eu/kanade/presentation/more/settings/screen/SettingsMainScreen.kt
+@@ -46,6 +46,7 @@ import mihon.icons.materialsymbols.rounded.Storage
+ import mihon.icons.materialsymbols.rounded.Sync
+ import tachiyomi.i18n.MR
+ import tachiyomi.presentation.core.components.material.Scaffold
++import tachiyomi.presentation.core.components.rememberFrameTimeProtectedFlingBehavior
+ import tachiyomi.presentation.core.i18n.stringResource
+ import cafe.adriel.voyager.core.screen.Screen as VoyagerScreen
+ 
+@@ -120,6 +121,7 @@ object SettingsMainScreen : Screen() {
+                 LazyColumn(
+                     state = state,
+                     contentPadding = contentPadding,
++                    flingBehavior = rememberFrameTimeProtectedFlingBehavior(),
+                 ) {
+                     itemsIndexed(
+                         items = items,
+diff --git a/app/src/main/java/eu/kanade/presentation/more/settings/screen/SettingsSearchScreen.kt b/app/src/main/java/eu/kanade/presentation/more/settings/screen/SettingsSearchScreen.kt
+index 51f320808..05d892728 100644
+--- a/app/src/main/java/eu/kanade/presentation/more/settings/screen/SettingsSearchScreen.kt
++++ b/app/src/main/java/eu/kanade/presentation/more/settings/screen/SettingsSearchScreen.kt
+@@ -54,6 +54,7 @@ import mihon.icons.materialsymbols.MaterialSymbols
+ import mihon.icons.materialsymbols.rounded.Close
+ import tachiyomi.i18n.MR
+ import tachiyomi.presentation.core.components.material.Scaffold
++import tachiyomi.presentation.core.components.rememberFrameTimeProtectedFlingBehavior
+ import tachiyomi.presentation.core.i18n.stringResource
+ import tachiyomi.presentation.core.screens.EmptyScreen
+ import tachiyomi.presentation.core.util.runOnEnterKeyPressed
+@@ -187,6 +188,7 @@ private fun SearchResult(
+                     state = listState,
+                     contentPadding = contentPadding,
+                     horizontalAlignment = Alignment.CenterHorizontally,
++                    flingBehavior = rememberFrameTimeProtectedFlingBehavior(),
+                 ) {
+                     items(
+                         items = it,
+diff --git a/app/src/main/java/eu/kanade/presentation/more/settings/screen/appearance/AppLanguageScreen.kt b/app/src/main/java/eu/kanade/presentation/more/settings/screen/appearance/AppLanguageScreen.kt
+index b3e9a6b93..b01b69f15 100644
+--- a/app/src/main/java/eu/kanade/presentation/more/settings/screen/appearance/AppLanguageScreen.kt
++++ b/app/src/main/java/eu/kanade/presentation/more/settings/screen/appearance/AppLanguageScreen.kt
+@@ -31,6 +31,7 @@ import tachiyomi.core.common.i18n.stringResource
+ import tachiyomi.i18n.MR
+ import tachiyomi.i18n.R
+ import tachiyomi.presentation.core.components.material.Scaffold
++import tachiyomi.presentation.core.components.rememberFrameTimeProtectedFlingBehavior
+ import tachiyomi.presentation.core.i18n.stringResource
+ 
+ class AppLanguageScreen : Screen() {
+@@ -65,6 +66,7 @@ class AppLanguageScreen : Screen() {
+         ) { contentPadding ->
+             LazyColumn(
+                 modifier = Modifier.padding(contentPadding),
++                flingBehavior = rememberFrameTimeProtectedFlingBehavior(),
+             ) {
+                 items(langs) {
+                     ListItem(
+diff --git a/app/src/main/java/eu/kanade/presentation/more/settings/screen/browse/components/ExtensionStoresContent.kt b/app/src/main/java/eu/kanade/presentation/more/settings/screen/browse/components/ExtensionStoresContent.kt
+index 7aede9c9c..fee5243c2 100644
+--- a/app/src/main/java/eu/kanade/presentation/more/settings/screen/browse/components/ExtensionStoresContent.kt
++++ b/app/src/main/java/eu/kanade/presentation/more/settings/screen/browse/components/ExtensionStoresContent.kt
+@@ -25,6 +25,7 @@ import mihon.icons.simpleicons.Discord
+ import mihon.icons.simpleicons.SimpleIcons
+ import tachiyomi.i18n.MR
+ import tachiyomi.presentation.core.components.material.padding
++import tachiyomi.presentation.core.components.rememberFrameTimeProtectedFlingBehavior
+ import tachiyomi.presentation.core.i18n.stringResource
+ 
+ @Composable
+@@ -43,6 +44,7 @@ fun ExtensionStoresContent(
+         contentPadding = paddingValues,
+         verticalArrangement = Arrangement.spacedBy(MaterialTheme.padding.small),
+         modifier = modifier,
++        flingBehavior = rememberFrameTimeProtectedFlingBehavior(),
+     ) {
+         repos.forEach {
+             item {
+diff --git a/app/src/main/java/eu/kanade/presentation/more/settings/screen/debug/BackupSchemaScreen.kt b/app/src/main/java/eu/kanade/presentation/more/settings/screen/debug/BackupSchemaScreen.kt
+index 65d79c1dc..222c04c9c 100644
+--- a/app/src/main/java/eu/kanade/presentation/more/settings/screen/debug/BackupSchemaScreen.kt
++++ b/app/src/main/java/eu/kanade/presentation/more/settings/screen/debug/BackupSchemaScreen.kt
+@@ -22,6 +22,7 @@ import mihon.icons.materialsymbols.MaterialSymbols
+ import mihon.icons.materialsymbols.rounded.ContentCopy
+ import tachiyomi.i18n.MR
+ import tachiyomi.presentation.core.components.material.Scaffold
++import tachiyomi.presentation.core.components.rememberFrameTimeProtectedFlingBehavior
+ import tachiyomi.presentation.core.i18n.stringResource
+ 
+ class BackupSchemaScreen : Screen() {
+@@ -62,7 +63,7 @@ class BackupSchemaScreen : Screen() {
+             Text(
+                 text = schema,
+                 modifier = Modifier
+-                    .verticalScroll(rememberScrollState())
++                    .verticalScroll(rememberScrollState(), flingBehavior = rememberFrameTimeProtectedFlingBehavior())
+                     .padding(contentPadding)
+                     .padding(16.dp),
+                 fontFamily = FontFamily.Monospace,
+diff --git a/app/src/main/java/eu/kanade/presentation/more/settings/screen/debug/WorkerInfoScreen.kt b/app/src/main/java/eu/kanade/presentation/more/settings/screen/debug/WorkerInfoScreen.kt
+index eb3d8298b..f8cececcf 100644
+--- a/app/src/main/java/eu/kanade/presentation/more/settings/screen/debug/WorkerInfoScreen.kt
++++ b/app/src/main/java/eu/kanade/presentation/more/settings/screen/debug/WorkerInfoScreen.kt
+@@ -44,6 +44,7 @@ import mihon.icons.materialsymbols.MaterialSymbols
+ import mihon.icons.materialsymbols.rounded.ContentCopy
+ import tachiyomi.i18n.MR
+ import tachiyomi.presentation.core.components.material.Scaffold
++import tachiyomi.presentation.core.components.rememberFrameTimeProtectedFlingBehavior
+ import tachiyomi.presentation.core.i18n.stringResource
+ import tachiyomi.presentation.core.util.plus
+ import kotlin.time.Instant
+@@ -88,7 +89,8 @@ class WorkerInfoScreen : Screen() {
+         ) { contentPadding ->
+             LazyColumn(
+                 contentPadding = contentPadding + PaddingValues(horizontal = 16.dp),
+-                modifier = Modifier.horizontalScroll(rememberScrollState()),
++                modifier = Modifier.horizontalScroll(rememberScrollState(), flingBehavior = rememberFrameTimeProtectedFlingBehavior()),
++                flingBehavior = rememberFrameTimeProtectedFlingBehavior(),
+             ) {
+                 item { SectionTitle(title = "Enqueued") }
+                 item { SectionText(text = enqueued) }
+diff --git a/app/src/main/java/eu/kanade/presentation/more/settings/widget/AppThemePreferenceWidget.kt b/app/src/main/java/eu/kanade/presentation/more/settings/widget/AppThemePreferenceWidget.kt
+index fc76caf94..4c6116f8c 100644
+--- a/app/src/main/java/eu/kanade/presentation/more/settings/widget/AppThemePreferenceWidget.kt
++++ b/app/src/main/java/eu/kanade/presentation/more/settings/widget/AppThemePreferenceWidget.kt
+@@ -49,6 +49,7 @@ import mihon.icons.materialsymbols.MaterialSymbols
+ import mihon.icons.materialsymbols.roundedfilled.CheckCircle
+ import tachiyomi.i18n.MR
+ import tachiyomi.presentation.core.components.material.padding
++import tachiyomi.presentation.core.components.rememberFrameTimeProtectedFlingBehavior
+ import tachiyomi.presentation.core.i18n.stringResource
+ import tachiyomi.presentation.core.util.secondaryItemAlpha
+ 
+@@ -83,6 +84,7 @@ private fun AppThemesList(
+     LazyRow(
+         contentPadding = PaddingValues(horizontal = PrefsHorizontalPadding),
+         horizontalArrangement = Arrangement.spacedBy(MaterialTheme.padding.small),
++        flingBehavior = rememberFrameTimeProtectedFlingBehavior(),
+     ) {
+         items(
+             items = appThemes,
+diff --git a/app/src/main/java/eu/kanade/presentation/more/settings/widget/TriStateListDialog.kt b/app/src/main/java/eu/kanade/presentation/more/settings/widget/TriStateListDialog.kt
+index 94bc5c98c..61430c865 100644
+--- a/app/src/main/java/eu/kanade/presentation/more/settings/widget/TriStateListDialog.kt
++++ b/app/src/main/java/eu/kanade/presentation/more/settings/widget/TriStateListDialog.kt
+@@ -29,6 +29,7 @@ import mihon.icons.materialsymbols.rounded.CheckBoxOutlineBlank
+ import mihon.icons.materialsymbols.roundedfilled.CheckBox
+ import mihon.icons.materialsymbols.roundedfilled.DisabledByDefault
+ import tachiyomi.i18n.MR
++import tachiyomi.presentation.core.components.rememberFrameTimeProtectedFlingBehavior
+ import tachiyomi.presentation.core.i18n.stringResource
+ 
+ private enum class State {
+@@ -73,7 +74,7 @@ fun <T> TriStateListDialog(
+ 
+                 Box {
+                     val listState = rememberLazyListState()
+-                    LazyColumn(state = listState) {
++                    LazyColumn(state = listState, flingBehavior = rememberFrameTimeProtectedFlingBehavior()) {
+                         itemsIndexed(items = items) { index, item ->
+                             val state = selected[index]
+                             Row(
+diff --git a/app/src/main/java/eu/kanade/presentation/more/stats/StatsScreenContent.kt b/app/src/main/java/eu/kanade/presentation/more/stats/StatsScreenContent.kt
+index c57949335..a4cecc671 100644
+--- a/app/src/main/java/eu/kanade/presentation/more/stats/StatsScreenContent.kt
++++ b/app/src/main/java/eu/kanade/presentation/more/stats/StatsScreenContent.kt
+@@ -23,6 +23,7 @@ import mihon.icons.materialsymbols.rounded.Schedule
+ import tachiyomi.i18n.MR
+ import tachiyomi.presentation.core.components.SectionCard
+ import tachiyomi.presentation.core.components.material.padding
++import tachiyomi.presentation.core.components.rememberFrameTimeProtectedFlingBehavior
+ import tachiyomi.presentation.core.i18n.stringResource
+ import java.util.Locale
+ import kotlin.time.DurationUnit
+@@ -36,6 +37,7 @@ fun StatsScreenContent(
+     LazyColumn(
+         contentPadding = paddingValues,
+         verticalArrangement = Arrangement.spacedBy(MaterialTheme.padding.small),
++        flingBehavior = rememberFrameTimeProtectedFlingBehavior(),
+     ) {
+         item {
+             OverviewSection(state.overview)
+diff --git a/app/src/main/java/eu/kanade/presentation/reader/settings/ReaderSettingsDialog.kt b/app/src/main/java/eu/kanade/presentation/reader/settings/ReaderSettingsDialog.kt
+index e6196b2d3..71028bd77 100644
+--- a/app/src/main/java/eu/kanade/presentation/reader/settings/ReaderSettingsDialog.kt
++++ b/app/src/main/java/eu/kanade/presentation/reader/settings/ReaderSettingsDialog.kt
+@@ -16,6 +16,7 @@ import eu.kanade.presentation.components.TabbedDialog
+ import eu.kanade.presentation.components.TabbedDialogPaddings
+ import eu.kanade.tachiyomi.ui.reader.setting.ReaderSettingsViewModel
+ import tachiyomi.i18n.MR
++import tachiyomi.presentation.core.components.rememberFrameTimeProtectedFlingBehavior
+ import tachiyomi.presentation.core.i18n.stringResource
+ 
+ @Composable
+@@ -57,7 +58,7 @@ fun ReaderSettingsDialog(
+             Column(
+                 modifier = Modifier
+                     .padding(vertical = TabbedDialogPaddings.Vertical)
+-                    .verticalScroll(rememberScrollState()),
++                    .verticalScroll(rememberScrollState(), flingBehavior = rememberFrameTimeProtectedFlingBehavior()),
+             ) {
+                 when (page) {
+                     0 -> ReadingModePage(viewModel)
+diff --git a/app/src/main/java/eu/kanade/presentation/track/TrackInfoDialogHome.kt b/app/src/main/java/eu/kanade/presentation/track/TrackInfoDialogHome.kt
+index c46929016..ec48b732d 100644
+--- a/app/src/main/java/eu/kanade/presentation/track/TrackInfoDialogHome.kt
++++ b/app/src/main/java/eu/kanade/presentation/track/TrackInfoDialogHome.kt
+@@ -61,6 +61,7 @@ import mihon.icons.materialsymbols.MaterialSymbols
+ import mihon.icons.materialsymbols.rounded.MoreVert
+ import mihon.icons.materialsymbols.roundedfilled.VisibilityOff
+ import tachiyomi.i18n.MR
++import tachiyomi.presentation.core.components.rememberFrameTimeProtectedFlingBehavior
+ import tachiyomi.presentation.core.i18n.stringResource
+ import java.time.format.DateTimeFormatter
+ 
+@@ -83,7 +84,7 @@ fun TrackInfoDialogHome(
+         modifier = Modifier
+             .animateContentSize()
+             .fillMaxWidth()
+-            .verticalScroll(rememberScrollState())
++            .verticalScroll(rememberScrollState(), flingBehavior = rememberFrameTimeProtectedFlingBehavior())
+             .padding(16.dp)
+             .windowInsetsPadding(WindowInsets.systemBars),
+         verticalArrangement = Arrangement.spacedBy(24.dp),
+diff --git a/app/src/main/java/eu/kanade/presentation/updates/UpdatesFilterDialog.kt b/app/src/main/java/eu/kanade/presentation/updates/UpdatesFilterDialog.kt
+index d555a42ab..0de2afe2b 100644
+--- a/app/src/main/java/eu/kanade/presentation/updates/UpdatesFilterDialog.kt
++++ b/app/src/main/java/eu/kanade/presentation/updates/UpdatesFilterDialog.kt
+@@ -33,6 +33,7 @@ import tachiyomi.i18n.MR
+ import tachiyomi.presentation.core.components.SettingsItemsPaddings
+ import tachiyomi.presentation.core.components.TriStateItem
+ import tachiyomi.presentation.core.components.material.padding
++import tachiyomi.presentation.core.components.rememberFrameTimeProtectedFlingBehavior
+ import tachiyomi.presentation.core.i18n.stringResource
+ import tachiyomi.presentation.core.screens.LoadingScreen
+ import tachiyomi.presentation.core.util.collectAsState
+@@ -52,7 +53,7 @@ fun UpdatesFilterDialog(
+         Column(
+             modifier = Modifier
+                 .padding(vertical = TabbedDialogPaddings.Vertical)
+-                .verticalScroll(rememberScrollState()),
++                .verticalScroll(rememberScrollState(), flingBehavior = rememberFrameTimeProtectedFlingBehavior()),
+         ) {
+             when (page) {
+                 0 -> FilterSheet(viewModel = viewModel)
+diff --git a/app/src/main/java/eu/kanade/tachiyomi/ui/browse/source/browse/BrowseSourceScreen.kt b/app/src/main/java/eu/kanade/tachiyomi/ui/browse/source/browse/BrowseSourceScreen.kt
+index 28c243358..f08863aea 100644
+--- a/app/src/main/java/eu/kanade/tachiyomi/ui/browse/source/browse/BrowseSourceScreen.kt
++++ b/app/src/main/java/eu/kanade/tachiyomi/ui/browse/source/browse/BrowseSourceScreen.kt
+@@ -1,6 +1,5 @@
+ package eu.kanade.tachiyomi.ui.browse.source.browse
+ 
+-import tachiyomi.presentation.core.components.material.rememberBrowsingTopAppBarScrollBehavior
+ import androidx.compose.foundation.background
+ import androidx.compose.foundation.horizontalScroll
+ import androidx.compose.foundation.layout.Arrangement
+@@ -62,6 +61,8 @@ import tachiyomi.domain.source.model.StubSource
+ import tachiyomi.i18n.MR
+ import tachiyomi.presentation.core.components.material.Scaffold
+ import tachiyomi.presentation.core.components.material.padding
++import tachiyomi.presentation.core.components.material.rememberBrowsingTopAppBarScrollBehavior
++import tachiyomi.presentation.core.components.rememberFrameTimeProtectedFlingBehavior
+ import tachiyomi.presentation.core.i18n.stringResource
+ import tachiyomi.presentation.core.screens.LoadingScreen
+ import tachiyomi.source.local.LocalSource
+@@ -152,7 +153,7 @@ data class BrowseSourceScreen(
+ 
+                     Row(
+                         modifier = Modifier
+-                            .horizontalScroll(rememberScrollState())
++                            .horizontalScroll(rememberScrollState(), flingBehavior = rememberFrameTimeProtectedFlingBehavior())
+                             .padding(horizontal = MaterialTheme.padding.small),
+                         horizontalArrangement = Arrangement.spacedBy(MaterialTheme.padding.small),
+                     ) {
+diff --git a/app/src/main/java/eu/kanade/tachiyomi/ui/library/LibraryViewModel.kt b/app/src/main/java/eu/kanade/tachiyomi/ui/library/LibraryViewModel.kt
+index d5fafd181..e0df69676 100644
+--- a/app/src/main/java/eu/kanade/tachiyomi/ui/library/LibraryViewModel.kt
++++ b/app/src/main/java/eu/kanade/tachiyomi/ui/library/LibraryViewModel.kt
+@@ -675,14 +675,15 @@ class LibraryViewModel(
+         }
+     }
+ 
+-    fun getDisplayMode(): PreferenceMutableState<LibraryDisplayMode> {
+-        return libraryPreferences.displayMode.asState(viewModelScope)
+-    }
++    // A getter is called again on recomposition; keep its model-scoped collector stable.
++    private val displayModeState by lazy { libraryPreferences.displayMode.asState(viewModelScope) }
++    private val landscapeColumnsState by lazy { libraryPreferences.landscapeColumns.asState(viewModelScope) }
++    private val portraitColumnsState by lazy { libraryPreferences.portraitColumns.asState(viewModelScope) }
+ 
+-    fun getColumnsForOrientation(isLandscape: Boolean): PreferenceMutableState<Int> {
+-        return (if (isLandscape) libraryPreferences.landscapeColumns else libraryPreferences.portraitColumns)
+-            .asState(viewModelScope)
+-    }
++    fun getDisplayMode(): PreferenceMutableState<LibraryDisplayMode> = displayModeState
++
++    fun getColumnsForOrientation(isLandscape: Boolean): PreferenceMutableState<Int> =
++        if (isLandscape) landscapeColumnsState else portraitColumnsState
+ 
+     fun getRandomLibraryItemForCurrentCategory(): LibraryItem? {
+         val state = state.value
+diff --git a/app/src/main/java/eu/kanade/tachiyomi/ui/main/MainActivity.kt b/app/src/main/java/eu/kanade/tachiyomi/ui/main/MainActivity.kt
+index 744332789..7cfa9d67c 100644
+--- a/app/src/main/java/eu/kanade/tachiyomi/ui/main/MainActivity.kt
++++ b/app/src/main/java/eu/kanade/tachiyomi/ui/main/MainActivity.kt
+@@ -127,6 +127,7 @@ import tachiyomi.domain.release.interactor.GetApplicationRelease
+ import tachiyomi.i18n.MR
+ import tachiyomi.presentation.core.components.material.Scaffold
+ import tachiyomi.presentation.core.components.material.padding
++import tachiyomi.presentation.core.components.rememberFrameTimeProtectedFlingBehavior
+ import tachiyomi.presentation.core.i18n.stringResource
+ import tachiyomi.presentation.core.util.collectAsState
+ import kotlin.time.Clock
+@@ -438,7 +439,7 @@ class MainActivity : BaseActivity() {
+                     Spacer(modifier = Modifier.height(16.dp))
+                     Column(
+                         modifier = Modifier
+-                            .verticalScroll(rememberScrollState())
++                            .verticalScroll(rememberScrollState(), flingBehavior = rememberFrameTimeProtectedFlingBehavior())
+                             .padding(16.dp)
+                             .weight(1f, fill = false)
+                             .fillMaxWidth(),
+diff --git a/app/src/main/java/mihon/feature/migration/config/MigrationConfigScreenSheet.kt b/app/src/main/java/mihon/feature/migration/config/MigrationConfigScreenSheet.kt
+index c7aaaa7a9..41b6e52d2 100644
+--- a/app/src/main/java/mihon/feature/migration/config/MigrationConfigScreenSheet.kt
++++ b/app/src/main/java/mihon/feature/migration/config/MigrationConfigScreenSheet.kt
+@@ -41,6 +41,7 @@ import tachiyomi.core.common.preference.toggle
+ import tachiyomi.i18n.MR
+ import tachiyomi.presentation.core.components.material.Button
+ import tachiyomi.presentation.core.components.material.padding
++import tachiyomi.presentation.core.components.rememberFrameTimeProtectedFlingBehavior
+ import tachiyomi.presentation.core.i18n.stringResource
+ import tachiyomi.presentation.core.theme.active
+ import tachiyomi.presentation.core.theme.header
+@@ -60,7 +61,7 @@ fun MigrationConfigScreenSheet(
+                 modifier = Modifier
+                     .weight(1f, fill = false)
+                     .fillMaxWidth()
+-                    .verticalScroll(rememberScrollState())
++                    .verticalScroll(rememberScrollState(), flingBehavior = rememberFrameTimeProtectedFlingBehavior())
+                     .padding(top = MaterialTheme.padding.medium),
+             ) {
+                 Text(
+diff --git a/app/src/main/java/mihon/feature/migration/dialog/MigrateMangaDialog.kt b/app/src/main/java/mihon/feature/migration/dialog/MigrateMangaDialog.kt
+index 06fe4af9e..5bb5d5252 100644
+--- a/app/src/main/java/mihon/feature/migration/dialog/MigrateMangaDialog.kt
++++ b/app/src/main/java/mihon/feature/migration/dialog/MigrateMangaDialog.kt
+@@ -43,6 +43,7 @@ import tachiyomi.domain.manga.model.Manga
+ import tachiyomi.i18n.MR
+ import tachiyomi.presentation.core.components.LabeledCheckbox
+ import tachiyomi.presentation.core.components.material.padding
++import tachiyomi.presentation.core.components.rememberFrameTimeProtectedFlingBehavior
+ import tachiyomi.presentation.core.i18n.stringResource
+ import tachiyomi.presentation.core.screens.LoadingScreen
+ 
+@@ -78,7 +79,7 @@ internal fun Screen.MigrateMangaDialog(
+         },
+         text = {
+             Column(
+-                modifier = Modifier.verticalScroll(rememberScrollState()),
++                modifier = Modifier.verticalScroll(rememberScrollState(), flingBehavior = rememberFrameTimeProtectedFlingBehavior()),
+             ) {
+                 state.applicableFlags.fastForEach { flag ->
+                     LabeledCheckbox(
+diff --git a/app/src/main/java/mihon/feature/support/SupportUsScreen.kt b/app/src/main/java/mihon/feature/support/SupportUsScreen.kt
+index fb0fe547e..fbd7f894a 100644
+--- a/app/src/main/java/mihon/feature/support/SupportUsScreen.kt
++++ b/app/src/main/java/mihon/feature/support/SupportUsScreen.kt
+@@ -35,6 +35,7 @@ import mihon.icons.simpleicons.SimpleIcons
+ import tachiyomi.core.common.Constants
+ import tachiyomi.i18n.MR
+ import tachiyomi.presentation.core.components.material.padding
++import tachiyomi.presentation.core.components.rememberFrameTimeProtectedFlingBehavior
+ import tachiyomi.presentation.core.i18n.stringResource
+ 
+ class SupportUsScreen : Screen() {
+@@ -54,7 +55,7 @@ class SupportUsScreen : Screen() {
+         ) { paddingValues ->
+             Column(
+                 verticalArrangement = Arrangement.spacedBy(MaterialTheme.padding.small),
+-                modifier = Modifier.verticalScroll(rememberScrollState()).padding(
++                modifier = Modifier.verticalScroll(rememberScrollState(), flingBehavior = rememberFrameTimeProtectedFlingBehavior()).padding(
+                     remember(paddingValues) {
+                         object : PaddingValues {
+                             override fun calculateLeftPadding(layoutDirection: LayoutDirection): Dp {
+diff --git a/app/src/main/java/mihon/feature/upcoming/UpcomingScreen.kt b/app/src/main/java/mihon/feature/upcoming/UpcomingScreen.kt
+index 5f6f39241..969764c1a 100644
+--- a/app/src/main/java/mihon/feature/upcoming/UpcomingScreen.kt
++++ b/app/src/main/java/mihon/feature/upcoming/UpcomingScreen.kt
+@@ -31,6 +31,7 @@ import tachiyomi.i18n.MR
+ import tachiyomi.presentation.core.components.SettingsItemsPaddings
+ import tachiyomi.presentation.core.components.TriStateItem
+ import tachiyomi.presentation.core.components.material.padding
++import tachiyomi.presentation.core.components.rememberFrameTimeProtectedFlingBehavior
+ import tachiyomi.presentation.core.i18n.stringResource
+ import tachiyomi.presentation.core.screens.LoadingScreen
+ import tachiyomi.presentation.core.util.collectAsState
+@@ -128,7 +129,7 @@ fun UpcomingFilterDialog(
+         Column(
+             modifier = Modifier
+                 .padding(vertical = TabbedDialogPaddings.Vertical)
+-                .verticalScroll(rememberScrollState()),
++                .verticalScroll(rememberScrollState(), flingBehavior = rememberFrameTimeProtectedFlingBehavior()),
+         ) {
+             CategoryFilterSheet(viewModel = viewModel)
+         }
+diff --git a/presentation-core/src/main/java/tachiyomi/presentation/core/components/LazyColumnWithAction.kt b/presentation-core/src/main/java/tachiyomi/presentation/core/components/LazyColumnWithAction.kt
+index de2f7636b..12bf60abc 100644
+--- a/presentation-core/src/main/java/tachiyomi/presentation/core/components/LazyColumnWithAction.kt
++++ b/presentation-core/src/main/java/tachiyomi/presentation/core/components/LazyColumnWithAction.kt
+@@ -32,6 +32,7 @@ fun LazyColumnWithAction(
+         LazyColumn(
+             modifier = Modifier.weight(1f),
+             content = content,
++            flingBehavior = rememberFrameTimeProtectedFlingBehavior(),
+         )
+ 
+         HorizontalDivider()
+diff --git a/presentation-core/src/main/java/tachiyomi/presentation/core/components/LazyGrid.kt b/presentation-core/src/main/java/tachiyomi/presentation/core/components/LazyGrid.kt
+index 74e0c7f56..7c42dd07b 100644
+--- a/presentation-core/src/main/java/tachiyomi/presentation/core/components/LazyGrid.kt
++++ b/presentation-core/src/main/java/tachiyomi/presentation/core/components/LazyGrid.kt
+@@ -76,6 +76,7 @@ fun FastScrollLazyVerticalGrid(
+             horizontalArrangement = horizontalArrangement,
+             userScrollEnabled = userScrollEnabled,
+             content = content,
++            flingBehavior = rememberFrameTimeProtectedFlingBehavior(),
+         )
+     }
+ }
+diff --git a/presentation-core/src/main/java/tachiyomi/presentation/core/components/LazyList.kt b/presentation-core/src/main/java/tachiyomi/presentation/core/components/LazyList.kt
+index 667288b8d..573ca5345 100644
+--- a/presentation-core/src/main/java/tachiyomi/presentation/core/components/LazyList.kt
++++ b/presentation-core/src/main/java/tachiyomi/presentation/core/components/LazyList.kt
+@@ -35,7 +35,7 @@ fun ScrollbarLazyColumn(
+ ) {
+     val direction = LocalLayoutDirection.current
+     val density = LocalDensity.current
+-    val positionOffset = remember(contentPadding) {
++    val positionOffset = remember(contentPadding, direction, density) {
+         with(density) { contentPadding.calculateEndPadding(direction).toPx() }
+     }
+     LazyColumn(
+@@ -52,6 +52,7 @@ fun ScrollbarLazyColumn(
+         horizontalAlignment = horizontalAlignment,
+         userScrollEnabled = userScrollEnabled,
+         content = content,
++        flingBehavior = rememberFrameTimeProtectedFlingBehavior(),
+     )
+ }
+ 
+@@ -105,6 +106,7 @@ fun FastScrollLazyColumn(
+             horizontalAlignment = horizontalAlignment,
+             userScrollEnabled = userScrollEnabled,
+             content = content,
++            flingBehavior = rememberFrameTimeProtectedFlingBehavior(),
+         )
+     }
+ }
+diff --git a/presentation-core/src/main/java/tachiyomi/presentation/core/components/SettingsItems.kt b/presentation-core/src/main/java/tachiyomi/presentation/core/components/SettingsItems.kt
+index ca367add7..0e1f96f7e 100644
+--- a/presentation-core/src/main/java/tachiyomi/presentation/core/components/SettingsItems.kt
++++ b/presentation-core/src/main/java/tachiyomi/presentation/core/components/SettingsItems.kt
+@@ -428,6 +428,7 @@ fun SettingsIconGrid(labelRes: StringResource, content: LazyGridScope.() -> Unit
+             verticalArrangement = Arrangement.spacedBy(MaterialTheme.padding.extraSmall),
+             horizontalArrangement = Arrangement.spacedBy(MaterialTheme.padding.small),
+             content = content,
++            flingBehavior = rememberFrameTimeProtectedFlingBehavior(),
+         )
+     }
+ }
+diff --git a/presentation-core/src/main/java/tachiyomi/presentation/core/components/TimelineGrid.kt b/presentation-core/src/main/java/tachiyomi/presentation/core/components/TimelineGrid.kt
+index 45a3c3886..7cc022c28 100644
+--- a/presentation-core/src/main/java/tachiyomi/presentation/core/components/TimelineGrid.kt
++++ b/presentation-core/src/main/java/tachiyomi/presentation/core/components/TimelineGrid.kt
+@@ -67,6 +67,7 @@ fun TimelineGrid(
+                 contentPadding = contentPadding + PaddingValues(horizontal = 1.dp, vertical = 3.dp),
+                 horizontalArrangement = Arrangement.spacedBy(3.dp),
+                 verticalItemSpacing = 3.dp,
++                flingBehavior = rememberFrameTimeProtectedFlingBehavior(),
+             ) {
+                 items(
+                     count = count,
+diff --git a/presentation-core/src/main/java/tachiyomi/presentation/core/components/WheelPicker.kt b/presentation-core/src/main/java/tachiyomi/presentation/core/components/WheelPicker.kt
+index c7e1898fd..c8def63c8 100644
+--- a/presentation-core/src/main/java/tachiyomi/presentation/core/components/WheelPicker.kt
++++ b/presentation-core/src/main/java/tachiyomi/presentation/core/components/WheelPicker.kt
+@@ -192,7 +192,7 @@ private fun <T> WheelPicker(
+                     },
+                 state = lazyListState,
+                 contentPadding = PaddingValues(vertical = size.height / ROW_COUNT * ((ROW_COUNT - 1) / 2)),
+-                flingBehavior = rememberSnapFlingBehavior(lazyListState = lazyListState),
++                flingBehavior = rememberFrameTimeProtectedFlingBehavior(rememberSnapFlingBehavior(lazyListState = lazyListState)),
+             ) {
+                 itemsIndexed(items) { index, item ->
+                     Box(
+diff --git a/presentation-core/src/main/java/tachiyomi/presentation/core/screens/EmptyScreen.kt b/presentation-core/src/main/java/tachiyomi/presentation/core/screens/EmptyScreen.kt
+index 5f058bd0c..98161a9d9 100644
+--- a/presentation-core/src/main/java/tachiyomi/presentation/core/screens/EmptyScreen.kt
++++ b/presentation-core/src/main/java/tachiyomi/presentation/core/screens/EmptyScreen.kt
+@@ -24,6 +24,7 @@ import androidx.compose.ui.util.fastForEach
+ import dev.icerock.moko.resources.StringResource
+ import tachiyomi.presentation.core.components.ActionButton
+ import tachiyomi.presentation.core.components.material.padding
++import tachiyomi.presentation.core.components.rememberFrameTimeProtectedFlingBehavior
+ import tachiyomi.presentation.core.i18n.stringResource
+ import tachiyomi.presentation.core.util.secondaryItemAlpha
+ import kotlin.random.Random
+@@ -57,7 +58,7 @@ fun EmptyScreen(
+     Column(
+         modifier = modifier
+             .fillMaxSize()
+-            .verticalScroll(rememberScrollState())
++            .verticalScroll(rememberScrollState(), flingBehavior = rememberFrameTimeProtectedFlingBehavior())
+             .padding(horizontal = 24.dp),
+         horizontalAlignment = Alignment.CenterHorizontally,
+         verticalArrangement = Arrangement.Center,
+diff --git a/presentation-core/src/main/java/tachiyomi/presentation/core/screens/InfoScreen.kt b/presentation-core/src/main/java/tachiyomi/presentation/core/screens/InfoScreen.kt
+index 9c495bd32..7ceeb5524 100644
+--- a/presentation-core/src/main/java/tachiyomi/presentation/core/screens/InfoScreen.kt
++++ b/presentation-core/src/main/java/tachiyomi/presentation/core/screens/InfoScreen.kt
+@@ -33,6 +33,7 @@ import mihon.icons.materialsymbols.MaterialSymbols
+ import mihon.icons.materialsymbols.rounded.Newspaper
+ import tachiyomi.presentation.core.components.material.Scaffold
+ import tachiyomi.presentation.core.components.material.padding
++import tachiyomi.presentation.core.components.rememberFrameTimeProtectedFlingBehavior
+ import tachiyomi.presentation.core.util.secondaryItemAlpha
+ 
+ @Composable
+@@ -102,7 +103,7 @@ fun InfoScreen(
+ 
+         Column(
+             modifier = Modifier
+-                .verticalScroll(rememberScrollState())
++                .verticalScroll(rememberScrollState(), flingBehavior = rememberFrameTimeProtectedFlingBehavior())
+                 .fillMaxWidth()
+                 .padding(paddingValues)
+                 .padding(top = 48.dp)
+diff --git a/presentation-core/src/test/java/tachiyomi/presentation/core/components/NavigationChromeScrollModesTest.kt b/presentation-core/src/test/java/tachiyomi/presentation/core/components/NavigationChromeScrollModesTest.kt
+new file mode 100644
+index 000000000..7189d076d
+--- /dev/null
++++ b/presentation-core/src/test/java/tachiyomi/presentation/core/components/NavigationChromeScrollModesTest.kt
+@@ -0,0 +1,199 @@
++package tachiyomi.presentation.core.components
++
++import androidx.compose.foundation.gestures.FlingBehavior
++import androidx.compose.foundation.gestures.ScrollScope
++import androidx.compose.foundation.layout.Box
++import androidx.compose.foundation.layout.Column
++import androidx.compose.foundation.layout.PaddingValues
++import androidx.compose.foundation.layout.fillMaxWidth
++import androidx.compose.foundation.layout.height
++import androidx.compose.foundation.layout.requiredSize
++import androidx.compose.foundation.lazy.grid.GridCells
++import androidx.compose.foundation.lazy.grid.rememberLazyGridState
++import androidx.compose.foundation.lazy.rememberLazyListState
++import androidx.compose.foundation.lazy.staggeredgrid.rememberLazyStaggeredGridState
++import androidx.compose.foundation.rememberScrollState
++import androidx.compose.foundation.verticalScroll
++import androidx.compose.runtime.MonotonicFrameClock
++import androidx.compose.runtime.mutableIntStateOf
++import androidx.compose.runtime.withFrameNanos
++import androidx.compose.ui.Modifier
++import androidx.compose.ui.platform.testTag
++import androidx.compose.ui.test.ExperimentalTestApi
++import androidx.compose.ui.test.onNodeWithTag
++import androidx.compose.ui.test.performTouchInput
++import androidx.compose.ui.test.runComposeUiTest
++import androidx.compose.ui.test.swipeDown
++import androidx.compose.ui.test.swipeUp
++import androidx.compose.ui.unit.dp
++import kotlinx.coroutines.currentCoroutineContext
++import kotlinx.coroutines.runBlocking
++import org.junit.Test
++import org.junit.jupiter.api.Assertions.assertEquals
++import org.junit.jupiter.api.Assertions.assertFalse
++import org.junit.jupiter.api.Assertions.assertSame
++import org.junit.jupiter.api.Assertions.assertTrue
++import org.junit.runner.RunWith
++import org.robolectric.RobolectricTestRunner
++import org.robolectric.annotation.Config
++
++@OptIn(ExperimentalTestApi::class)
++@RunWith(RobolectricTestRunner::class)
++@Config(sdk = [34])
++class NavigationChromeScrollModesTest {
++    @Test
++    fun `plain list supports filtering and viewport changes`() = assertAdaptiveScrolling(0)
++
++    @Test
++    fun `fast list supports filtering and viewport changes`() = assertAdaptiveScrolling(1)
++
++    @Test
++    fun `compact grid supports filtering and viewport changes`() = assertAdaptiveScrolling(2)
++
++    @Test
++    fun `timeline supports filtering and viewport changes`() = assertAdaptiveScrolling(3)
++
++    @Test
++    fun `scroll state supports short and empty filtered content`() = assertAdaptiveScrolling(4)
++
++    private fun assertAdaptiveScrolling(mode: Int) = runComposeUiTest {
++        val count = mutableIntStateOf(400)
++        val stride = mutableIntStateOf(1)
++        val width = mutableIntStateOf(320)
++        lateinit var offset: () -> Int
++        lateinit var moving: () -> Boolean
++        setContent {
++            val list = rememberLazyListState()
++            val grid = rememberLazyGridState()
++            val timeline = rememberLazyStaggeredGridState()
++            val scroll = rememberScrollState()
++            val columns = if (width.intValue > 400) 3 else 2
++            val modifier = Modifier.requiredSize(width.intValue.dp, 480.dp).testTag("scroll")
++            val item: @androidx.compose.runtime.Composable () -> Unit = { Box(Modifier.fillMaxWidth().height(72.dp)) }
++            offset = {
++                when (mode) {
++                    0, 1 -> list.firstVisibleItemIndex * 1000 + list.firstVisibleItemScrollOffset
++                    2 -> grid.firstVisibleItemIndex * 1000 + grid.firstVisibleItemScrollOffset
++                    3 -> timeline.firstVisibleItemIndex * 1000 + timeline.firstVisibleItemScrollOffset
++                    else -> scroll.value
++                }
++            }
++            moving = {
++                when (mode) {
++                    0, 1 -> list.isScrollInProgress
++                    2 -> grid.isScrollInProgress
++                    3 -> timeline.isScrollInProgress
++                    else -> scroll.isScrollInProgress
++                }
++            }
++            when (mode) {
++                0 -> ScrollbarLazyColumn(modifier = modifier, state = list) {
++                    items(count.intValue, key = { it * stride.intValue }) { item() }
++                }
++                1 -> FastScrollLazyColumn(modifier = modifier, state = list) {
++                    items(count.intValue, key = { it * stride.intValue }) { item() }
++                }
++                2 -> FastScrollLazyVerticalGrid(columns = GridCells.Fixed(columns), modifier = modifier, state = grid) {
++                    items(count.intValue, key = { it * stride.intValue }) { item() }
++                }
++                3 -> TimelineGrid(
++                    count = count.intValue,
++                    key = { it * stride.intValue },
++                    fullLine = { it % 21 == 0 },
++                    columns = columns,
++                    minColumnWidth = 120.dp,
++                    contentPadding = PaddingValues(0.dp),
++                    modifier = modifier,
++                    state = timeline,
++                ) { item() }
++                else -> Column(modifier.verticalScroll(scroll, flingBehavior = rememberFrameTimeProtectedFlingBehavior())) {
++                    repeat(count.intValue) { item() }
++                }
++            }
++        }
++        fun swipe(up: Boolean) {
++            onNodeWithTag("scroll").performTouchInput {
++                if (up) swipeUp(durationMillis = 180) else swipeDown(durationMillis = 180)
++            }
++            waitForIdle()
++            runOnIdle { assertFalse(moving(), "mode=$mode left scrolling") }
++        }
++        swipe(true)
++        runOnIdle {
++            assertTrue(offset() > 0, "mode=$mode did not move")
++            count.intValue = 160
++            stride.intValue = 2
++            width.intValue = 600
++        }
++        waitForIdle()
++        swipe(true)
++        var wide = 0
++        runOnIdle {
++            wide = offset()
++            assertTrue(wide > 0)
++        }
++        swipe(false)
++        runOnIdle { assertTrue(offset() < wide, "mode=$mode reverse fling did not move") }
++        runOnIdle { width.intValue = 320 }
++        waitForIdle()
++        swipe(true)
++        runOnIdle { count.intValue = 0 }
++        waitForIdle()
++        swipe(true)
++        runOnIdle {
++            assertEquals(0, offset())
++            count.intValue = 1
++        }
++        waitForIdle()
++        swipe(true)
++        runOnIdle {
++            assertEquals(0, offset())
++            count.intValue = 400
++            stride.intValue = 1
++        }
++        waitForIdle()
++        swipe(true)
++        runOnIdle { assertTrue(offset() > 0, "mode=$mode failed to resume after empty content") }
++    }
++
++    @Test
++    fun `generic fling guard repairs repeated stamps and forwards scope velocity and remaining velocity`() = runComposeUiTest {
++        lateinit var guarded: FlingBehavior
++        lateinit var seenScope: ScrollScope
++        val velocities = mutableListOf<Float>()
++        val times = mutableListOf<Long>()
++        val native = object : FlingBehavior {
++            override suspend fun ScrollScope.performFling(initialVelocity: Float): Float {
++                seenScope = this
++                velocities += initialVelocity
++                times += withFrameNanos { it }
++                times += withFrameNanos { it }
++                scrollBy(initialVelocity / 10f)
++                return initialVelocity / 2f
++            }
++        }
++        setContent { guarded = rememberFrameTimeProtectedFlingBehavior(native) }
++        runOnIdle {
++            val parent = object : MonotonicFrameClock {
++                override suspend fun <R> withFrameNanos(onFrame: (Long) -> R): R = onFrame(1_000_000_000L)
++            }
++            val consumed = mutableListOf<Float>()
++            val scroll = object : ScrollScope {
++                override fun scrollBy(pixels: Float): Float {
++                    consumed += pixels
++                    return pixels
++                }
++            }
++            runBlocking(parent) {
++                assertEquals(500f, with(guarded) { scroll.performFling(1000f) })
++                assertSame(scroll, seenScope)
++                assertSame(parent, currentCoroutineContext()[MonotonicFrameClock])
++                assertEquals(-200f, with(guarded) { scroll.performFling(-400f) })
++            }
++            assertEquals(listOf(1000f, -400f), velocities)
++            assertEquals(listOf(100f, -40f), consumed)
++            assertEquals(times[0], times[2], "each new fling must start from its native clock")
++            assertTrue(times[1] > times[0] && times[3] > times[2], "repeated stamps were not repaired")
++        }
++    }
++}
