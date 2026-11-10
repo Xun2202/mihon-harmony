@@ -1061,3 +1061,11 @@ gh release list --repo Xun2202/mihon-harmony
 - Anikku编译补原enableSwipeDismiss flag引用和溢出菜单Alignment导入；不删fork功能或改宽度。首两轮失败产物均未发布，保留全部10项交互回归和旧测试。
 
 - 0091补Mihon TabbedDialog.MoreMenu仍使用的Alignment导入；该处与Anikku同需保留。第三轮182项通过/2项跳过/0失败，后续app编译在此单一导入失败、未发布；只重建Mihon，Anikku未变候选继续，交互实现与断言不改。
+
+## 2026-11-11：筛选面板打开回归与章节操作栏上缘（0092）
+
+- 用户37/50反馈“点筛选按钮都没面板弹出来”，另长按某一集后操作栏上缘希望稍高。共用修复与Anikku 0096同步，实际手机效果待新版本反馈。
+- 原LaunchedEffect(drag, height>0, closing)创建于尚未测量的组合，但协程实际启动可能已在布局给出高度之后；旧false-key协程开始入场，readiness重组又取消它，finally令entering=false，隐藏位置observer会把尚未入场当作收起并dismiss。改在单个LaunchedEffect(drag, closing)内snapshotFlow.first等有效高度/offset，测量不重启入场；显式关闭和真正拖动中断、遮罩/距离速度规则保留。
+- 新NavigationChromeSheetWindowTest走实际Compose Dialog窗口、与app相同edge-to-edge/dim/animation设置及NavigationOverlayScope；点击筛选按钮后检查可见与最终fraction、未自发关闭，内容关闭后连续再开3次，手机与居中两项。之前仅直接在Activity内容里测核心组件，不能代表真实弹窗首次布局时序；该盲区补齐，原有10项交互及其它必要回归保留。
+- 仅MangaBottomActionMenu（章节/剧集选择）上padding+4dp：紧凑8dp、其它12dp；下padding仍4/8dp、按钮40/48dp和无300ms延迟保留。书架LibraryBottomActionMenu继续现有紧凑高度，避免一起抬高。
+- Animeko没有此自定义AdaptiveSheet readiness key/observer链，独立Material3/KMP路径的上轮判断复用；本轮不改第三款。规则docs/rules/apk-shared-ui.md现有AGENTS入口继续加载，并补真实Dialog开关/重开验收范围。
