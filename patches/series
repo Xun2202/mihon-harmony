@@ -76,3 +76,4 @@
 0076-ui-window-capture-lifetime-and-light-recorder.patch
 0077-test-render-before-layer-lifetime-assertions.patch
 0078-ui-adaptive-window-continuity-and-soft-press-light.patch
+0079-ui-preserve-content-across-adaptive-navigation.patch
