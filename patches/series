@@ -78,3 +78,4 @@
 0078-ui-adaptive-window-continuity-and-soft-press-light.patch
 0079-ui-preserve-content-across-adaptive-navigation.patch
 0080-debug-fling-tail-timing-and-placement.patch
+0081-scroll-recover-stalled-fling-frame-time.patch
