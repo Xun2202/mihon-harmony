@@ -82,3 +82,4 @@
 0082-ui-smooth-category-paging-and-shared-animations.patch
 0083-test-render-protected-indicator-state.patch
 0084-ui-protect-scroll-modes-and-preference-observers.patch
+0085-test-retain-empty-staggered-grid-anchor.patch
