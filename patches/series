@@ -92,3 +92,4 @@
 0092-fix-sheet-measurement-entrance-and-chapter-spacing.patch
 0093-browse-full-title-secondary-row-and-panorama-edge.patch
 0094-browsing-content-pager-and-live-scrollbars.patch
+0095-scroller-restored-position-signal-and-regression-basis.patch
