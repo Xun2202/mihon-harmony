@@ -94,3 +94,4 @@
 0094-browsing-content-pager-and-live-scrollbars.patch
 0095-scroller-restored-position-signal-and-regression-basis.patch
 0096-bounded-reading-offset-and-hidden-layer-fast-path.patch
+0097-browse-swipe-resume-and-soft-navigation.patch
