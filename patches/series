@@ -95,3 +95,4 @@
 0095-scroller-restored-position-signal-and-regression-basis.patch
 0096-bounded-reading-offset-and-hidden-layer-fast-path.patch
 0097-browse-swipe-resume-and-soft-navigation.patch
+0098-navigation-spring-and-restored-intent-regressions.patch
