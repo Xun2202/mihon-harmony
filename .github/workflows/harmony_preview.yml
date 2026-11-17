@@ -184,7 +184,8 @@ jobs:
         # -Penable-updater 打开 BuildConfig.UPDATER_ENABLED, 否则 App 不会检查更新.
         run: |
           bash "$GITHUB_WORKSPACE/scripts/check-scroll-report.sh" "$PWD"
-          ./gradlew :presentation-core:testDebugUnitTest \
+          ./gradlew :core:common:testDebugUnitTest --tests '*UniFileExtensionsTest' \
+            :presentation-core:testDebugUnitTest \
             --tests '*NavigationChrome*' --tests '*Timeline*Test' --tests '*PanoramaAutoColumnsTest' --tests '*PanoramaMasonryLayoutTest' --tests '*PanoramaMasonryFlingTest.a coast from the content survives and a coast from the thumb does not' \
             :app:testDebugUnitTest --tests '*NavigationChrome*' \
             -Penable-updater --stacktrace

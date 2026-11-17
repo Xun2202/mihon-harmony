@@ -1,0 +1,88 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Xun2202 <98207886+Xun2202@users.noreply.github.com>
+Date: Tue, 17 Nov 2026 13:01:20 +0000
+Subject: [PATCH] storage: stop failed target replacement before creating SAF
+ duplicates
+
+Shared storage deletion and verified-copy guard matches anikku-harmony 0106. Preserve source data when the target cannot be verified. The restore regression uses the older Compose test entry supported by both apps. Anikku additionally serializes canceled download owners, recovers verified duplicate videos, keeps remote retry URLs, and configures supported loopback HLS/HTTP options with redacted native diagnostics.
+---
+ .../core/common/storage/UniFileExtensions.kt      | 15 +++++++++------
+ .../core/common/storage/UniFileExtensionsTest.kt  |  4 ++--
+ .../NavigationChromeSourceBrowseRestoreTest.kt    |  2 +-
+ 3 files changed, 12 insertions(+), 9 deletions(-)
+
+diff --git a/core/common/src/main/kotlin/tachiyomi/core/common/storage/UniFileExtensions.kt b/core/common/src/main/kotlin/tachiyomi/core/common/storage/UniFileExtensions.kt
+index 88343774d..5a7284c60 100644
+--- a/core/common/src/main/kotlin/tachiyomi/core/common/storage/UniFileExtensions.kt
++++ b/core/common/src/main/kotlin/tachiyomi/core/common/storage/UniFileExtensions.kt
+@@ -81,10 +81,12 @@ private fun UniFile.transferContentsTo(target: UniFile, resolver: ContentResolve
+         val existing = target.findFile(childName)
+         if (existing != null) {
+             // Left behind by an interrupted earlier attempt: keep it when it is complete.
+-            if (!child.isDirectory && !existing.isDirectory && existing.length() == child.length()) {
++            if (!child.isDirectory && !existing.isDirectory && existing.length() > 0L && existing.length() == child.length()) {
+                 return@forEach
+             }
+-            existing.deleteSafely()
++            if (!existing.deleteSafely()) {
++                throw IOException("Failed to replace '$childName': existing target could not be deleted")
++            }
+         }
+         if (resolver != null && child.moveInto(target, resolver)) {
+             return@forEach
+@@ -112,15 +114,16 @@ private fun UniFile.moveInto(newParent: UniFile, resolver: ContentResolver): Boo
+ }
+ 
+ private fun UniFile.copyFileTo(target: UniFile) {
+-    openInputStream().use { input ->
++    val copied = openInputStream().use { input ->
+         target.openOutputStream().use { output ->
+             input.copyTo(output)
+         }
+     }
+     val expected = length()
+     val actual = target.length()
+-    // Some providers report 0 / -1 until their metadata is refreshed; only trust a positive size.
+-    if (expected > 0 && actual > 0 && actual != expected) {
+-        throw IOException("Copied ${target.displayablePath} is $actual bytes, expected $expected")
++    // A positive stream must have a positively verified target size before the source is
++    // removed. Providers reporting stale zero metadata can be retried without losing the source.
++    if ((copied > 0 && actual != copied) || (expected > 0 && copied != expected)) {
++        throw IOException("Copied ${target.displayablePath} is $actual bytes, read $copied, expected $expected")
+     }
+ }
+diff --git a/core/common/src/test/java/tachiyomi/core/common/storage/UniFileExtensionsTest.kt b/core/common/src/test/java/tachiyomi/core/common/storage/UniFileExtensionsTest.kt
+index c5882775e..117f3e853 100644
+--- a/core/common/src/test/java/tachiyomi/core/common/storage/UniFileExtensionsTest.kt
++++ b/core/common/src/test/java/tachiyomi/core/common/storage/UniFileExtensionsTest.kt
+@@ -30,7 +30,7 @@ class UniFileExtensionsTest {
+         val output = ByteArrayOutputStream()
+         val parent = mockDirectory()
+         val source = mockFile()
+-        val target = mockFile()
++        val target = mockFile(length = contents.size.toLong())
+         every { source.renameTo("001.jpg") } returns false
+         every { source.parentFile } returns parent
+         every { parent.findFile("001.jpg") } returns null
+@@ -53,7 +53,7 @@ class UniFileExtensionsTest {
+         val source = mockDirectory()
+         val child = mockFile()
+         val target = mockDirectory()
+-        val childTarget = mockFile()
++        val childTarget = mockFile(length = contents.size.toLong())
+         every { source.renameTo("chapter") } returns false
+         every { source.parentFile } returns parent
+         every { parent.findFile("chapter") } returns null
+diff --git a/presentation-core/src/test/java/tachiyomi/presentation/core/components/NavigationChromeSourceBrowseRestoreTest.kt b/presentation-core/src/test/java/tachiyomi/presentation/core/components/NavigationChromeSourceBrowseRestoreTest.kt
+index 327eba703..00671c3ab 100644
+--- a/presentation-core/src/test/java/tachiyomi/presentation/core/components/NavigationChromeSourceBrowseRestoreTest.kt
++++ b/presentation-core/src/test/java/tachiyomi/presentation/core/components/NavigationChromeSourceBrowseRestoreTest.kt
+@@ -18,7 +18,7 @@ import androidx.compose.runtime.saveable.SaveableStateRegistry
+ import androidx.compose.ui.Modifier
+ import androidx.compose.ui.layout.onSizeChanged
+ import androidx.compose.ui.test.ExperimentalTestApi
+-import androidx.compose.ui.test.v2.runComposeUiTest
++import androidx.compose.ui.test.runComposeUiTest
+ import androidx.compose.ui.unit.IntSize
+ import androidx.compose.ui.unit.dp
+ import androidx.paging.PagingData

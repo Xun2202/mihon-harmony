@@ -1125,3 +1125,9 @@ gh release list --repo Xun2202/mihon-harmony
 ### 0101：快速返回再续读与恢复宿主
 
 第二轮CI精确日志定位：详情第一次返回后快速再左滑时，兜底delay阻塞settled observer，可能合并掉中间page0而漏第二次完成事件；兜底改独立可取消job，返回/销毁一并取消，原连续两次启动断言保留。恢复三布局并非Paging为空：诊断为source恢复后整个lazy页未组合（presented为空），fixture先把Android根内容清空使宿主可变0尺寸；现在固定宿主视口模拟真实详情承接，来源子树仍完整销毁/保存/新registry重建，显式等layout后精确验anchor。第二轮失败均无Release，原数据回放推测不替代此阶段诊断。
+
+## 2026-11-17：下载存储恢复与本地HLS兼容（0102）
+
+- 用户在Anikku54的MissAV下载失败/反复重试，日志有loopback /m3u8的ffmpeg INVALIDDATA、分片超时/503，以及.mkv.anikku与.mkv (1).anikku双文件后永久重试。原始含链接的日志不入仓。两款共用UniFile在目标删除失败时停止，不继续create同名制造(1)；以真实复制字节数/目标长度验证，元数据0时保留原文件并报错重试。
+- Mihon只同步共用存储安全护栏，既有UniFileExtensionsTest两份成功fake报告实际长度，并将这组必要单测加入正式CI。没有Anikku的FFmpeg/视频代理下载链，不移植视频专用策略。
+- 来源完整恢复测试改两款均支持的旧Compose测试入口，保留固定宿主/来源完全销毁、精确anchor和新Paging身份断言；An第三轮编译发现v2 API不存在，未发布55，本次不再假设两款Compose版本相同。Mihon43浏览修复已通过并发布；最终Mihon44包含共用安全护栏，Anikku55合入浏览与下载修复，APK/回归/签名/索引证据见档案。
