@@ -1149,3 +1149,12 @@ gh release list --repo Xun2202/mihon-harmony
 ### 0105：暂停持久化夹具适配协程来源查询
 
 第二轮44127172010生产编译通过，在新增测试发现Mihon SourceManager.get为suspend，与Anikku不同；夹具使用coEvery，其余断言保留。未发版45，不改变生产代码。
+
+## 2026-11-18：熄屏反馈后的原生播放保活（0106）
+
+- 用户反馈Anikku59熄屏仍停下载。日志4确认流式音轨与任务仍在、wakeHeld=true，54.424s间播放头仅推进35840帧/4.480s，期间下载日志同步断档，无前台结束/网络阻断记录。可定位到现有保活没防住宿主/音频调度暂停，不能把stream/wakelock显示活动当真机通过；Android侧interactive一直true也不能当未熄屏证据。其他卓易通有声播放用户尚未对比。
+- 下载专属保活改由系统MediaPlayer循环本地30秒全零PCM WAVE，准备异步且15秒有界、独立Looper承接媒体回调；native循环不需App每80ms续写。保留唤醒锁，新增MediaSession播放状态、通知token及暂停/停止沿原下载暂停API；不申请音频焦点。可出现系统播控入口，保活停止即释放会话/播放器/接收器/线程。原书架更新BackgroundKeepAlive不改。
+- 屏幕开关/解锁广播、batteryExempt、原生playing/position、elapsed/uptime调度间隔进入稀疏日志；长断档醒来立即记录。此为有依据的新候选，尚不能承诺卓易通熄屏限制已绕过。参考Android官方MediaPlayer后台播放/setWakeMode及MediaSession文档，未新增依赖或接入原生鸿蒙API。
+- 音频helper与生成器、恢复/WAVE回归在Mi/An逐字节一致；波形检查标准头、完整时长与全零样本，原4项取消/资源释放/重建回归适配native检查。最终必要CI/签名/版本和更新索引见档案；后台效果由真机安装反馈闭环。
+
+- Mihon只同步已确认相同的保活实现；图片下载没有FFmpeg/TS链，不移植媒体封装补丁。Animeko独立KMP/mediamp及静态helper已复核，本次无其同设备新反馈，不强套下载会话。
