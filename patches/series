@@ -97,3 +97,4 @@
 0097-browse-swipe-resume-and-soft-navigation.patch
 0098-navigation-spring-and-restored-intent-regressions.patch
 0099-browse-real-pager-position-restore-and-detail-transition.patch
+0100-browse-visible-preview-and-restoration-regressions.patch
