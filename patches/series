@@ -96,3 +96,4 @@
 0096-bounded-reading-offset-and-hidden-layer-fast-path.patch
 0097-browse-swipe-resume-and-soft-navigation.patch
 0098-navigation-spring-and-restored-intent-regressions.patch
+0099-browse-real-pager-position-restore-and-detail-transition.patch
