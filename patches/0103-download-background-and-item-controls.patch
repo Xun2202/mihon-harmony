@@ -1,0 +1,1972 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Xun2202 <98207886+Xun2202@users.noreply.github.com>
+Date: Tue, 17 Nov 2026 16:26:48 +0000
+Subject: [PATCH] downloads: repair background ownership and per-item recovery
+
+Download-owned streaming keep-alive and persistent per-item pause/resume/restart with network-only speed. Shared audio/speed helpers are byte-identical to Anikku 0112; image pages retain their own recovery path.
+---
+ .../components/ChapterDownloadIndicator.kt    |   5 +
+ .../manga/components/MangaChapterListItem.kt  |   2 +-
+ .../data/download/DownloadAudioKeepAlive.kt   | 120 ++++++++
+ .../data/download/DownloadAudioPump.kt        |  55 ++++
+ .../data/download/DownloadItemControl.kt      |  39 +++
+ .../data/download/DownloadItemSpeed.kt        |  35 +++
+ .../data/download/DownloadManager.kt          |  33 ++-
+ .../data/download/DownloadProvider.kt         |   1 +
+ .../tachiyomi/data/download/DownloadStore.kt  |  32 +-
+ .../tachiyomi/data/download/DownloadWorker.kt |  26 +-
+ .../tachiyomi/data/download/Downloader.kt     | 277 ++++++++++++++----
+ .../tachiyomi/data/download/model/Download.kt |  39 +++
+ .../tachiyomi/ui/download/DownloadAdapter.kt  |   1 +
+ .../tachiyomi/ui/download/DownloadHolder.kt   |  47 ++-
+ .../ui/download/DownloadQueueViewModel.kt     |  34 +--
+ .../tachiyomi/ui/manga/MangaViewModel.kt      |   8 +-
+ .../tachiyomi/ui/updates/UpdatesViewModel.kt  |   6 +-
+ app/src/main/res/layout/download_item.xml     |  34 ++-
+ app/src/main/res/menu/download_single.xml     |   3 +
+ .../NavigationChromeDownloadAudioPumpTest.kt  | 126 ++++++++
+ ...NavigationChromeDownloadItemControlTest.kt |  96 ++++++
+ .../NavigationChromeDownloadItemSpeedTest.kt  |  34 +++
+ ...NavigationChromeDownloadPausedStoreTest.kt | 127 ++++++++
+ .../moko-resources/base/strings.xml           |   4 +
+ 24 files changed, 1064 insertions(+), 120 deletions(-)
+ create mode 100644 app/src/main/java/eu/kanade/tachiyomi/data/download/DownloadAudioKeepAlive.kt
+ create mode 100644 app/src/main/java/eu/kanade/tachiyomi/data/download/DownloadAudioPump.kt
+ create mode 100644 app/src/main/java/eu/kanade/tachiyomi/data/download/DownloadItemControl.kt
+ create mode 100644 app/src/main/java/eu/kanade/tachiyomi/data/download/DownloadItemSpeed.kt
+ create mode 100644 app/src/test/java/eu/kanade/tachiyomi/data/download/NavigationChromeDownloadAudioPumpTest.kt
+ create mode 100644 app/src/test/java/eu/kanade/tachiyomi/data/download/NavigationChromeDownloadItemControlTest.kt
+ create mode 100644 app/src/test/java/eu/kanade/tachiyomi/data/download/NavigationChromeDownloadItemSpeedTest.kt
+ create mode 100644 app/src/test/java/eu/kanade/tachiyomi/data/download/NavigationChromeDownloadPausedStoreTest.kt
+
+diff --git a/app/src/main/java/eu/kanade/presentation/manga/components/ChapterDownloadIndicator.kt b/app/src/main/java/eu/kanade/presentation/manga/components/ChapterDownloadIndicator.kt
+index d48a5d848..5c817577b 100644
+--- a/app/src/main/java/eu/kanade/presentation/manga/components/ChapterDownloadIndicator.kt
++++ b/app/src/main/java/eu/kanade/presentation/manga/components/ChapterDownloadIndicator.kt
+@@ -74,6 +74,11 @@ fun ChapterDownloadIndicator(
+             modifier = modifier,
+             onClick = onClick,
+         )
++        Download.State.PAUSED -> NotDownloadedIndicator(
++            enabled = enabled,
++            modifier = modifier,
++            onClick = { onClick(ChapterDownloadAction.START_NOW) },
++        )
+         Download.State.ERROR -> ErrorIndicator(
+             enabled = enabled,
+             modifier = modifier,
+diff --git a/app/src/main/java/eu/kanade/presentation/manga/components/MangaChapterListItem.kt b/app/src/main/java/eu/kanade/presentation/manga/components/MangaChapterListItem.kt
+index c1ad3b9cc..b2f3096bc 100644
+--- a/app/src/main/java/eu/kanade/presentation/manga/components/MangaChapterListItem.kt
++++ b/app/src/main/java/eu/kanade/presentation/manga/components/MangaChapterListItem.kt
+@@ -205,7 +205,7 @@ private fun getSwipeAction(
+         )
+         LibraryPreferences.ChapterSwipeAction.Download -> swipeAction(
+             icon = when (downloadState) {
+-                Download.State.NOT_DOWNLOADED, Download.State.ERROR -> MaterialSymbols.Rounded.Download
++                Download.State.NOT_DOWNLOADED, Download.State.ERROR, Download.State.PAUSED -> MaterialSymbols.Rounded.Download
+                 Download.State.QUEUE, Download.State.DOWNLOADING -> MaterialSymbols.Rounded.FileDownloadOff
+                 Download.State.DOWNLOADED -> MaterialSymbols.Rounded.Delete
+             },
+diff --git a/app/src/main/java/eu/kanade/tachiyomi/data/download/DownloadAudioKeepAlive.kt b/app/src/main/java/eu/kanade/tachiyomi/data/download/DownloadAudioKeepAlive.kt
+new file mode 100644
+index 000000000..0bba7df8a
+--- /dev/null
++++ b/app/src/main/java/eu/kanade/tachiyomi/data/download/DownloadAudioKeepAlive.kt
+@@ -0,0 +1,120 @@
++package eu.kanade.tachiyomi.data.download
++
++import android.content.Context
++import android.media.AudioAttributes
++import android.media.AudioFormat
++import android.media.AudioTrack
++import android.os.PowerManager
++import android.os.SystemClock
++import androidx.core.content.getSystemService
++import kotlinx.coroutines.CoroutineScope
++import kotlinx.coroutines.Dispatchers
++import kotlinx.coroutines.Job
++import kotlinx.coroutines.SupervisorJob
++import kotlinx.coroutines.cancel
++import kotlinx.coroutines.launch
++import logcat.LogPriority
++import tachiyomi.core.common.util.system.logcat
++import java.util.concurrent.atomic.AtomicReference
++
++/** Download-owned streaming silence, with explicit cancellation and dead-output recovery. */
++internal class DownloadAudioKeepAlive(context: Context) {
++    private val context = context.applicationContext
++    private val power = this.context.getSystemService<PowerManager>()
++    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
++    private val currentTrack = AtomicReference<AudioTrack?>()
++    private var writer: Job? = null
++    private var wakeLock: PowerManager.WakeLock? = null
++
++    fun start() {
++        if (writer != null) return
++        runCatching {
++            wakeLock = power?.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "${context.packageName}:download-audio")
++                ?.apply {
++                    setReferenceCounted(false)
++                    acquire(WAKE_TIMEOUT)
++                }
++        }.onFailure { logcat(LogPriority.WARN, it) { "Download keep-alive wake lock unavailable" } }
++        writer = scope.launch {
++            DownloadAudioPump.run(
++                create = ::createOutput,
++                onFailure = { error -> logcat(LogPriority.WARN, error) { "Download keep-alive audio rebuilding" } },
++            )
++        }
++    }
++
++    private fun createOutput(): DownloadAudioPump.Sink {
++        var built: AudioTrack? = null
++        var published = false
++        try {
++            val minimum = AudioTrack.getMinBufferSize(RATE, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT)
++            check(minimum > 0) { "Audio minimum buffer invalid: $minimum" }
++            val track = AudioTrack.Builder()
++                .setAudioAttributes(AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_MEDIA).setContentType(AudioAttributes.CONTENT_TYPE_MUSIC).build())
++                .setAudioFormat(AudioFormat.Builder().setSampleRate(RATE).setEncoding(AudioFormat.ENCODING_PCM_16BIT).setChannelMask(AudioFormat.CHANNEL_OUT_MONO).build())
++                .setTransferMode(AudioTrack.MODE_STREAM)
++                .setBufferSizeInBytes(maxOf(minimum, CHUNK_BYTES * 4))
++                .build()
++            built = track
++            check(track.state == AudioTrack.STATE_INITIALIZED) { "Audio output is not initialized" }
++            currentTrack.set(track)
++            published = true
++            track.play()
++            logcat(LogPriority.INFO) {
++                "Download keep-alive audio started mode=stream wakeHeld=${wakeLock?.isHeld} interactive=${power?.isInteractive} idle=${power?.isDeviceIdleMode}"
++            }
++            return object : DownloadAudioPump.Sink {
++                private val silence = ByteArray(CHUNK_BYTES)
++                private var lastLog = SystemClock.elapsedRealtime()
++                override suspend fun write(): Int {
++                    val count = track.write(silence, 0, silence.size, AudioTrack.WRITE_BLOCKING)
++                    val now = SystemClock.elapsedRealtime()
++                    if (now - lastLog >= 30_000) {
++                        lastLog = now
++                        runCatching { if (wakeLock?.isHeld == false) wakeLock?.acquire(WAKE_TIMEOUT) }
++                        logcat(LogPriority.INFO) {
++                            "Download keep-alive audio heartbeat written=$count playState=${track.playState} head=${track.playbackHeadPosition} " +
++                                "wakeHeld=${wakeLock?.isHeld} interactive=${power?.isInteractive} idle=${power?.isDeviceIdleMode}"
++                        }
++                    }
++                    return count
++                }
++                override fun close() {
++                    if (currentTrack.compareAndSet(track, null)) release(track)
++                }
++            }
++        } catch (error: Exception) {
++            built?.let { track ->
++                // The owner may have already released it while the factory was being cancelled.
++                if (!published || currentTrack.compareAndSet(track, null)) release(track)
++            }
++            throw error
++        }
++    }
++
++    suspend fun stopAndJoin() {
++        writer?.cancel()
++        // Release first: a blocking AudioTrack.write must wake before joining its coroutine.
++        currentTrack.getAndSet(null)?.let(::release)
++        try {
++            writer?.join()
++        } finally {
++            scope.cancel()
++            runCatching { if (wakeLock?.isHeld == true) wakeLock?.release() }
++            wakeLock = null
++            writer = null
++            logcat(LogPriority.INFO) { "Download keep-alive audio stopped" }
++        }
++    }
++
++    private fun release(track: AudioTrack) {
++        runCatching { track.stop() }
++        runCatching { track.release() }
++    }
++
++    private companion object {
++        const val RATE = 8000
++        const val CHUNK_BYTES = RATE * 2 * 80 / 1000
++        const val WAKE_TIMEOUT = 12 * 60 * 60 * 1000L
++    }
++}
+diff --git a/app/src/main/java/eu/kanade/tachiyomi/data/download/DownloadAudioPump.kt b/app/src/main/java/eu/kanade/tachiyomi/data/download/DownloadAudioPump.kt
+new file mode 100644
+index 000000000..b94e3f2e3
+--- /dev/null
++++ b/app/src/main/java/eu/kanade/tachiyomi/data/download/DownloadAudioPump.kt
+@@ -0,0 +1,55 @@
++package eu.kanade.tachiyomi.data.download
++
++import kotlinx.coroutines.CancellationException
++import kotlinx.coroutines.currentCoroutineContext
++import kotlinx.coroutines.delay
++import kotlinx.coroutines.ensureActive
++import java.io.Closeable
++import java.io.IOException
++
++/** Feed real PCM writes so that a dead/stalled audio output can be detected and rebuilt. */
++internal object DownloadAudioPump {
++    interface Sink : Closeable {
++        suspend fun write(): Int
++    }
++
++    suspend fun run(
++        create: () -> Sink,
++        onFailure: (Exception) -> Unit,
++        retryDelayMillis: Long = 1000,
++        zeroWriteLimit: Int = 100,
++    ) {
++        var failures = 0
++        while (true) {
++            currentCoroutineContext().ensureActive()
++            var sink: Sink? = null
++            try {
++                sink = create()
++                var zeros = 0
++                var successful = 0
++                while (true) {
++                    currentCoroutineContext().ensureActive()
++                    val count = sink.write()
++                    if (count < 0) throw IOException("Audio write failed: $count")
++                    if (count == 0) {
++                        if (++zeros >= zeroWriteLimit.coerceAtLeast(1)) throw IOException("Audio output stalled")
++                    } else {
++                        zeros = 0
++                        if (++successful >= 50) failures = 0
++                    }
++                    // Even a broken HAL that accepts writes without backpressure must not busy-spin.
++                    delay(if (count == 0) 50L else 5L)
++                }
++            } catch (cancelled: CancellationException) {
++                throw cancelled
++            } catch (error: Exception) {
++                currentCoroutineContext().ensureActive()
++                onFailure(error)
++            } finally {
++                runCatching { sink?.close() }
++            }
++            failures = (failures + 1).coerceAtMost(30)
++            delay(retryDelayMillis.coerceAtLeast(1) * failures)
++        }
++    }
++}
+diff --git a/app/src/main/java/eu/kanade/tachiyomi/data/download/DownloadItemControl.kt b/app/src/main/java/eu/kanade/tachiyomi/data/download/DownloadItemControl.kt
+new file mode 100644
+index 000000000..98c94dc7f
+--- /dev/null
++++ b/app/src/main/java/eu/kanade/tachiyomi/data/download/DownloadItemControl.kt
+@@ -0,0 +1,39 @@
++package eu.kanade.tachiyomi.data.download
++
++import com.hippo.unifile.UniFile
++import kotlinx.coroutines.Job
++import kotlinx.coroutines.NonCancellable
++import kotlinx.coroutines.withContext
++import java.io.IOException
++
++internal object DownloadItemControl {
++    fun shouldAppend(code: Int, contentRange: String?, existingLength: Long): Boolean {
++        if (code == 200) return false
++        if (code != 206) throw IOException("Unexpected image HTTP status")
++        val match = Regex("bytes ([0-9]+)-([0-9]+)/([0-9]+|\\*)").matchEntire(contentRange.orEmpty())
++            ?: throw IOException("Invalid partial image range")
++        val start = match.groupValues[1].toLongOrNull()
++        val end = match.groupValues[2].toLongOrNull()
++        val total = match.groupValues[3].takeUnless { it == "*" }?.toLongOrNull()
++        if (start != existingLength || end == null || end < existingLength || total == null || end != total - 1) {
++            throw IOException("Partial image range does not match the saved page")
++        }
++        return true
++    }
++
++    suspend fun stop(job: Job?) {
++        job?.cancel()
++        withContext(NonCancellable) { job?.join() }
++    }
++
++    /** Only generated page files inside this chapter's temporary directory may be reset. */
++    fun clearTemporaryPages(directory: UniFile) {
++        directory.listFiles().orEmpty().filter { it.isFile && isTemporaryPage(it.name.orEmpty()) }.forEach {
++            if (!it.delete()) throw IOException("Cannot reset a temporary download page")
++        }
++    }
++
++    fun isTemporaryPage(name: String): Boolean = PAGE.matches(name)
++
++    private val PAGE = Regex("[0-9]{3,}(?:__[0-9]+)?\\.(?:tmp|jpg|jpeg|png|webp|gif|avif|jxl|heif|heic)", RegexOption.IGNORE_CASE)
++}
+diff --git a/app/src/main/java/eu/kanade/tachiyomi/data/download/DownloadItemSpeed.kt b/app/src/main/java/eu/kanade/tachiyomi/data/download/DownloadItemSpeed.kt
+new file mode 100644
+index 000000000..311db2cda
+--- /dev/null
++++ b/app/src/main/java/eu/kanade/tachiyomi/data/download/DownloadItemSpeed.kt
+@@ -0,0 +1,35 @@
++package eu.kanade.tachiyomi.data.download
++
++/** A per-download three-second window; this never updates the global notification meter. */
++internal class DownloadItemSpeed(private val clockMillis: () -> Long = { System.nanoTime() / 1_000_000 }) {
++    private val seconds = LongArray(8) { Long.MIN_VALUE }
++    private val bytes = LongArray(8)
++
++    @Synchronized
++    fun addBytes(count: Long) {
++        if (count <= 0) return
++        val second = clockMillis() / 1000
++        val index = Math.floorMod(second, seconds.size.toLong()).toInt()
++        if (seconds[index] != second) {
++            seconds[index] = second
++            bytes[index] = 0
++        }
++        bytes[index] += count
++    }
++
++    @Synchronized
++    fun bytesPerSecond(): Long {
++        val now = clockMillis() / 1000
++        var sum = 0L
++        for (index in seconds.indices) {
++            if (seconds[index] in (now - 2)..now) sum += bytes[index]
++        }
++        return sum / 3
++    }
++
++    @Synchronized
++    fun reset() {
++        seconds.fill(Long.MIN_VALUE)
++        bytes.fill(0)
++    }
++}
+diff --git a/app/src/main/java/eu/kanade/tachiyomi/data/download/DownloadManager.kt b/app/src/main/java/eu/kanade/tachiyomi/data/download/DownloadManager.kt
+index 3b45532b7..cb5b68028 100644
+--- a/app/src/main/java/eu/kanade/tachiyomi/data/download/DownloadManager.kt
++++ b/app/src/main/java/eu/kanade/tachiyomi/data/download/DownloadManager.kt
+@@ -8,6 +8,7 @@ import eu.kanade.tachiyomi.data.download.model.Download
+ import eu.kanade.tachiyomi.source.Source
+ import eu.kanade.tachiyomi.source.model.Page
+ import eu.kanade.tachiyomi.source.online.HttpSource
++import kotlinx.coroutines.CoroutineScope
+ import kotlinx.coroutines.Dispatchers
+ import kotlinx.coroutines.flow.Flow
+ import kotlinx.coroutines.flow.asFlow
+@@ -20,6 +21,7 @@ import kotlinx.coroutines.flow.onStart
+ import kotlinx.coroutines.launch
+ import kotlinx.coroutines.withContext
+ import logcat.LogPriority
++import mihon.core.metro.AppCoroutineScope
+ import tachiyomi.core.common.i18n.stringResource
+ import tachiyomi.core.common.storage.extension
+ import tachiyomi.core.common.util.system.ImageUtil
+@@ -51,6 +53,7 @@ class DownloadManager(
+     private val downloadPreferences: DownloadPreferences,
+     private val downloader: Downloader,
+     private val pendingDeleter: DownloadPendingDeleter,
++    @AppCoroutineScope private val scope: CoroutineScope,
+ ) {
+ 
+     val queueState
+@@ -63,8 +66,24 @@ class DownloadManager(
+      * Starts the download worker, which runs the downloader.
+      */
+     fun startDownloads() {
+-        if (downloader.isRunning) return
++        scope.launch {
++            downloader.resumeAll()
++            DownloadWorker.start(context)
++        }
++    }
++
++    /** Start only queued items; explicit global start also resumes every paused item. */
++    fun startQueuedDownloads() = DownloadWorker.start(context)
++
++    suspend fun pauseDownload(download: Download) = downloader.pauseDownload(download)
++
++    suspend fun resumeDownload(download: Download) {
++        downloader.resumeDownload(download)
++        DownloadWorker.start(context)
++    }
+ 
++    suspend fun restartDownload(download: Download) {
++        downloader.restartDownload(download)
+         DownloadWorker.start(context)
+     }
+ 
+@@ -103,11 +122,13 @@ class DownloadManager(
+     suspend fun startDownloadNow(chapterId: Long) {
+         // If not in queue try to start a new download
+         val toAdd = getQueuedDownloadOrNull(chapterId) ?: downloadFromChapterId(chapterId) ?: return
++        val needsResume = toAdd.status == Download.State.PAUSED || toAdd.status == Download.State.ERROR
+         downloader.updateQueue { queue ->
+             val (existing, others) = queue.partition { it.chapter.id == chapterId }
+             listOf(existing.firstOrNull() ?: toAdd) + others
+         }
+-        startDownloads()
++        if (needsResume) downloader.resumeDownload(toAdd)
++        startQueuedDownloads()
+     }
+ 
+     private suspend fun downloadFromChapterId(chapterId: Long): Download? {
+@@ -147,7 +168,7 @@ class DownloadManager(
+     ): Downloader.QueueResult {
+         val result = downloader.queueChapters(manga, chapters, autoStart)
+         if (result.startDownloader) {
+-            startDownloads()
++            startQueuedDownloads()
+         }
+         return result
+     }
+@@ -163,7 +184,9 @@ class DownloadManager(
+             val chapterIds = downloads.mapTo(HashSet()) { it.chapter.id }
+             downloads + queue.filter { it.chapter.id !in chapterIds }
+         }
+-        startDownloads()
++        downloads.filter { it.status == Download.State.PAUSED || it.status == Download.State.ERROR }
++            .forEach { downloader.resumeDownload(it) }
++        startQueuedDownloads()
+     }
+ 
+     /**
+@@ -472,7 +495,7 @@ class DownloadManager(
+         .flatMapLatest { downloads ->
+             downloads
+                 .map { download ->
+-                    download.progressFlow.drop(1).map { download }
++                    download.progressUpdates().map { download }
+                 }
+                 .merge()
+         }
+diff --git a/app/src/main/java/eu/kanade/tachiyomi/data/download/DownloadProvider.kt b/app/src/main/java/eu/kanade/tachiyomi/data/download/DownloadProvider.kt
+index 3e12e3289..4bc84e93e 100644
+--- a/app/src/main/java/eu/kanade/tachiyomi/data/download/DownloadProvider.kt
++++ b/app/src/main/java/eu/kanade/tachiyomi/data/download/DownloadProvider.kt
+@@ -51,6 +51,7 @@ class DownloadProvider(
+     internal suspend fun getMangaDir(mangaTitle: String, source: Source): Result<UniFile> =
+         withContext(Dispatchers.IO) { createMangaDir(mangaTitle, source) }
+ 
++    @Synchronized
+     private fun createMangaDir(mangaTitle: String, source: Source): Result<UniFile> {
+         val downloadsDir = downloadsDir
+         if (downloadsDir == null) {
+diff --git a/app/src/main/java/eu/kanade/tachiyomi/data/download/DownloadStore.kt b/app/src/main/java/eu/kanade/tachiyomi/data/download/DownloadStore.kt
+index c0e3b75bc..1af005475 100644
+--- a/app/src/main/java/eu/kanade/tachiyomi/data/download/DownloadStore.kt
++++ b/app/src/main/java/eu/kanade/tachiyomi/data/download/DownloadStore.kt
+@@ -42,17 +42,29 @@ class DownloadStore(
+      *
+      * @param downloads the list of downloads to add.
+      */
++    @Synchronized
+     fun addAll(downloads: List<Download>) {
+         preferences.edit {
+             downloads.forEach { putString(getKey(it), serialize(it)) }
+         }
+     }
+ 
++    /** Update only a surviving entry, preserving its queue order. */
++    @Synchronized
++    fun update(download: Download) {
++        val key = getKey(download)
++        val stored = preferences.getString(key, null)?.let(::deserialize) ?: return
++        preferences.edit {
++            putString(key, json.encodeToString(stored.copy(paused = download.status == Download.State.PAUSED)))
++        }
++    }
++
+     /**
+      * Removes a download from the store.
+      *
+      * @param download the download to remove.
+      */
++    @Synchronized
+     fun remove(download: Download) {
+         preferences.edit {
+             remove(getKey(download))
+@@ -64,6 +76,7 @@ class DownloadStore(
+      *
+      * @param downloads the download to remove.
+      */
++    @Synchronized
+     fun removeAll(downloads: List<Download>) {
+         preferences.edit {
+             downloads.forEach { remove(getKey(it)) }
+@@ -73,6 +86,7 @@ class DownloadStore(
+     /**
+      * Removes all the downloads from the store.
+      */
++    @Synchronized
+     fun clear() {
+         preferences.edit {
+             clear()
+@@ -100,13 +114,17 @@ class DownloadStore(
+         val downloads = mutableListOf<Download>()
+         if (objs.isNotEmpty()) {
+             val cachedManga = mutableMapOf<Long, Manga?>()
+-            for ((mangaId, chapterId) in objs) {
+-                val manga = cachedManga.getOrPut(mangaId) {
+-                    getManga.await(mangaId)
++            for (obj in objs) {
++                val manga = cachedManga.getOrPut(obj.mangaId) {
++                    getManga.await(obj.mangaId)
+                 } ?: continue
+                 val source = sourceManager.get(manga.source) as? HttpSource ?: continue
+-                val chapter = getChapter.await(chapterId) ?: continue
+-                downloads.add(Download(source, manga, chapter))
++                val chapter = getChapter.await(obj.chapterId) ?: continue
++                downloads.add(
++                    Download(source, manga, chapter).apply {
++                        status = if (obj.paused) Download.State.PAUSED else Download.State.QUEUE
++                    },
++                )
+             }
+         }
+ 
+@@ -121,7 +139,7 @@ class DownloadStore(
+      * @param download the download to serialize.
+      */
+     private fun serialize(download: Download): String {
+-        val obj = DownloadObject(download.manga.id, download.chapter.id, counter++)
++        val obj = DownloadObject(download.manga.id, download.chapter.id, counter++, download.status == Download.State.PAUSED)
+         return json.encodeToString(obj)
+     }
+ 
+@@ -147,4 +165,4 @@ class DownloadStore(
+  * @param order the order of the download in the queue.
+  */
+ @Serializable
+-private data class DownloadObject(val mangaId: Long, val chapterId: Long, val order: Int)
++private data class DownloadObject(val mangaId: Long, val chapterId: Long, val order: Int, val paused: Boolean = false)
+diff --git a/app/src/main/java/eu/kanade/tachiyomi/data/download/DownloadWorker.kt b/app/src/main/java/eu/kanade/tachiyomi/data/download/DownloadWorker.kt
+index 0b6196ae4..bdf06a2cf 100644
+--- a/app/src/main/java/eu/kanade/tachiyomi/data/download/DownloadWorker.kt
++++ b/app/src/main/java/eu/kanade/tachiyomi/data/download/DownloadWorker.kt
+@@ -13,7 +13,6 @@ import androidx.work.WorkManager
+ import androidx.work.WorkerParameters
+ import dev.zacsweers.metro.Inject
+ import eu.kanade.tachiyomi.data.notification.Notifications
+-import eu.kanade.tachiyomi.util.system.BackgroundKeepAlive
+ import eu.kanade.tachiyomi.util.system.activeNetworkState
+ import eu.kanade.tachiyomi.util.system.notificationBuilder
+ import eu.kanade.tachiyomi.util.system.setForegroundSafely
+@@ -22,8 +21,10 @@ import kotlinx.coroutines.delay
+ import kotlinx.coroutines.flow.Flow
+ import kotlinx.coroutines.flow.map
+ import kotlinx.coroutines.withContext
++import logcat.LogPriority
+ import mihon.app.di.AppGraph
+ import mihon.core.metro.metroGraph
++import tachiyomi.core.common.util.system.logcat
+ import tachiyomi.domain.download.service.DownloadPreferences
+ import tachiyomi.i18n.R
+ import kotlin.time.Duration.Companion.seconds
+@@ -66,15 +67,16 @@ class DownloadWorker(context: Context, workerParams: WorkerParameters) : Corouti
+         var networkIssue = networkIssue()
+         if (networkIssue != null) {
+             downloader.stop(networkIssue)
+-            return Result.failure()
++            return Result.success()
+         }
+ 
+-        if (!downloader.start()) return Result.failure()
+-
++        val keepAlive = DownloadAudioKeepAlive(applicationContext)
+         try {
++            if (!downloader.start() && !downloader.isRunning) return Result.success()
+             setForegroundSafely()
++            logcat(LogPriority.INFO) { "Download background guard start keepAliveRequested=${downloadPreferences.keepAliveInBackground.get()}" }
+             if (downloadPreferences.keepAliveInBackground.get()) {
+-                BackgroundKeepAlive.acquireForCurrentJob(applicationContext)
++                keepAlive.start()
+             }
+ 
+             while (networkIssue == null && downloader.isRunning) {
+@@ -83,8 +85,13 @@ class DownloadWorker(context: Context, workerParams: WorkerParameters) : Corouti
+             }
+         } finally {
+             // Stopped by WorkManager means already canceled, and taking the lock would then throw instead of stopping
+-            if (downloader.isRunning && (networkIssue != null || isStopped)) {
+-                withContext(NonCancellable) { downloader.stop(networkIssue) }
++            withContext(NonCancellable) {
++                try {
++                    if (downloader.isRunning && (networkIssue != null || isStopped)) downloader.stop(networkIssue)
++                } finally {
++                    keepAlive.stopAndJoin()
++                    logcat(LogPriority.INFO) { "Download background guard end stopped=$isStopped running=${downloader.isRunning}" }
++                }
+             }
+         }
+ 
+@@ -93,6 +100,9 @@ class DownloadWorker(context: Context, workerParams: WorkerParameters) : Corouti
+ 
+     private fun networkIssue(): String? {
+         val state = applicationContext.activeNetworkState()
++        if (!state.isOnline || (downloadPreferences.downloadOnlyOverWifi.get() && !state.isWifi)) {
++            logcat(LogPriority.INFO) { "Download guard network blocked online=${state.isOnline} wifi=${state.isWifi}" }
++        }
+         return when {
+             !state.isOnline -> applicationContext.getString(R.string.download_notifier_no_network)
+             downloadPreferences.downloadOnlyOverWifi.get() && !state.isWifi ->
+@@ -109,7 +119,7 @@ class DownloadWorker(context: Context, workerParams: WorkerParameters) : Corouti
+                 .addTag(TAG)
+                 .build()
+             WorkManager.getInstance(context)
+-                .enqueueUniqueWork(TAG, ExistingWorkPolicy.REPLACE, request)
++                .enqueueUniqueWork(TAG, ExistingWorkPolicy.APPEND_OR_REPLACE, request)
+         }
+ 
+         fun isRunningFlow(context: Context): Flow<Boolean> {
+diff --git a/app/src/main/java/eu/kanade/tachiyomi/data/download/Downloader.kt b/app/src/main/java/eu/kanade/tachiyomi/data/download/Downloader.kt
+index 58426b40a..f8b76ec04 100644
+--- a/app/src/main/java/eu/kanade/tachiyomi/data/download/Downloader.kt
++++ b/app/src/main/java/eu/kanade/tachiyomi/data/download/Downloader.kt
+@@ -28,18 +28,19 @@ import kotlinx.coroutines.Job
+ import kotlinx.coroutines.NonCancellable
+ import kotlinx.coroutines.coroutineScope
+ import kotlinx.coroutines.delay
++import kotlinx.coroutines.ensureActive
+ import kotlinx.coroutines.flow.MutableStateFlow
+ import kotlinx.coroutines.flow.asStateFlow
+ import kotlinx.coroutines.flow.collectLatest
+ import kotlinx.coroutines.flow.combine
+ import kotlinx.coroutines.flow.distinctUntilChanged
+-import kotlinx.coroutines.flow.filter
+ import kotlinx.coroutines.flow.filterNotNull
+ import kotlinx.coroutines.flow.first
++import kotlinx.coroutines.flow.flatMapLatest
+ import kotlinx.coroutines.flow.flow
++import kotlinx.coroutines.flow.flowOf
+ import kotlinx.coroutines.flow.map
+ import kotlinx.coroutines.flow.retryWhen
+-import kotlinx.coroutines.flow.transformLatest
+ import kotlinx.coroutines.flow.update
+ import kotlinx.coroutines.job
+ import kotlinx.coroutines.launch
+@@ -54,6 +55,9 @@ import mihon.core.archive.archiveReader
+ import mihon.core.metro.AppCoroutineScope
+ import nl.adaptivity.xmlutil.serialization.XML
+ import okhttp3.Response
++import okio.Buffer
++import okio.ForwardingSource
++import okio.buffer
+ import tachiyomi.core.common.i18n.stringResource
+ import tachiyomi.core.common.storage.renameToOrCopy
+ import tachiyomi.core.common.util.system.ImageUtil
+@@ -103,6 +107,11 @@ class Downloader(
+     // Held by every start, stop and queue edit, which come from the main thread, the download worker and the
+     // deletion jobs, so a check of isRunning can't interleave with another caller's start or stop
+     private val lock = Mutex()
++    private val itemControlLock = Mutex()
++    private val queueReady = CompletableDeferred<Unit>()
++    private val controlledIds = ConcurrentHashMap.newKeySet<Long>()
++    private val networkOnlyIds = ConcurrentHashMap.newKeySet<Long>()
++    private val downloadJobs = ConcurrentHashMap<Long, Job>()
+ 
+     // Kept when canceled, so the next job can wait for it to finish
+     @Volatile
+@@ -122,7 +131,11 @@ class Downloader(
+ 
+     init {
+         scope.launch(Dispatchers.Main, CoroutineStart.UNDISPATCHED) {
+-            addAllToQueue(withContext(Dispatchers.IO) { store.restore() })
++            try {
++                addAllToQueue(withContext(Dispatchers.IO) { store.restore() })
++            } finally {
++                queueReady.complete(Unit)
++            }
+         }
+     }
+ 
+@@ -132,12 +145,94 @@ class Downloader(
+      *
+      * @return true if the downloader is started, false otherwise.
+      */
+-    suspend fun start(): Boolean = lock.withLock { startLocked() }
++    suspend fun start(): Boolean {
++        queueReady.await()
++        return lock.withLock { startLocked() }
++    }
++
++    /** Explicit global start resumes every paused item; worker recreation does not. */
++    suspend fun resumeAll() = itemControlLock.withLock {
++        queueReady.await()
++        lock.withLock {
++            isPaused = false
++            queueState.value.filter { it.status == Download.State.PAUSED || it.status == Download.State.ERROR }.forEach {
++                it.pages = null
++                it.resetSpeed()
++                it.status = Download.State.QUEUE
++                store.update(it)
++            }
++        }
++    }
++
++    suspend fun pauseDownload(download: Download) = controlDownload(download, resume = false, restart = false)
++
++    suspend fun resumeDownload(download: Download) = controlDownload(download, resume = true, restart = false)
++
++    suspend fun restartDownload(download: Download) = controlDownload(download, resume = true, restart = true)
++
++    private suspend fun controlDownload(download: Download, resume: Boolean, restart: Boolean) = itemControlLock.withLock {
++        queueReady.await()
++        val id = download.chapter.id
++        val existing = lock.withLock {
++            queueState.value.firstOrNull { it.chapter.id == id }?.also {
++                controlledIds.add(id)
++                it.status = Download.State.PAUSED
++                store.update(it)
++            }
++        } ?: return@withLock
++        var succeeded = false
++        try {
++            DownloadItemControl.stop(downloadJobs[id])
++            if (restart) {
++                withContext(Dispatchers.IO) {
++                    networkOnlyIds.add(id)
++                    val name = provider.getChapterDirName(existing.chapter.name, existing.chapter.scanlator, existing.chapter.url)
++                    val privateDirectory = File(context.cacheDir, "harmony_download_tmp/${existing.manga.id}/$name$TMP_DIR_SUFFIX")
++                    if (privateDirectory.isDirectory) UniFile.fromFile(privateDirectory)?.let(DownloadItemControl::clearTemporaryPages)
++                    provider.findMangaDir(existing.manga.title, existing.source)
++                        ?.findFile(name + TMP_DIR_SUFFIX)?.let(DownloadItemControl::clearTemporaryPages)
++                }
++            }
++            lock.withLock {
++                if (queueState.value.none { it.chapter.id == id }) return@withLock
++                if (resume) existing.pages = null // Renew addresses while retaining completed files on disk.
++                existing.resetSpeed()
++                controlledIds.remove(id)
++                existing.status = if (resume) Download.State.QUEUE else Download.State.PAUSED
++                if (resume) isPaused = false
++                store.update(existing)
++                succeeded = true
++                if (!resume && isRunning && areAllDownloadsFinished()) {
++                    isPaused = true
++                    stopLocked()
++                }
++            }
++        } catch (error: Exception) {
++            if (error is CancellationException) throw error
++            existing.fail(error.message ?: error.javaClass.simpleName)
++        } finally {
++            withContext(NonCancellable) {
++                lock.withLock {
++                    if (!succeeded && queueState.value.any { it.chapter.id == id } && existing.status == Download.State.DOWNLOADING) {
++                        existing.status = Download.State.PAUSED
++                        store.update(existing)
++                    }
++                    controlledIds.remove(id)
++                }
++            }
++        }
++    }
+ 
+     /**
+      * Stops the downloader.
+      */
+-    suspend fun stop(reason: String? = null) = lock.withLock { stopLocked(reason) }
++    suspend fun stop(reason: String? = null) {
++        val stopped = lock.withLock {
++            stopLocked(reason)
++            downloaderJob
++        }
++        withContext(NonCancellable) { stopped?.join() }
++    }
+ 
+     // Download jobs check these under the lock: by the time they get it, chapters may have been queued or the
+     // downloader stopped and started again, and that newer run must not be stopped
+@@ -152,9 +247,26 @@ class Downloader(
+     /**
+      * Pauses and stops the downloader, keeping the queue for a later start
+      */
+-    suspend fun pause() = lock.withLock {
+-        pauseLocked()
+-        stopLocked()
++    suspend fun pause() {
++        val paused = lock.withLock {
++            pauseLocked()
++            queueState.value.filter { it.status.value <= Download.State.DOWNLOADING.value }.forEach {
++                it.status = Download.State.PAUSED
++                store.update(it)
++            }
++            stopLocked()
++            isPaused = true
++            downloaderJob
++        }
++        withContext(NonCancellable) {
++            paused?.join()
++            lock.withLock {
++                queueState.value.filter { it.status == Download.State.DOWNLOADING }.forEach {
++                    it.status = Download.State.PAUSED
++                    store.update(it)
++                }
++            }
++        }
+     }
+ 
+     /**
+@@ -172,7 +284,10 @@ class Downloader(
+             return false
+         }
+ 
+-        val pending = queueState.value.filter { it.status != Download.State.DOWNLOADED }
++        val pending = queueState.value.filter {
++            it.status != Download.State.DOWNLOADED && it.status != Download.State.PAUSED
++        }
++        if (pending.isEmpty()) return false
+         pending.forEach { if (it.status != Download.State.QUEUE) it.status = Download.State.QUEUE }
+ 
+         isPaused = false
+@@ -229,45 +344,33 @@ class Downloader(
+             launch {
+                 while (true) {
+                     delay(1.seconds)
++                    queueState.value.forEach { it.refreshSpeed() }
+                     val active = queueState.value.firstOrNull { it.status == Download.State.DOWNLOADING } ?: continue
+                     notifier.onProgressChange(active, remainingDownloads())
+                 }
+             }
+ 
+             val activeDownloadsFlow = combine(
+-                queueState,
++                queueState.flatMapLatest { queue ->
++                    if (queue.isEmpty()) flowOf(queue) else combine(queue.map(Download::statusFlow)) { queue }
++                },
+                 downloadPreferences.parallelSourceLimit.changes(),
+-            ) { a, b -> a to b }.transformLatest { (queue, parallelCount) ->
+-                while (true) {
+-                    val activeDownloads = queue.asSequence()
+-                        // Ignore completed downloads, leave them in the queue
+-                        .filter { it.status.value <= Download.State.DOWNLOADING.value }
+-                        .groupBy { it.source }
+-                        .toList()
+-                        .take(parallelCount)
+-                        .map { (_, downloads) -> downloads.first() }
+-                    emit(activeDownloads)
+-
+-                    if (activeDownloads.isEmpty()) break
+-                    // Suspend until a download enters the ERROR state
+-                    val activeDownloadsErroredFlow =
+-                        combine(activeDownloads.map(Download::statusFlow)) { states ->
+-                            states.contains(Download.State.ERROR)
+-                        }.filter { it }
+-                    activeDownloadsErroredFlow.first()
+-                }
+-            }
+-                .distinctUntilChanged()
++            ) { queue, parallelCount ->
++                queue.filter { it.status.value <= Download.State.DOWNLOADING.value }
++                    .groupBy { it.source }
++                    .values.take(parallelCount)
++                    .map { it.first() }
++            }.distinctUntilChanged()
+ 
+             // Use supervisorScope to cancel child jobs when the downloader job is cancelled
+             supervisorScope {
+                 val sourceJobs = mutableMapOf<HttpSource, Job>()
+-                val downloadJobs = ConcurrentHashMap<Download, Job>()
+ 
+                 // A source runs several of its chapters at once, so a removed one is stopped by itself
+                 launch {
+                     queueState.collect { queue ->
+-                        downloadJobs.keys.filter { it !in queue }.forEach { downloadJobs.remove(it)?.cancel() }
++                        downloadJobs.keys.filter { id -> queue.none { it.chapter.id == id } }
++                            .forEach { downloadJobs.remove(it)?.cancel() }
+                     }
+                 }
+ 
+@@ -276,12 +379,13 @@ class Downloader(
+                     val sourceJobsToStop = sourceJobs.filter { it.key !in activeSources }
+                     sourceJobsToStop.forEach { (source, job) ->
+                         job.cancel()
++                        job.join()
+                         sourceJobs.remove(source)
+                     }
+ 
+                     val sourcesToStart = activeSources.filter { it !in sourceJobs }
+                     sourcesToStart.forEach { source ->
+-                        sourceJobs[source] = launchSourceJob(source, downloadJobs, owner)
++                        sourceJobs[source] = launchSourceJob(source, owner)
+                     }
+                 }
+             }
+@@ -295,30 +399,33 @@ class Downloader(
+      */
+     private fun CoroutineScope.launchSourceJob(
+         source: HttpSource,
+-        downloadJobs: MutableMap<Download, Job>,
+         owner: Job,
+     ) = launch(Dispatchers.IO) {
+         val slots = Semaphore(downloadPreferences.parallelPageLimit.get())
+         while (true) {
+             // A canceled job can mark a chapter as downloading after it's been reset, so that counts as waiting too
+             val download = queueState
++                .flatMapLatest { queue ->
++                    if (queue.isEmpty()) flowOf(queue) else combine(queue.map(Download::statusFlow)) { queue }
++                }
+                 .map { queue ->
+                     queue.firstOrNull {
+                         it.source == source &&
+                             (it.status == Download.State.QUEUE || it.status == Download.State.DOWNLOADING) &&
+-                            it !in downloadJobs
++                            it.chapter.id !in downloadJobs && it.chapter.id !in controlledIds
+                     }
+                 }
+                 .filterNotNull()
+                 .first()
+             val pagesStarted = CompletableDeferred<Unit>()
+             val job = launchDownloadJob(download, slots, pagesStarted, owner)
+-            downloadJobs[download] = job
++            downloadJobs[download.chapter.id] = job
+             job.invokeOnCompletion {
+-                downloadJobs.remove(download, job)
++                downloadJobs.remove(download.chapter.id, job)
+                 // A job canceled before it starts never reaches its finally block
+                 pagesStarted.complete(Unit)
+             }
++            job.start()
+             pagesStarted.await()
+         }
+     }
+@@ -328,10 +435,10 @@ class Downloader(
+         slots: Semaphore,
+         pagesStarted: CompletableDeferred<Unit>,
+         owner: Job,
+-    ) = launch(Dispatchers.IO) {
++    ) = launch(Dispatchers.IO, start = CoroutineStart.LAZY) {
+         try {
+             // Removed from the queue between being picked and starting
+-            if (download !in queueState.value) return@launch
++            if (download !in queueState.value || download.status == Download.State.PAUSED) return@launch
+ 
+             downloadChapter(download, slots, pagesStarted)
+ 
+@@ -347,6 +454,7 @@ class Downloader(
+             stopIfCurrent(owner)
+         } finally {
+             // Also when the chapter fails before its pages, so the source moves on to the next one
++            download.resetSpeed()
+             pagesStarted.complete(Unit)
+         }
+     }
+@@ -371,7 +479,6 @@ class Downloader(
+ 
+         val source = sourceManager.get(manga.source) as? HttpSource
+             ?: return QueueResult(sourceUnavailable = chapters.size)
+-        val wasEmpty = queueState.value.isEmpty()
+         // Harmony: decide "already downloaded" from the download cache (what the chapter
+         // list shows) instead of probing storage. A folder the cache does not know about
+         // (interrupted finalisation, stale cache) is handled by downloadChapter, which
+@@ -396,7 +503,7 @@ class Downloader(
+             addAllToQueue(chaptersToQueue)
+ 
+             // Start downloader if needed
+-            if (autoStart && wasEmpty) {
++            if (autoStart && !isRunning) {
+                 val queuedDownloads = queueState.value.count { it.source !is UnmeteredSource }
+                 val maxDownloadsFromSource = queueState.value
+                     .groupBy { it.source }
+@@ -519,12 +626,17 @@ class Downloader(
+                     slots.acquire()
+                     // Released on completion, since a page canceled before it starts never runs its body
+                     launch(Dispatchers.IO) {
+-                        // Fetch image URL if necessary
+-                        if (page.imageUrl.isNullOrEmpty()) {
++                        // The existing numbered image can be reused even if its remote URL expired.
++                        val prefix = "%0${pageList.size.toString().length.coerceAtLeast(3)}d".format(Locale.ENGLISH, page.number)
++                        val exists = tmpDir.listFiles().orEmpty().any {
++                            it.isFile && it.length() > 0 && isDownloadedPageImage(it.name.orEmpty(), prefix)
++                        }
++                        if (!exists && page.imageUrl.isNullOrEmpty()) {
+                             page.status = Page.State.LoadPage
+                             try {
+                                 page.imageUrl = download.source.getImageUrl(page)
+                             } catch (e: Throwable) {
++                                if (e is CancellationException) throw e
+                                 page.status = Page.State.Error(e)
+                             }
+                         }
+@@ -618,27 +730,26 @@ class Downloader(
+      * @param tmpDir the temporary directory of the download.
+      */
+     private suspend fun getOrDownloadImage(page: Page, download: Download, tmpDir: UniFile) {
+-        // If the image URL is empty, do nothing
+-        if (page.imageUrl == null) {
+-            return
+-        }
+-
+         val digitCount = (download.pages?.size ?: 0).toString().length.coerceAtLeast(3)
+         val filename = "%0${digitCount}d".format(Locale.ENGLISH, page.number)
+ 
+         // Try to find the image file
+-        val imageFile = tmpDir.listFiles()?.firstOrNull {
+-            isDownloadedPageImage(it.name ?: return@firstOrNull false, filename)
++        val existingImages = tmpDir.listFiles().orEmpty().filter {
++            isDownloadedPageImage(it.name.orEmpty(), filename)
+         }
+ 
+         try {
++            existingImages.filter { it.isFile && it.length() == 0L }.forEach {
++                if (!it.delete()) throw IOException("Cannot replace an empty downloaded page")
++            }
++            val imageFile = existingImages.firstOrNull { it.isFile && it.length() > 0 }
+             // If the image is already downloaded, do nothing. Otherwise download from network
+             val file = when {
+                 imageFile != null -> imageFile
+-                chapterCache.isImageInCache(
++                download.chapter.id !in networkOnlyIds && page.imageUrl != null && chapterCache.isImageInCache(
+                     page.imageUrl!!,
+                 ) -> copyImageFromCache(chapterCache.getImageFile(page.imageUrl!!), tmpDir, filename)
+-                else -> downloadImage(page, download.source, tmpDir, filename)
++                else -> downloadImage(page, download, tmpDir, filename)
+             }
+ 
+             // When the page is ready, set page path, progress (just in case) and status
+@@ -664,7 +775,8 @@ class Downloader(
+      * @param tmpDir the temporary directory of the download.
+      * @param filename the filename of the image.
+      */
+-    private suspend fun downloadImage(page: Page, source: HttpSource, tmpDir: UniFile, filename: String): UniFile {
++    private suspend fun downloadImage(page: Page, download: Download, tmpDir: UniFile, filename: String): UniFile {
++        val source = download.source
+         page.status = Page.State.DownloadImage
+         page.progress = 0
+         return flow {
+@@ -672,28 +784,64 @@ class Downloader(
+                 ?: tmpDir.createFile("$filename.tmp")!!
+ 
+             val completedFile = try {
+-                source.getImage(page, file.length()).use {
+-                    it.body.source().countingInto(DownloadSpeedMeter).saveTo(
++                val previousLength = file.length()
++                source.getImage(page, previousLength).use {
++                    val append = try {
++                        DownloadItemControl.shouldAppend(it.code, it.header("Content-Range"), previousLength)
++                    } catch (error: IOException) {
++                        if (!file.delete()) throw IOException("Cannot discard an invalid partial page", error)
++                        throw error
++                    }
++                    val expectedLength = it.body.contentLength().takeIf { size -> size >= 0 }?.let { size ->
++                        size + if (append) previousLength else 0L
++                    }
++                    object : ForwardingSource(it.body.source().countingInto(DownloadSpeedMeter)) {
++                        override fun read(sink: Buffer, byteCount: Long): Long {
++                            val count = super.read(sink, byteCount)
++                            if (count > 0) download.recordNetworkBytes(count)
++                            return count
++                        }
++                    }.buffer().saveTo(
+                         // If the server supports partial downloads (HTTP 206),
+                         // append to the existing file.
+                         // Otherwise, start from scratch and overwrite the file.
+-                        stream = file.openOutputStream(it.code == 206),
++                        stream = file.openOutputStream(append),
+                     )
++                    kotlinx.coroutines.currentCoroutineContext().ensureActive()
++                    if (file.length() <= 0 || (expectedLength != null && file.length() != expectedLength)) {
++                        throw IOException("Incomplete downloaded page")
++                    }
++                    file.openInputStream().use { input ->
++                        if (ImageUtil.findImageType(input) == null) {
++                            if (!file.delete()) throw IOException("Cannot discard a non-image response")
++                            throw IOException("Downloaded response is not an image")
++                        }
++                    }
+                     val extension = getImageExtension(it, file)
+                     file.renameToOrCopy("$filename.$extension")
+                 }
+             } catch (e: HttpException) {
+-                if (e.code == 416) {
+-                    file.delete()
+-                }
++                if (e.code == 416 && !file.delete()) throw IOException("Cannot reset an invalid partial page", e)
+                 throw e
+             }
+             emit(completedFile)
+         }
+             // Retry 3 times, waiting 2, 4 and 8 seconds between attempts.
+-            .retryWhen { _, attempt ->
++            .retryWhen { error, attempt ->
++                if (error is CancellationException) throw error
+                 if (attempt < 3) {
+                     delay((2L shl attempt.toInt()).seconds)
++                    if (error is HttpException && error.code in listOf(401, 403, 404, 410)) {
++                        val fresh = source.getPageList(download.chapter.toSChapter()).getOrNull(page.index)
++                            ?: throw IOException("Refreshed page list is incomplete")
++                        val imageUrl = fresh.imageUrl?.takeIf { it.isNotBlank() } ?: source.getImageUrl(fresh)
++                        if (imageUrl != page.imageUrl) {
++                            tmpDir.findFile("$filename.tmp")?.let { partial ->
++                                if (!partial.delete()) throw IOException("Cannot reset a page after its address changed")
++                            }
++                        }
++                        page.imageUrl = imageUrl
++                    }
+                     true
+                 } else {
+                     false
+@@ -966,7 +1114,7 @@ class Downloader(
+             val queuedChapterIds = queue.mapTo(HashSet()) { it.chapter.id }
+             val toAdd = downloads.filter { it.chapter.id !in queuedChapterIds }
+             toAdd.forEach { download ->
+-                download.status = Download.State.QUEUE
++                if (download.status != Download.State.PAUSED) download.status = Download.State.QUEUE
+             }
+             store.addAll(toAdd)
+             queue + toAdd
+@@ -974,6 +1122,7 @@ class Downloader(
+     }
+ 
+     private fun removeFromQueue(download: Download) {
++        networkOnlyIds.remove(download.chapter.id)
+         _queueState.update {
+             store.remove(download)
+             if (download.status == Download.State.DOWNLOADING || download.status == Download.State.QUEUE) {
+@@ -1033,7 +1182,7 @@ class Downloader(
+                     download.status = Download.State.NOT_DOWNLOADED
+                 }
+             }
+-            downloads.forEach { it.status = Download.State.QUEUE }
++            downloads.forEach { if (it.status != Download.State.PAUSED) it.status = Download.State.QUEUE }
+             store.clear()
+             store.addAll(downloads)
+             downloads
+@@ -1054,7 +1203,7 @@ class Downloader(
+         edit()
+ 
+         if (wasRunning) {
+-            if (queueState.value.isEmpty()) stopLocked() else startLocked()
++            if (queueState.value.isEmpty()) stopLocked() else DownloadWorker.start(context)
+         }
+     }
+ 
+diff --git a/app/src/main/java/eu/kanade/tachiyomi/data/download/model/Download.kt b/app/src/main/java/eu/kanade/tachiyomi/data/download/model/Download.kt
+index 03f69efc3..2c475af43 100644
+--- a/app/src/main/java/eu/kanade/tachiyomi/data/download/model/Download.kt
++++ b/app/src/main/java/eu/kanade/tachiyomi/data/download/model/Download.kt
+@@ -1,14 +1,19 @@
+ package eu.kanade.tachiyomi.data.download.model
+ 
++import eu.kanade.tachiyomi.data.download.DownloadItemSpeed
+ import eu.kanade.tachiyomi.source.model.Page
+ import eu.kanade.tachiyomi.source.online.HttpSource
++import kotlinx.coroutines.flow.Flow
+ import kotlinx.coroutines.flow.MutableStateFlow
+ import kotlinx.coroutines.flow.asStateFlow
+ import kotlinx.coroutines.flow.combine
+ import kotlinx.coroutines.flow.debounce
+ import kotlinx.coroutines.flow.distinctUntilChanged
++import kotlinx.coroutines.flow.drop
+ import kotlinx.coroutines.flow.flatMapLatest
+ import kotlinx.coroutines.flow.flowOf
++import kotlinx.coroutines.flow.map
++import kotlinx.coroutines.flow.merge
+ import tachiyomi.domain.chapter.model.Chapter
+ import tachiyomi.domain.manga.model.Manga
+ import kotlin.time.Duration.Companion.milliseconds
+@@ -42,8 +47,11 @@ data class Download(
+     val statusFlow = _statusFlow.asStateFlow()
+     var status: State
+         get() = _statusFlow.value
++
++        @Synchronized
+         set(status) {
+             if (status != State.ERROR) error = null
++            if (status != State.DOWNLOADING) resetSpeed()
+             _statusFlow.value = status
+         }
+ 
+@@ -54,11 +62,41 @@ data class Download(
+     @Transient
+     var error: String? = null
+ 
++    @Synchronized
+     fun fail(message: String?) {
++        resetSpeed()
+         error = message?.takeIf { it.isNotBlank() }
+         _statusFlow.value = State.ERROR
+     }
+ 
++    @Transient
++    private val itemSpeed = DownloadItemSpeed()
++
++    @Transient
++    private val speedStateFlow = MutableStateFlow(0L)
++
++    @Transient
++    val speedBytesPerSecondFlow = speedStateFlow.asStateFlow()
++    val speedBytesPerSecond: Long get() = speedStateFlow.value
++
++    fun recordNetworkBytes(bytes: Long) = itemSpeed.addBytes(bytes)
++
++    @Synchronized
++    fun refreshSpeed() {
++        speedStateFlow.value = if (status == State.DOWNLOADING) itemSpeed.bytesPerSecond() else 0L
++    }
++
++    @Synchronized
++    fun resetSpeed() {
++        itemSpeed.reset()
++        speedStateFlow.value = 0L
++    }
++
++    fun progressUpdates(): Flow<Unit> = merge(
++        progressFlow.map { },
++        speedBytesPerSecondFlow.drop(1).map { },
++    )
++
+     @Transient
+     val progressFlow = _pagesFlow
+         .flatMapLatest { pages ->
+@@ -83,5 +121,6 @@ data class Download(
+         DOWNLOADING(2),
+         DOWNLOADED(3),
+         ERROR(4),
++        PAUSED(5),
+     }
+ }
+diff --git a/app/src/main/java/eu/kanade/tachiyomi/ui/download/DownloadAdapter.kt b/app/src/main/java/eu/kanade/tachiyomi/ui/download/DownloadAdapter.kt
+index 44ff8b110..fca107d70 100644
+--- a/app/src/main/java/eu/kanade/tachiyomi/ui/download/DownloadAdapter.kt
++++ b/app/src/main/java/eu/kanade/tachiyomi/ui/download/DownloadAdapter.kt
+@@ -22,6 +22,7 @@ class DownloadAdapter(val downloadItemListener: DownloadItemListener) : Flexible
+ 
+     interface DownloadItemListener {
+         fun onItemReleased(position: Int)
++        fun onToggleDownload(position: Int)
+         fun onMenuItemClick(position: Int, menuItem: MenuItem)
+     }
+ }
+diff --git a/app/src/main/java/eu/kanade/tachiyomi/ui/download/DownloadHolder.kt b/app/src/main/java/eu/kanade/tachiyomi/ui/download/DownloadHolder.kt
+index fa81b6f73..67419af28 100644
+--- a/app/src/main/java/eu/kanade/tachiyomi/ui/download/DownloadHolder.kt
++++ b/app/src/main/java/eu/kanade/tachiyomi/ui/download/DownloadHolder.kt
+@@ -1,7 +1,9 @@
+ package eu.kanade.tachiyomi.ui.download
+ 
++import android.text.format.Formatter
+ import android.view.View
+ import androidx.recyclerview.widget.ItemTouchHelper
++import androidx.recyclerview.widget.RecyclerView
+ import eu.davidea.viewholders.FlexibleViewHolder
+ import eu.kanade.tachiyomi.R
+ import eu.kanade.tachiyomi.data.download.model.Download
+@@ -25,6 +27,11 @@ class DownloadHolder(private val view: View, val adapter: DownloadAdapter) :
+     init {
+         setDragHandleView(binding.reorder)
+         binding.menu.setOnClickListener { it.post { showPopupMenu(it) } }
++        binding.toggleDownload.setOnClickListener {
++            if (bindingAdapterPosition != RecyclerView.NO_POSITION) {
++                adapter.downloadItemListener.onToggleDownload(bindingAdapterPosition)
++            }
++        }
+     }
+ 
+     private lateinit var download: Download
+@@ -60,7 +67,12 @@ class DownloadHolder(private val view: View, val adapter: DownloadAdapter) :
+      * Updates the progress bar of the download.
+      */
+     fun notifyProgress() {
+-        val pages = download.pages ?: return
++        binding.downloadProgress.isIndeterminate = false
++        val pages = download.pages
++        if (pages == null) {
++            binding.downloadProgress.progress = 0
++            return
++        }
+         if (binding.downloadProgress.max == 1) {
+             binding.downloadProgress.max = pages.size * 100
+         }
+@@ -72,13 +84,27 @@ class DownloadHolder(private val view: View, val adapter: DownloadAdapter) :
+      */
+     fun notifyDownloadedPages() {
+         val pages = download.pages
+-        binding.downloadProgressText.text = when {
++        val saved = pages?.let { "${download.downloadedImages}/${it.size}" }.orEmpty()
++        val label = when {
+             download.status == Download.State.ERROR -> {
+                 view.context.stringResource(MR.strings.download_notifier_title_error)
+             }
+-            pages == null -> ""
+-            else -> "${download.downloadedImages}/${pages.size}"
++            download.status == Download.State.PAUSED -> view.context.stringResource(MR.strings.harmony_download_paused)
++            else -> ""
++        }
++        val text = listOf(label, saved).filter(String::isNotEmpty).joinToString(" · ")
++        binding.downloadProgressText.text = if (download.status == Download.State.DOWNLOADING) {
++            val speed = Formatter.formatFileSize(view.context, download.speedBytesPerSecond.coerceAtLeast(0))
++            listOf(text, "$speed/s").filter(String::isNotEmpty).joinToString(" · ")
++        } else {
++            text
+         }
++        val canPause = download.status.value <= Download.State.DOWNLOADING.value
++        binding.toggleDownload.setImageResource(if (canPause) android.R.drawable.ic_media_pause else android.R.drawable.ic_media_play)
++        binding.toggleDownload.contentDescription = view.context.stringResource(
++            if (canPause) MR.strings.harmony_download_pause else MR.strings.harmony_download_resume,
++        )
++        binding.toggleDownload.isEnabled = download.status != Download.State.DOWNLOADED
+         // Harmony: error notifications are not shown inside 卓易通, so put the reason in the row itself.
+         val error = download.error.takeIf { download.status == Download.State.ERROR }
+         if (error != null) {
+@@ -105,9 +131,22 @@ class DownloadHolder(private val view: View, val adapter: DownloadAdapter) :
+     }
+ 
+     private fun showPopupMenu(view: View) {
++        if (bindingAdapterPosition == RecyclerView.NO_POSITION) return
+         view.popupMenu(
+             menuRes = R.menu.download_single,
+             initMenu = {
++                findItem(R.id.pause_download).apply {
++                    title = view.context.stringResource(MR.strings.harmony_download_pause)
++                    isVisible = download.status.value <= Download.State.DOWNLOADING.value
++                }
++                findItem(R.id.resume_download).apply {
++                    title = view.context.stringResource(MR.strings.harmony_download_resume)
++                    isVisible = download.status == Download.State.PAUSED || download.status == Download.State.ERROR
++                }
++                findItem(R.id.restart_download).apply {
++                    title = view.context.stringResource(MR.strings.harmony_download_restart)
++                    isVisible = download.status != Download.State.DOWNLOADED
++                }
+                 findItem(R.id.move_to_top).isVisible = bindingAdapterPosition > 1
+                 findItem(R.id.move_to_bottom).isVisible =
+                     bindingAdapterPosition != adapter.itemCount - 1
+diff --git a/app/src/main/java/eu/kanade/tachiyomi/ui/download/DownloadQueueViewModel.kt b/app/src/main/java/eu/kanade/tachiyomi/ui/download/DownloadQueueViewModel.kt
+index 52239932b..8953fa337 100644
+--- a/app/src/main/java/eu/kanade/tachiyomi/ui/download/DownloadQueueViewModel.kt
++++ b/app/src/main/java/eu/kanade/tachiyomi/ui/download/DownloadQueueViewModel.kt
+@@ -11,18 +11,13 @@ import eu.kanade.tachiyomi.R
+ import eu.kanade.tachiyomi.data.download.DownloadManager
+ import eu.kanade.tachiyomi.data.download.model.Download
+ import eu.kanade.tachiyomi.databinding.DownloadListBinding
+-import eu.kanade.tachiyomi.source.model.Page
+ import kotlinx.coroutines.Dispatchers
+ import kotlinx.coroutines.Job
+ import kotlinx.coroutines.flow.SharingStarted
+ import kotlinx.coroutines.flow.StateFlow
+ import kotlinx.coroutines.flow.WhileSubscribed
+ import kotlinx.coroutines.flow.collectLatest
+-import kotlinx.coroutines.flow.combine
+ import kotlinx.coroutines.flow.debounce
+-import kotlinx.coroutines.flow.distinctUntilChanged
+-import kotlinx.coroutines.flow.filterNotNull
+-import kotlinx.coroutines.flow.first
+ import kotlinx.coroutines.flow.flowOn
+ import kotlinx.coroutines.flow.map
+ import kotlinx.coroutines.flow.stateIn
+@@ -78,6 +73,17 @@ class DownloadQueueViewModel(
+             reorder(downloads)
+         }
+ 
++        override fun onToggleDownload(position: Int) {
++            val item = adapter?.getItem(position) as? DownloadItem ?: return
++            viewModelScope.launch {
++                if (item.download.status.value <= Download.State.DOWNLOADING.value) {
++                    downloadManager.pauseDownload(item.download)
++                } else if (item.download.status != Download.State.DOWNLOADED) {
++                    downloadManager.resumeDownload(item.download)
++                }
++            }
++        }
++
+         /**
+          * Called when the menu item of a download is pressed
+          *
+@@ -88,6 +94,9 @@ class DownloadQueueViewModel(
+             val item = adapter?.getItem(position) ?: return
+             if (item is DownloadItem) {
+                 when (menuItem.itemId) {
++                    R.id.pause_download -> viewModelScope.launch { downloadManager.pauseDownload(item.download) }
++                    R.id.resume_download -> viewModelScope.launch { downloadManager.resumeDownload(item.download) }
++                    R.id.restart_download -> viewModelScope.launch { downloadManager.restartDownload(item.download) }
+                     R.id.move_to_top, R.id.move_to_bottom -> {
+                         val headerItems = adapter?.headerItems ?: return
+                         val newDownloads = mutableListOf<Download>()
+@@ -195,18 +204,11 @@ class DownloadQueueViewModel(
+                 // Initial update of the downloaded pages
+                 onUpdateDownloadedPages(download)
+             }
+-            Download.State.DOWNLOADED -> {
++            else -> {
+                 cancelProgressJob(download)
+                 onUpdateProgress(download)
+                 onUpdateDownloadedPages(download)
+             }
+-            Download.State.ERROR -> {
+-                cancelProgressJob(download)
+-                onUpdateDownloadedPages(download)
+-            }
+-            else -> {
+-                /* unused */
+-            }
+         }
+     }
+ 
+@@ -217,13 +219,11 @@ class DownloadQueueViewModel(
+      */
+     private fun launchProgressJob(download: Download) {
+         val job = viewModelScope.launch {
+-            val pages = download.pagesFlow.filterNotNull().first()
+-            val progressFlows = pages.map(Page::progressFlow)
+-            combine(progressFlows, Array<Int>::sum)
+-                .distinctUntilChanged()
++            download.progressUpdates()
+                 .debounce(50.milliseconds)
+                 .collectLatest {
+                     onUpdateProgress(download)
++                    onUpdateDownloadedPages(download)
+                 }
+         }
+ 
+diff --git a/app/src/main/java/eu/kanade/tachiyomi/ui/manga/MangaViewModel.kt b/app/src/main/java/eu/kanade/tachiyomi/ui/manga/MangaViewModel.kt
+index a37db420b..9afd9cce3 100644
+--- a/app/src/main/java/eu/kanade/tachiyomi/ui/manga/MangaViewModel.kt
++++ b/app/src/main/java/eu/kanade/tachiyomi/ui/manga/MangaViewModel.kt
+@@ -637,6 +637,7 @@ class MangaViewModel(
+             LibraryPreferences.ChapterSwipeAction.Download -> {
+                 val downloadAction: ChapterDownloadAction = when (chapterItem.downloadState) {
+                     Download.State.ERROR,
++                    Download.State.PAUSED,
+                     Download.State.NOT_DOWNLOADED,
+                     -> ChapterDownloadAction.START_NOW
+                     Download.State.QUEUE,
+@@ -738,8 +739,11 @@ class MangaViewModel(
+         when (action) {
+             ChapterDownloadAction.START -> {
+                 startDownload(items.map { it.chapter }, false)
+-                if (items.any { it.downloadState == Download.State.ERROR }) {
+-                    downloadManager.startDownloads()
++                viewModelScope.launch {
++                    items.filter { it.downloadState == Download.State.ERROR || it.downloadState == Download.State.PAUSED }
++                        .forEach { item ->
++                            downloadManager.getQueuedDownloadOrNull(item.chapter.id)?.let { downloadManager.resumeDownload(it) }
++                        }
+                 }
+             }
+             ChapterDownloadAction.START_NOW -> {
+diff --git a/app/src/main/java/eu/kanade/tachiyomi/ui/updates/UpdatesViewModel.kt b/app/src/main/java/eu/kanade/tachiyomi/ui/updates/UpdatesViewModel.kt
+index 0b6bd6947..34f649eef 100644
+--- a/app/src/main/java/eu/kanade/tachiyomi/ui/updates/UpdatesViewModel.kt
++++ b/app/src/main/java/eu/kanade/tachiyomi/ui/updates/UpdatesViewModel.kt
+@@ -269,8 +269,10 @@ class UpdatesViewModel(
+             when (action) {
+                 ChapterDownloadAction.START -> {
+                     downloadChapters(items)
+-                    if (items.any { it.downloadStateProvider() == Download.State.ERROR }) {
+-                        downloadManager.startDownloads()
++                    items.filter {
++                        it.downloadStateProvider() == Download.State.ERROR || it.downloadStateProvider() == Download.State.PAUSED
++                    }.forEach { item ->
++                        downloadManager.getQueuedDownloadOrNull(item.update.chapterId)?.let { downloadManager.resumeDownload(it) }
+                     }
+                 }
+                 ChapterDownloadAction.START_NOW -> {
+diff --git a/app/src/main/res/layout/download_item.xml b/app/src/main/res/layout/download_item.xml
+index ca9851e53..db311652c 100644
+--- a/app/src/main/res/layout/download_item.xml
++++ b/app/src/main/res/layout/download_item.xml
+@@ -5,7 +5,7 @@
+     android:id="@+id/container"
+     android:layout_width="match_parent"
+     android:layout_height="wrap_content"
+-    app:cardBackgroundColor="?android:attr/colorBackground"
++    app:cardBackgroundColor="@android:color/transparent"
+     app:cardElevation="0dp"
+     app:cardForegroundColor="@color/draggable_card_foreground">
+ 
+@@ -38,7 +38,7 @@
+             android:ellipsize="end"
+             android:maxLines="1"
+             android:textAppearance="?attr/textAppearanceBodyMedium"
+-            app:layout_constraintEnd_toStartOf="@+id/download_progress_text"
++            app:layout_constraintEnd_toStartOf="@+id/toggle_download"
+             app:layout_constraintStart_toEndOf="@+id/reorder"
+             app:layout_constraintTop_toTopOf="parent"
+             tools:text="Manga title" />
+@@ -53,7 +53,7 @@
+             android:maxLines="1"
+             android:textAppearance="?attr/textAppearanceBodyMedium"
+             android:textSize="12sp"
+-            app:layout_constraintEnd_toStartOf="@+id/menu"
++            app:layout_constraintEnd_toStartOf="@+id/toggle_download"
+             app:layout_constraintStart_toStartOf="@+id/manga_full_title"
+             app:layout_constraintTop_toBottomOf="@+id/manga_full_title"
+             tools:text="Chapter Title" />
+@@ -65,23 +65,37 @@
+             android:layout_marginTop="8dp"
+             android:layout_marginBottom="4dp"
+             app:layout_constraintBottom_toBottomOf="parent"
+-            app:layout_constraintEnd_toStartOf="@+id/menu"
++            app:layout_constraintEnd_toStartOf="@+id/toggle_download"
+             app:layout_constraintStart_toEndOf="@+id/reorder"
+-            app:layout_constraintTop_toBottomOf="@+id/chapter_title" />
++            app:layout_constraintTop_toBottomOf="@+id/download_progress_text" />
+ 
+         <TextView
+             android:id="@+id/download_progress_text"
+-            android:layout_width="wrap_content"
++            android:layout_width="0dp"
+             android:layout_height="wrap_content"
+-            android:layout_toEndOf="@id/manga_full_title"
++            android:layout_marginTop="2dp"
++            android:ellipsize="end"
+             android:maxLines="1"
+             android:textAppearance="?attr/textAppearanceBodyMedium"
+             android:textColor="?android:textColorSecondary"
+             android:textSize="12sp"
+-            app:layout_constraintBottom_toBottomOf="@+id/manga_full_title"
++            app:layout_constraintEnd_toStartOf="@+id/toggle_download"
++            app:layout_constraintStart_toStartOf="@+id/manga_full_title"
++            app:layout_constraintTop_toBottomOf="@+id/chapter_title"
++            tools:text="25% · 128 MB · 2 MB/s" />
++
++        <ImageButton
++            android:id="@+id/toggle_download"
++            android:layout_width="40dp"
++            android:layout_height="48dp"
++            android:background="?attr/selectableItemBackgroundBorderless"
++            android:contentDescription="@string/action_download"
++            android:padding="8dp"
++            app:layout_constraintBottom_toBottomOf="parent"
+             app:layout_constraintEnd_toStartOf="@+id/menu"
+-            app:layout_constraintTop_toTopOf="@+id/manga_full_title"
+-            tools:text="0/10" />
++            app:layout_constraintTop_toTopOf="parent"
++            app:srcCompat="@android:drawable/ic_media_pause"
++            app:tint="?attr/colorOnBackground" />
+ 
+         <ImageButton
+             android:id="@+id/menu"
+diff --git a/app/src/main/res/menu/download_single.xml b/app/src/main/res/menu/download_single.xml
+index 1cf14ff0c..b9bc972a5 100644
+--- a/app/src/main/res/menu/download_single.xml
++++ b/app/src/main/res/menu/download_single.xml
+@@ -1,5 +1,8 @@
+ <?xml version="1.0" encoding="utf-8"?>
+ <menu xmlns:android="http://schemas.android.com/apk/res/android">
++    <item android:id="@+id/pause_download" android:title="@string/action_download" />
++    <item android:id="@+id/resume_download" android:title="@string/action_download" />
++    <item android:id="@+id/restart_download" android:title="@string/action_download" />
+ 
+     <item
+         android:id="@+id/move_to_top"
+diff --git a/app/src/test/java/eu/kanade/tachiyomi/data/download/NavigationChromeDownloadAudioPumpTest.kt b/app/src/test/java/eu/kanade/tachiyomi/data/download/NavigationChromeDownloadAudioPumpTest.kt
+new file mode 100644
+index 000000000..c6d849736
+--- /dev/null
++++ b/app/src/test/java/eu/kanade/tachiyomi/data/download/NavigationChromeDownloadAudioPumpTest.kt
+@@ -0,0 +1,126 @@
++package eu.kanade.tachiyomi.data.download
++
++import kotlinx.coroutines.CompletableDeferred
++import kotlinx.coroutines.CoroutineStart
++import kotlinx.coroutines.cancelAndJoin
++import kotlinx.coroutines.launch
++import kotlinx.coroutines.runBlocking
++import kotlinx.coroutines.withTimeout
++import org.junit.jupiter.api.Assertions.assertEquals
++import org.junit.jupiter.api.Assertions.assertTrue
++import org.junit.jupiter.api.Test
++import java.io.IOException
++import java.util.concurrent.atomic.AtomicInteger
++
++class NavigationChromeDownloadAudioPumpTest {
++    @Test
++    fun `cancellation closes the active audio output exactly once`() = runBlocking {
++        val writes = CompletableDeferred<Unit>()
++        val closed = AtomicInteger()
++        val failures = AtomicInteger()
++        val job = launch(start = CoroutineStart.UNDISPATCHED) {
++            DownloadAudioPump.run(create = {
++                object : DownloadAudioPump.Sink {
++                    override suspend fun write(): Int {
++                        writes.complete(Unit)
++                        return 1280
++                    }
++                    override fun close() {
++                        closed.incrementAndGet()
++                    }
++                }
++            }, onFailure = { failures.incrementAndGet() })
++        }
++        withTimeout(3000) { writes.await() }
++        job.cancelAndJoin()
++        assertEquals(1, closed.get())
++        assertEquals(0, failures.get())
++    }
++
++    @Test
++    fun `dead audio output is released before its replacement is opened`() = runBlocking {
++        val opened = AtomicInteger()
++        val closed = AtomicInteger()
++        val failure = AtomicInteger()
++        val recovered = CompletableDeferred<Unit>()
++        val job = launch {
++            DownloadAudioPump.run(create = {
++                val generation = opened.incrementAndGet()
++                if (generation == 2) assertEquals(1, closed.get())
++                object : DownloadAudioPump.Sink {
++                    override suspend fun write(): Int {
++                        if (generation == 1) return -6
++                        recovered.complete(Unit)
++                        return 1280
++                    }
++                    override fun close() {
++                        closed.incrementAndGet()
++                    }
++                }
++            }, onFailure = { failure.incrementAndGet() }, retryDelayMillis = 1)
++        }
++        try {
++            withTimeout(3000) { recovered.await() }
++            assertEquals(2, opened.get())
++            assertEquals(1, failure.get())
++        } finally {
++            job.cancelAndJoin()
++        }
++        assertEquals(2, closed.get())
++    }
++
++    @Test
++    fun `factory failure recovers without a phantom output to release`() = runBlocking {
++        val attempts = AtomicInteger()
++        val closed = AtomicInteger()
++        val recovered = CompletableDeferred<Unit>()
++        val job = launch {
++            DownloadAudioPump.run(create = {
++                if (attempts.incrementAndGet() == 1) throw IOException("synthetic audio init failure")
++                object : DownloadAudioPump.Sink {
++                    override suspend fun write(): Int {
++                        recovered.complete(Unit)
++                        return 1280
++                    }
++                    override fun close() {
++                        closed.incrementAndGet()
++                    }
++                }
++            }, onFailure = {}, retryDelayMillis = 1)
++        }
++        try {
++            withTimeout(3000) { recovered.await() }
++        } finally {
++            job.cancelAndJoin()
++        }
++        assertEquals(2, attempts.get())
++        assertEquals(1, closed.get())
++    }
++
++    @Test
++    fun `repeated zero writes rebuild a stalled output without spinning`() = runBlocking {
++        val opened = AtomicInteger()
++        val failures = AtomicInteger()
++        val recovered = CompletableDeferred<Unit>()
++        val job = launch {
++            DownloadAudioPump.run(create = {
++                val generation = opened.incrementAndGet()
++                object : DownloadAudioPump.Sink {
++                    override suspend fun write(): Int {
++                        if (generation == 1) return 0
++                        recovered.complete(Unit)
++                        return 1280
++                    }
++                    override fun close() = Unit
++                }
++            }, onFailure = { failures.incrementAndGet() }, retryDelayMillis = 1, zeroWriteLimit = 2)
++        }
++        try {
++            withTimeout(3000) { recovered.await() }
++        } finally {
++            job.cancelAndJoin()
++        }
++        assertEquals(2, opened.get())
++        assertTrue(failures.get() == 1)
++    }
++}
+diff --git a/app/src/test/java/eu/kanade/tachiyomi/data/download/NavigationChromeDownloadItemControlTest.kt b/app/src/test/java/eu/kanade/tachiyomi/data/download/NavigationChromeDownloadItemControlTest.kt
+new file mode 100644
+index 000000000..ad1e6deae
+--- /dev/null
++++ b/app/src/test/java/eu/kanade/tachiyomi/data/download/NavigationChromeDownloadItemControlTest.kt
+@@ -0,0 +1,96 @@
++package eu.kanade.tachiyomi.data.download
++
++import com.hippo.unifile.UniFile
++import io.mockk.every
++import io.mockk.mockk
++import io.mockk.verify
++import kotlinx.coroutines.CoroutineScope
++import kotlinx.coroutines.CoroutineStart
++import kotlinx.coroutines.Dispatchers
++import kotlinx.coroutines.SupervisorJob
++import kotlinx.coroutines.awaitCancellation
++import kotlinx.coroutines.cancelAndJoin
++import kotlinx.coroutines.launch
++import kotlinx.coroutines.runBlocking
++import kotlinx.coroutines.withTimeout
++import kotlinx.coroutines.yield
++import org.junit.jupiter.api.Assertions.assertEquals
++import org.junit.jupiter.api.Assertions.assertFalse
++import org.junit.jupiter.api.Assertions.assertThrows
++import org.junit.jupiter.api.Assertions.assertTrue
++import org.junit.jupiter.api.Test
++import java.io.IOException
++import java.util.concurrent.CountDownLatch
++import java.util.concurrent.TimeUnit
++
++class NavigationChromeDownloadItemControlTest {
++    @Test
++    fun `individual pause waits for blocking page IO without cancelling another chapter`() = runBlocking {
++        val owner = SupervisorJob()
++        val scope = CoroutineScope(owner + Dispatchers.IO)
++        val entered = CountDownLatch(1)
++        val release = CountDownLatch(1)
++        val exited = CountDownLatch(1)
++        val first = scope.launch {
++            entered.countDown()
++            try {
++                check(release.await(5, TimeUnit.SECONDS))
++            } finally {
++                exited.countDown()
++            }
++        }
++        val sibling = scope.launch(start = CoroutineStart.UNDISPATCHED) { awaitCancellation() }
++        try {
++            assertTrue(entered.await(3, TimeUnit.SECONDS))
++            val pausing = launch { DownloadItemControl.stop(first) }
++            withTimeout(3000) { while (!first.isCancelled) yield() }
++            assertFalse(pausing.isCompleted)
++            assertTrue(sibling.isActive)
++            release.countDown()
++            withTimeout(3000) { pausing.join() }
++            assertEquals(0L, exited.count)
++            assertTrue(first.isCompleted)
++            assertTrue(sibling.isActive)
++        } finally {
++            release.countDown()
++            owner.cancelAndJoin()
++        }
++    }
++
++    @Test
++    fun `restart deletes generated temporary pages and preserves unknown files and directories`() {
++        val directory = mockk<UniFile>()
++        val files = listOf("001.jpg", "002.tmp", "003__001.jpg", "notes.txt", "final.cbz", "folder")
++            .associateWith { name ->
++                mockk<UniFile>().also { file ->
++                    every { file.name } returns name
++                    every { file.isFile } returns (name != "folder")
++                    every { file.delete() } returns true
++                }
++            }
++        every { directory.listFiles() } returns files.values.toTypedArray()
++        DownloadItemControl.clearTemporaryPages(directory)
++        listOf("001.jpg", "002.tmp", "003__001.jpg").forEach { name -> verify(exactly = 1) { files.getValue(name).delete() } }
++        listOf("notes.txt", "final.cbz", "folder").forEach { name -> verify(exactly = 0) { files.getValue(name).delete() } }
++    }
++
++    @Test
++    fun `failed temporary page deletion aborts restart instead of writing another copy`() {
++        val file = mockk<UniFile> {
++            every { name } returns "001.jpg"
++            every { isFile } returns true
++            every { delete() } returns false
++        }
++        val directory = mockk<UniFile> { every { listFiles() } returns arrayOf(file) }
++        assertThrows(IOException::class.java) { DownloadItemControl.clearTemporaryPages(directory) }
++    }
++
++    @Test
++    fun `partial page append requires a matching Content Range and full responses overwrite`() {
++        assertTrue(DownloadItemControl.shouldAppend(206, "bytes 100-199/200", 100))
++        assertFalse(DownloadItemControl.shouldAppend(200, null, 100))
++        listOf(null, "bytes 0-199/200", "bytes 100-99/200", "bytes 100-199/150", "not a range").forEach {
++            assertThrows(IOException::class.java) { DownloadItemControl.shouldAppend(206, it, 100) }
++        }
++    }
++}
+diff --git a/app/src/test/java/eu/kanade/tachiyomi/data/download/NavigationChromeDownloadItemSpeedTest.kt b/app/src/test/java/eu/kanade/tachiyomi/data/download/NavigationChromeDownloadItemSpeedTest.kt
+new file mode 100644
+index 000000000..9399fcbe7
+--- /dev/null
++++ b/app/src/test/java/eu/kanade/tachiyomi/data/download/NavigationChromeDownloadItemSpeedTest.kt
+@@ -0,0 +1,34 @@
++package eu.kanade.tachiyomi.data.download
++
++import eu.kanade.tachiyomi.data.download.model.Download
++import io.mockk.mockk
++import org.junit.jupiter.api.Assertions.assertEquals
++import org.junit.jupiter.api.Test
++
++class NavigationChromeDownloadItemSpeedTest {
++    @Test
++    fun `each chapter has independent speed and paused failed or completed chapters reset it`() {
++        val first = Download(mockk(), mockk(), mockk())
++        val second = Download(mockk(), mockk(), mockk())
++        first.status = Download.State.DOWNLOADING
++        second.status = Download.State.DOWNLOADING
++        first.recordNetworkBytes(3000)
++        second.recordNetworkBytes(9000)
++        first.refreshSpeed()
++        second.refreshSpeed()
++        assertEquals(1000L, first.speedBytesPerSecond)
++        assertEquals(3000L, second.speedBytesPerSecondFlow.value)
++        first.status = Download.State.PAUSED
++        assertEquals(0L, first.speedBytesPerSecond)
++        assertEquals(3000L, second.speedBytesPerSecond)
++        second.fail("test")
++        assertEquals(0L, second.speedBytesPerSecond)
++        first.status = Download.State.DOWNLOADING
++        first.recordNetworkBytes(6000)
++        first.refreshSpeed()
++        assertEquals(2000L, first.speedBytesPerSecond)
++        first.status = Download.State.DOWNLOADED
++        assertEquals(0L, first.speedBytesPerSecond)
++        assertEquals(listOf(0, 1, 2, 3, 4, 5), Download.State.entries.map { it.value })
++    }
++}
+diff --git a/app/src/test/java/eu/kanade/tachiyomi/data/download/NavigationChromeDownloadPausedStoreTest.kt b/app/src/test/java/eu/kanade/tachiyomi/data/download/NavigationChromeDownloadPausedStoreTest.kt
+new file mode 100644
+index 000000000..eb32c6842
+--- /dev/null
++++ b/app/src/test/java/eu/kanade/tachiyomi/data/download/NavigationChromeDownloadPausedStoreTest.kt
+@@ -0,0 +1,127 @@
++package eu.kanade.tachiyomi.data.download
++
++import android.content.Context
++import android.content.SharedPreferences
++import eu.kanade.tachiyomi.data.download.model.Download
++import eu.kanade.tachiyomi.source.online.HttpSource
++import io.mockk.Runs
++import io.mockk.coEvery
++import io.mockk.every
++import io.mockk.just
++import io.mockk.mockk
++import kotlinx.coroutines.runBlocking
++import kotlinx.serialization.json.Json
++import kotlinx.serialization.json.int
++import kotlinx.serialization.json.jsonObject
++import kotlinx.serialization.json.jsonPrimitive
++import org.junit.jupiter.api.Assertions.assertEquals
++import org.junit.jupiter.api.Assertions.assertFalse
++import org.junit.jupiter.api.Assertions.assertTrue
++import org.junit.jupiter.api.Test
++import tachiyomi.domain.chapter.interactor.GetChapter
++import tachiyomi.domain.chapter.model.Chapter
++import tachiyomi.domain.manga.interactor.GetManga
++import tachiyomi.domain.manga.model.Manga
++import tachiyomi.domain.source.service.SourceManager
++
++class NavigationChromeDownloadPausedStoreTest {
++    @Test
++    fun `legacy JSON without paused restores as queued in its stored order`() = runBlocking {
++        val fixture = Fixture()
++        fixture.values["1"] = "{\"mangaId\":1,\"chapterId\":1,\"order\":20}"
++        fixture.values["2"] = "{\"mangaId\":2,\"chapterId\":2,\"order\":10}"
++        val restored = fixture.store.restore()
++        assertEquals(listOf(2L, 1L), restored.map { it.chapter.id })
++        assertTrue(restored.all { it.status == Download.State.QUEUE })
++        assertTrue(fixture.values.isEmpty())
++    }
++
++    @Test
++    fun `paused state survives process restore and later resume without changing initial queue order`() = runBlocking {
++        val fixture = Fixture()
++        val first = fixture.download(1).apply { status = Download.State.PAUSED }
++        val second = fixture.download(2)
++        fixture.store.addAll(listOf(first, second))
++        val restored = fixture.store.restore()
++        assertEquals(listOf(1L, 2L), restored.map { it.chapter.id })
++        assertEquals(listOf(Download.State.PAUSED, Download.State.QUEUE), restored.map { it.status })
++        fixture.store.addAll(restored)
++        val order = fixture.order("1")
++        restored.first().status = Download.State.QUEUE
++        fixture.store.update(restored.first())
++        assertEquals(order, fixture.order("1"))
++        assertTrue(fixture.store.restore().all { it.status == Download.State.QUEUE })
++    }
++
++    @Test
++    fun `updating a pause preserves order and never revives an entry removed during cancellation`() = runBlocking {
++        val fixture = Fixture()
++        val first = fixture.download(1)
++        val second = fixture.download(2)
++        fixture.store.addAll(listOf(first, second))
++        val originalOrder = fixture.order("1")
++        first.status = Download.State.PAUSED
++        fixture.store.update(first)
++        assertEquals(originalOrder, fixture.order("1"))
++        assertEquals(listOf("1", "2"), fixture.values.keys.toList())
++        fixture.store.remove(first)
++        fixture.store.update(first)
++        assertFalse(fixture.values.containsKey("1"))
++        val restored = fixture.store.restore()
++        assertEquals(listOf(2L), restored.map { it.chapter.id })
++    }
++
++    private class Fixture {
++        val values = linkedMapOf<String, String>()
++        private val preferences = mockk<SharedPreferences>()
++        private val editor = mockk<SharedPreferences.Editor>()
++        private val source = mockk<HttpSource>()
++        private val sourceManager = mockk<SourceManager>()
++        private val getManga = mockk<GetManga>()
++        private val getChapter = mockk<GetChapter>()
++        private val mangas = mutableMapOf<Long, Manga>()
++        private val episodes = mutableMapOf<Long, Chapter>()
++        val store: DownloadStore
++
++        init {
++            every { preferences.edit() } returns editor
++            every { preferences.all } answers { values.toMap() }
++            every { preferences.getString(any(), any()) } answers { values[firstArg<String>()] ?: secondArg<String?>() }
++            every { editor.putString(any(), any()) } answers {
++                values[firstArg()] = secondArg()
++                editor
++            }
++            every { editor.remove(any()) } answers {
++                values.remove(firstArg<String>())
++                editor
++            }
++            every { editor.clear() } answers {
++                values.clear()
++                editor
++            }
++            every { editor.apply() } just Runs
++            every { sourceManager.get(1L) } returns source
++            coEvery { getManga.await(any<Long>()) } answers { manga(firstArg()) }
++            coEvery { getChapter.await(any<Long>()) } answers { episode(firstArg()) }
++            val context = mockk<Context> {
++                every { getSharedPreferences("active_downloads", Context.MODE_PRIVATE) } returns preferences
++            }
++            store = DownloadStore(context, sourceManager, Json, getManga, getChapter)
++        }
++
++        private fun manga(value: Long): Manga = mangas.getOrPut(value) {
++            mockk<Manga>().also { manga ->
++                every { manga.id } returns value
++                every { manga.source } returns 1L
++            }
++        }
++
++        private fun episode(value: Long): Chapter = episodes.getOrPut(value) {
++            mockk<Chapter>().also { episode -> every { episode.id } returns value }
++        }
++
++        fun download(id: Long): Download = Download(source, manga(id), episode(id)).apply { status = Download.State.QUEUE }
++
++        fun order(key: String): Int = Json.parseToJsonElement(values.getValue(key)).jsonObject.getValue("order").jsonPrimitive.int
++    }
++}
+diff --git a/i18n/src/commonMain/moko-resources/base/strings.xml b/i18n/src/commonMain/moko-resources/base/strings.xml
+index e332918bc..1396bafc6 100644
+--- a/i18n/src/commonMain/moko-resources/base/strings.xml
++++ b/i18n/src/commonMain/moko-resources/base/strings.xml
+@@ -1107,4 +1107,8 @@
+     <string name="donationCampaign.paragraph3">Regardless, Mihon will continue to be maintained by me and the volunteers, and it will stay open source.</string>
+     <string name="donationCampaign.contactPlatform">Discord</string>
+     <string name="donationCampaign.dismiss">Dismiss</string>
++    <string name="harmony_download_paused">已暂停</string>
++    <string name="harmony_download_resume">继续下载</string>
++    <string name="harmony_download_pause">暂停下载</string>
++    <string name="harmony_download_restart">重新下载</string>
+ </resources>
