@@ -1,0 +1,23 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Xun2202 <98207886+Xun2202@users.noreply.github.com>
+Date: Tue, 17 Nov 2026 16:38:17 +0000
+Subject: [PATCH] downloads: adapt paused-store fixture to suspend source
+ lookup
+
+---
+ .../data/download/NavigationChromeDownloadPausedStoreTest.kt    | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/app/src/test/java/eu/kanade/tachiyomi/data/download/NavigationChromeDownloadPausedStoreTest.kt b/app/src/test/java/eu/kanade/tachiyomi/data/download/NavigationChromeDownloadPausedStoreTest.kt
+index eb32c6842..8bc0cc7b0 100644
+--- a/app/src/test/java/eu/kanade/tachiyomi/data/download/NavigationChromeDownloadPausedStoreTest.kt
++++ b/app/src/test/java/eu/kanade/tachiyomi/data/download/NavigationChromeDownloadPausedStoreTest.kt
+@@ -100,7 +100,7 @@ class NavigationChromeDownloadPausedStoreTest {
+                 editor
+             }
+             every { editor.apply() } just Runs
+-            every { sourceManager.get(1L) } returns source
++            coEvery { sourceManager.get(1L) } returns source
+             coEvery { getManga.await(any<Long>()) } answers { manga(firstArg()) }
+             coEvery { getChapter.await(any<Long>()) } answers { episode(firstArg()) }
+             val context = mockk<Context> {

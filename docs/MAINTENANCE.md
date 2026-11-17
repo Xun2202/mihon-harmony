@@ -1145,3 +1145,7 @@ gh release list --repo Xun2202/mihon-harmony
 ### 0104：并发任务明确按键查找
 
 首轮45的44126090488在生产Kotlin编译时拦下ConcurrentHashMap的`in`运算符（可能调用containsValue）；改明确containsKey，不改变调度语义。该轮未发Release，保留回归断言后重新构建45。
+
+### 0105：暂停持久化夹具适配协程来源查询
+
+第二轮44127172010生产编译通过，在新增测试发现Mihon SourceManager.get为suspend，与Anikku不同；夹具使用coEvery，其余断言保留。未发版45，不改变生产代码。
