@@ -101,3 +101,4 @@
 0101-browse-reentrant-continuation-and-restored-host.patch
 0102-download-storage-recovery-and-proxy-compatibility.patch
 0103-download-background-and-item-controls.patch
+0104-download-worker-key-lookup.patch

@@ -1,0 +1,22 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Xun2202 <98207886+Xun2202@users.noreply.github.com>
+Date: Tue, 17 Nov 2026 16:33:04 +0000
+Subject: [PATCH] downloads: look up concurrent jobs by chapter key explicitly
+
+---
+ .../main/java/eu/kanade/tachiyomi/data/download/Downloader.kt   | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/app/src/main/java/eu/kanade/tachiyomi/data/download/Downloader.kt b/app/src/main/java/eu/kanade/tachiyomi/data/download/Downloader.kt
+index f8b76ec04..347a0a645 100644
+--- a/app/src/main/java/eu/kanade/tachiyomi/data/download/Downloader.kt
++++ b/app/src/main/java/eu/kanade/tachiyomi/data/download/Downloader.kt
+@@ -412,7 +412,7 @@ class Downloader(
+                     queue.firstOrNull {
+                         it.source == source &&
+                             (it.status == Download.State.QUEUE || it.status == Download.State.DOWNLOADING) &&
+-                            it.chapter.id !in downloadJobs && it.chapter.id !in controlledIds
++                            !downloadJobs.containsKey(it.chapter.id) && it.chapter.id !in controlledIds
+                     }
+                 }
+                 .filterNotNull()

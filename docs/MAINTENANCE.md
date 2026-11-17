@@ -1141,3 +1141,7 @@ gh release list --repo Xun2202/mihon-harmony
 
 - Mihon为图片页下载，没有视频FFmpeg链；继续保留已完成编号页并重取页列表，重下绕过章节图片缓存，旧临时页仅在匹配Content-Range且完整时追加，地址更新不拼接不同内容。已完成库内文件不删；首次作品父目录创建短互斥，网络下载仍并行。
 - 单项任务以chapterId管理，控制范围外任务继续；取消/删除路径不把其余项目遗留成暂停。新增真实等待写入退出、Range完整性与临时目录保护、速度和暂停持久化回归。Anikku的HLS媒体专用修复不移植，Animeko为独立KMP下载链，本轮不改。
+
+### 0104：并发任务明确按键查找
+
+首轮45的44126090488在生产Kotlin编译时拦下ConcurrentHashMap的`in`运算符（可能调用containsValue）；改明确containsKey，不改变调度语义。该轮未发Release，保留回归断言后重新构建45。
