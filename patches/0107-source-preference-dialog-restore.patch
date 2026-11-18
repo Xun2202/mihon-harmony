@@ -1,0 +1,134 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Xun2202 <98207886+Xun2202@users.noreply.github.com>
+Date: Wed, 18 Nov 2026 14:51:22 +0000
+Subject: [PATCH] sources: discard unavailable preference dialogs before
+ binding restored views
+
+AndroidX can restore a source preference dialog before its extension screen contains the target preference. Remove the stale dialog before STARTED and preserve dialogs whose preference is present. Shared with anikku-harmony 0116.
+---
+ .../ui/base/activity/BaseActivity.kt          |  5 ++
+ .../details/SourcePreferenceDialogRestore.kt  | 28 +++++++++
+ ...ChromeSourcePreferenceDialogRestoreTest.kt | 57 +++++++++++++++++++
+ 3 files changed, 90 insertions(+)
+ create mode 100644 app/src/main/java/eu/kanade/tachiyomi/ui/browse/extension/details/SourcePreferenceDialogRestore.kt
+ create mode 100644 app/src/test/java/eu/kanade/tachiyomi/ui/browse/extension/details/NavigationChromeSourcePreferenceDialogRestoreTest.kt
+
+diff --git a/app/src/main/java/eu/kanade/tachiyomi/ui/base/activity/BaseActivity.kt b/app/src/main/java/eu/kanade/tachiyomi/ui/base/activity/BaseActivity.kt
+index c97fd7bbb..589c998f2 100644
+--- a/app/src/main/java/eu/kanade/tachiyomi/ui/base/activity/BaseActivity.kt
++++ b/app/src/main/java/eu/kanade/tachiyomi/ui/base/activity/BaseActivity.kt
+@@ -7,6 +7,7 @@ import eu.kanade.tachiyomi.ui.base.delegate.SecureActivityDelegate
+ import eu.kanade.tachiyomi.ui.base.delegate.SecureActivityDelegateImpl
+ import eu.kanade.tachiyomi.ui.base.delegate.ThemingDelegate
+ import eu.kanade.tachiyomi.ui.base.delegate.ThemingDelegateImpl
++import eu.kanade.tachiyomi.ui.browse.extension.details.removeUnavailableSourcePreferenceDialog
+ import eu.kanade.tachiyomi.util.system.prepareTabletUiContext
+ import mihon.app.di.appGraph
+ 
+@@ -23,5 +24,9 @@ open class BaseActivity :
+     override fun onCreate(savedInstanceState: Bundle?) {
+         applyAppTheme(this)
+         super.onCreate(savedInstanceState)
++        if (savedInstanceState != null) {
++            // Remove orphaned plug-in dialogs before onStart binds their preference views.
++            supportFragmentManager.removeUnavailableSourcePreferenceDialog()
++        }
+     }
+ }
+diff --git a/app/src/main/java/eu/kanade/tachiyomi/ui/browse/extension/details/SourcePreferenceDialogRestore.kt b/app/src/main/java/eu/kanade/tachiyomi/ui/browse/extension/details/SourcePreferenceDialogRestore.kt
+new file mode 100644
+index 000000000..3171010fa
+--- /dev/null
++++ b/app/src/main/java/eu/kanade/tachiyomi/ui/browse/extension/details/SourcePreferenceDialogRestore.kt
+@@ -0,0 +1,28 @@
++package eu.kanade.tachiyomi.ui.browse.extension.details
++
++import androidx.fragment.app.FragmentManager
++import androidx.fragment.app.commitNow
++import androidx.preference.EditTextPreference
++import androidx.preference.EditTextPreferenceDialogFragmentCompat
++import androidx.preference.ListPreference
++import androidx.preference.ListPreferenceDialogFragmentCompat
++import androidx.preference.MultiSelectListPreference
++import androidx.preference.MultiSelectListPreferenceDialogFragmentCompat
++import androidx.preference.PreferenceDialogFragmentCompat
++
++// PreferenceFragmentCompat uses this tag for its built-in preference dialogs.
++private const val PREFERENCE_DIALOG_TAG = "androidx.preference.PreferenceFragment.DIALOG"
++
++@Suppress("DEPRECATION")
++internal fun FragmentManager.removeUnavailableSourcePreferenceDialog() {
++    val dialog = findFragmentByTag(PREFERENCE_DIALOG_TAG) as? PreferenceDialogFragmentCompat ?: return
++    if (dialog.targetFragment !is SourcePreferencesFragment) return
++
++    val preferenceAvailable = when (dialog) {
++        is EditTextPreferenceDialogFragmentCompat -> dialog.preference is EditTextPreference
++        is ListPreferenceDialogFragmentCompat -> dialog.preference is ListPreference
++        is MultiSelectListPreferenceDialogFragmentCompat -> dialog.preference is MultiSelectListPreference
++        else -> return
++    }
++    if (!preferenceAvailable) commitNow { remove(dialog) }
++}
+diff --git a/app/src/test/java/eu/kanade/tachiyomi/ui/browse/extension/details/NavigationChromeSourcePreferenceDialogRestoreTest.kt b/app/src/test/java/eu/kanade/tachiyomi/ui/browse/extension/details/NavigationChromeSourcePreferenceDialogRestoreTest.kt
+new file mode 100644
+index 000000000..bc5b84d7f
+--- /dev/null
++++ b/app/src/test/java/eu/kanade/tachiyomi/ui/browse/extension/details/NavigationChromeSourcePreferenceDialogRestoreTest.kt
+@@ -0,0 +1,57 @@
++package eu.kanade.tachiyomi.ui.browse.extension.details
++
++import androidx.fragment.app.Fragment
++import androidx.fragment.app.FragmentManager
++import androidx.fragment.app.FragmentTransaction
++import androidx.preference.EditTextPreference
++import androidx.preference.EditTextPreferenceDialogFragmentCompat
++import io.mockk.Runs
++import io.mockk.every
++import io.mockk.just
++import io.mockk.mockk
++import io.mockk.verify
++import org.junit.jupiter.api.Test
++
++@Suppress("DEPRECATION")
++class NavigationChromeSourcePreferenceDialogRestoreTest {
++    private val manager = mockk<FragmentManager>()
++    private val dialog = mockk<EditTextPreferenceDialogFragmentCompat>()
++
++    init {
++        every { manager.findFragmentByTag("androidx.preference.PreferenceFragment.DIALOG") } returns dialog
++        every { dialog.targetFragment } returns mockk<SourcePreferencesFragment>()
++    }
++
++    @Test
++    fun `missing input preference removes the restored dialog immediately`() {
++        val transaction = mockk<FragmentTransaction>()
++        every { dialog.preference } returns null
++        every { manager.beginTransaction() } returns transaction
++        every { transaction.remove(dialog) } returns transaction
++        every { transaction.commitNow() } just Runs
++
++        manager.removeUnavailableSourcePreferenceDialog()
++
++        verify(exactly = 1) { transaction.remove(dialog) }
++        verify(exactly = 1) { transaction.commitNow() }
++    }
++
++    @Test
++    fun `available input preference keeps the restored dialog`() {
++        every { dialog.preference } returns mockk<EditTextPreference>()
++
++        manager.removeUnavailableSourcePreferenceDialog()
++
++        verify(exactly = 0) { manager.beginTransaction() }
++    }
++
++    @Test
++    fun `dialog owned by another fragment is left alone`() {
++        every { dialog.targetFragment } returns mockk<Fragment>()
++
++        manager.removeUnavailableSourcePreferenceDialog()
++
++        verify(exactly = 0) { dialog.preference }
++        verify(exactly = 0) { manager.beginTransaction() }
++    }
++}

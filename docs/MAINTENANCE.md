@@ -1158,3 +1158,8 @@ gh release list --repo Xun2202/mihon-harmony
 - 音频helper与生成器、恢复/WAVE回归在Mi/An逐字节一致；波形检查标准头、完整时长与全零样本，原4项取消/资源释放/重建回归适配native检查。最终必要CI/签名/版本和更新索引见档案；后台效果由真机安装反馈闭环。
 
 - Mihon只同步已确认相同的保活实现；图片下载没有FFmpeg/TS链，不移植媒体封装补丁。Animeko独立KMP/mediamp及静态helper已复核，本次无其同设备新反馈，不强套下载会话。
+
+## 2026-11-18：来源设置弹窗恢复（0107）
+
+- Anikku 61 日志确认 AndroidX 输入弹窗早于来源设置项恢复，Activity 启动绑定时崩溃。Mihon 同样使用 PreferenceFragmentCompat 且异步填充插件设置；与 Anikku 0116 共用存在性和类型保护，在 Activity STARTED 前撤掉已失效的内置弹窗。可用弹窗与已保存配置保留。
+- 回归覆盖缺失输入项立即移除、仍可用的对话框保留和非来源弹窗。Anikku 0115 的本地视频分片留存仅适用于其 HLS 下载，Mihon 的漫画图片队列沿用现有路径。
