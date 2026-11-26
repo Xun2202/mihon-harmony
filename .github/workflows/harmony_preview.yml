@@ -184,11 +184,20 @@ jobs:
         # -Penable-updater 打开 BuildConfig.UPDATER_ENABLED, 否则 App 不会检查更新.
         run: |
           bash "$GITHUB_WORKSPACE/scripts/check-scroll-report.sh" "$PWD"
-          ./gradlew :core:common:testDebugUnitTest --tests '*UniFileExtensionsTest' \
+          python3 "$GITHUB_WORKSPACE/scripts/with-test-syncyomi.py" ./gradlew :core:common:testDebugUnitTest --tests '*UniFileExtensionsTest' \
             :presentation-core:testDebugUnitTest \
             --tests '*NavigationChrome*' --tests '*Timeline*Test' --tests '*PanoramaAutoColumnsTest' --tests '*PanoramaMasonryLayoutTest' --tests '*PanoramaMasonryFlingTest.a coast from the content survives and a coast from the thumb does not' \
-            :app:testDebugUnitTest --tests '*NavigationChrome*' \
+            :app:testDebugUnitTest --tests '*NavigationChrome*' --tests '*MangaSync*' --tests '*SyncYomi*' \
             -Penable-updater --stacktrace
+          python3 - <<'PY'
+          from pathlib import Path
+          import xml.etree.ElementTree as ET
+
+          report, = Path("app/build/test-results/testDebugUnitTest").glob("TEST-*MangaSyncRoundTripTest.xml")
+          suite = ET.parse(report).getroot()
+          if int(suite.get("tests")) < 2 or int(suite.get("skipped")):
+              raise SystemExit("The two-library SyncYomi round trip did not run")
+          PY
           ./gradlew "assemble${BUILD_TYPE^}" -Penable-updater --stacktrace
 
       - name: Print navigation regression failures
